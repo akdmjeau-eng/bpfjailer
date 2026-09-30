@@ -1,0 +1,36 @@
+# A template unit because bpfjsrv.socket sets Accept=yes: systemd instantiates
+# one of these per connection, with %i naming the peer.
+[Unit]
+Description=bpfjailer enrollment request %i
+Requires=bpfjsrv.socket
+After=bpfjsrv.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bpfjsrv
+
+# The accepted socket arrives on stdin. Output has to be pinned to the journal
+# rather than left to default: StandardOutput= inherits from StandardInput=,
+# which would send every diagnostic bpfjsrv writes into the client's socket and
+# corrupt the reply.
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+
+# Reading another task's pidfd and writing the pinned maps under the bpffs both
+# need more than an unprivileged process has.
+User=root
+CapabilityBoundingSet=CAP_BPF CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=CAP_BPF CAP_SYS_ADMIN CAP_SYS_PTRACE
+
+# Enrollment is a handful of map updates against an already-loaded jailer.
+# Anything past this is a client that stopped talking mid-request.
+TimeoutStartSec=10s
+
+# The pin tree is the only thing bpfjsrv writes, and /run/bpfj is where its
+# socket lives; nothing else on the host is its business.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX

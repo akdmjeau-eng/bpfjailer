@@ -1,0 +1,594 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#include "bpfj/enforce/Pods.h"
+
+#include <bpf/bpf.h>
+#include <dirent.h>
+#include <sys/random.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+
+#include "bpfj/enforce/bpf/enroll.skel.h"
+#include "bpfj/lib/Fd.h"
+#include "bpfj/lib/ScopeGuard.h"
+#include "bpfj/libbpf-cpp/BpfLink.h"
+#include "bpfj/libbpf-cpp/BpfSkel.h"
+
+namespace bpfjailer {
+
+namespace {
+
+constexpr std::string_view kPodMap = "bpfj_pod_map";
+constexpr std::string_view kTaskMap = "bpfj_task_map";
+constexpr std::string_view kReplaceFrozenMap = "bpfj_replace_frozen";
+constexpr std::string_view kActiveEnrollsMap = "bpfj_active_enrolls";
+
+using pins::openPinnedMap;
+
+struct ActiveEnroll {
+  Fd map;
+  std::uint32_t pid = 0;
+};
+
+// Task storage is keyed by pidfd at the syscall boundary, and pidfd_open() only
+// accepts a thread group leader -- the granularity the jailer enrolls at.
+[[nodiscard]] Expected<Fd> openPidFd(pid_t pid) noexcept {
+  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+  if (fd < 0) {
+    return makeUnexpected(
+        makeErrnoError("failed to open pidfd for pid ", std::to_string(pid)));
+  }
+
+  return Fd(fd);
+}
+
+[[nodiscard]] Expected<bpfj_uuid> makeUuid4() noexcept {
+  bpfj_uuid uuid{};
+  if (::getrandom(uuid.uuid, sizeof(uuid.uuid), 0) !=
+      static_cast<ssize_t>(sizeof(uuid.uuid))) {
+    return makeUnexpected(makeErrnoError("failed to generate a pod uuid"));
+  }
+
+  // Version 4, variant 1, matching bpfj_make_uuid4() on the BPF side.
+  uuid.uuid[6] = (uuid.uuid[6] & 0x0f) | 0x40;
+  uuid.uuid[8] = (uuid.uuid[8] & 0x3f) | 0x80;
+
+  return uuid;
+}
+
+[[nodiscard]] Expected<> checkNotFrozen(const PinConfig& cfg) noexcept {
+  auto frozen = openPinnedMap(cfg, kReplaceFrozenMap);
+  if (!frozen) {
+    return makeUnexpected(frozen.error());
+  }
+
+  const std::uint32_t slot = 0;
+  std::uint8_t value = 0;
+  if (::bpf_map_lookup_elem(frozen->get(), &slot, &value) != 0) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read the replace state from ",
+        cfg.mapPath(kReplaceFrozenMap)));
+  }
+
+  if (value != 0) {
+    return makeUnexpected(makeError(
+        std::errc::device_or_resource_busy,
+        "jailer replace is in progress; retry the enrollment once it finishes"));
+  }
+
+  return unit;
+}
+
+[[nodiscard]] Expected<ActiveEnroll> registerActiveEnroll(
+    const PinConfig& cfg) noexcept {
+  auto active = openPinnedMap(cfg, kActiveEnrollsMap);
+  if (!active) {
+    return makeUnexpected(active.error());
+  }
+
+  const std::uint32_t pid = static_cast<std::uint32_t>(::getpid());
+  constexpr std::uint8_t kInFlight = 1;
+  if (::bpf_map_update_elem(active->get(), &pid, &kInFlight, BPF_NOEXIST) !=
+      0) {
+    if (errno == EEXIST) {
+      return makeUnexpected(makeError(
+          std::errc::device_or_resource_busy,
+          "pid ",
+          std::to_string(pid),
+          " already has an enrollment in flight"));
+    }
+
+    return makeUnexpected(makeErrnoError(
+        "failed to register an in-flight enrollment for pid ",
+        std::to_string(pid)));
+  }
+
+  return ActiveEnroll{.map = std::move(*active), .pid = pid};
+}
+
+template <std::size_t N>
+[[nodiscard]] Expected<>
+setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
+  if (src.size() >= N) {
+    return makeUnexpected(makeError(
+        std::errc::value_too_large,
+        what,
+        " must be at most ",
+        std::to_string(N - 1),
+        " characters"));
+  }
+
+  std::memcpy(dst, src.data(), src.size());
+  dst[src.size()] = '\0';
+
+  return unit;
+}
+
+/// @brief Add `uuid` to `pid`, either on its leader alone or on every thread,
+/// through a task iterator loaded, run and thrown away. The process, pod,
+/// thread mode and caller are compiled into that object rather than passed
+/// through a map, so two enrollments can run at once and the BPF side can drop
+/// the caller's in-flight marker before a self-enrollment loses bpf(2).
+[[nodiscard]] Expected<std::uint32_t> enrollTasks(
+    const PinConfig& cfg,
+    pid_t pid,
+    const bpfj_uuid& uuid,
+    Threads threads,
+    std::uint32_t callerPid) noexcept {
+  auto created = bpfj::libbpf::BpfSkel<enroll_bpf>::create();
+  if (!created) {
+    return makeUnexpected(created.error());
+  }
+  auto& skel = *created.value();
+
+  // Before load(), which is when rodata is frozen.
+  skel.rodata().bpfj_enroll_tgid = pid;
+  skel.rodata().bpfj_enroll_caller_pid = static_cast<pid_t>(callerPid);
+  skel.rodata().bpfj_enroll_all_threads = threads == Threads::All ? 1 : 0;
+  skel.rodata().bpfj_enroll_uuid = uuid;
+
+  // Adopted from the jailer's pins, so this writes the running jailer's state
+  // rather than a private copy.
+  if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = skel.load(); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  // By hand rather than skel.attach(), so the link can carry a link_info with
+  // task.pid set and the kernel walks only that process's threads.
+  auto prog = skel.getProg("bpfj_enroll_threads");
+  if (!prog) {
+    return makeUnexpected(makeError(
+        std::errc::no_such_file_or_directory, "no enroll iterator program"));
+  }
+
+  union bpf_iter_link_info linfo{};
+  linfo.task.pid = static_cast<__u32>(pid);
+
+  LIBBPF_OPTS(bpf_iter_attach_opts, opts);
+  opts.link_info = &linfo;
+  opts.link_info_len = sizeof(linfo);
+
+  auto link = prog->attachIter(&opts);
+  if (!link) {
+    return makeUnexpected(link.error());
+  }
+
+  // Deliberately unpinned: the walk is over by the time this returns.
+  if (auto res = link->iter(); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  return skel.bss().bpfj_enroll_count;
+}
+
+/// @brief Resolve `vars` against `varMap` and write them into `dst`, all of
+/// them before any is written, so a request naming one unpublished variable
+/// is refused whole.
+[[nodiscard]] Expected<> setVars(
+    bpfj_var_array& dst,
+    std::span<const PodVar> vars,
+    const Fd& varMap) noexcept {
+  if (vars.size() > BPFJ_VAR_MAX) {
+    return makeUnexpected(makeError(
+        std::errc::value_too_large,
+        "a pod holds at most ",
+        std::to_string(BPFJ_VAR_MAX),
+        " variables, got ",
+        std::to_string(vars.size())));
+  }
+
+  bpfj_var_array staged{};
+  for (const PodVar& var : vars) {
+    auto id = lookupVarId(varMap, var.name);
+    if (!id) {
+      return makeUnexpected(id.error());
+    }
+
+    for (std::uint8_t i = 0; i < staged.count; ++i) {
+      if (staged.vars[i].id == *id) {
+        return makeUnexpected(makeError(
+            std::errc::invalid_argument,
+            "variable ",
+            var.name,
+            " is set twice"));
+      }
+    }
+
+    // StrVarParser's cap, restated so an oversized value is named as the
+    // problem rather than silently truncated into the pod.
+    if (var.value.size() > BPFJ_VAR_VAL_LEN - 2) {
+      return makeUnexpected(makeError(
+          std::errc::value_too_large,
+          "value of variable ",
+          var.name,
+          " must be at most ",
+          std::to_string(BPFJ_VAR_VAL_LEN - 2),
+          " characters"));
+    }
+
+    const int res = bpfj_var_set(
+        &staged.vars[staged.count],
+        *id,
+        BPFJ_VAR_TYPE_STR,
+        var.value.data(),
+        static_cast<__u8>(var.value.size()));
+    if (res != 0) {
+      return makeUnexpected(
+          makeError(std::errc(-res), "failed to set variable ", var.name));
+    }
+
+    staged.count++;
+  }
+
+  dst = staged;
+  return unit;
+}
+
+[[nodiscard]] Expected<bpfj_pod> makePod(
+    std::string_view roleId,
+    std::string_view userId) noexcept {
+  bpfj_pod pod{};
+
+  if (auto res = setId(pod.role_id.id, roleId, "role"); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = setId(pod.user_id.id, userId, "user id"); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  auto uuid = makeUuid4();
+  if (!uuid) {
+    return makeUnexpected(uuid.error());
+  }
+  pod.uuid = *uuid;
+
+  auto now = monotonicNs();
+  if (!now) {
+    return makeUnexpected(now.error());
+  }
+  pod.creation_time_ns = *now;
+
+  pod.enrollment_source = BPFJ_ENROLL_CLIENT;
+
+  return pod;
+}
+
+/// @brief Read `pid`'s jail membership; an unjailed task reads back as an
+/// empty bpfj_pid_data rather than an error.
+[[nodiscard]] Expected<bpfj_pid_data>
+readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
+  bpfj_pid_data pidData{};
+  const int key = pidFd.get();
+  if (::bpf_map_lookup_elem(taskMap.get(), &key, &pidData) == 0) {
+    return pidData;
+  }
+
+  if (errno != ENOENT) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read jail membership of pid ", std::to_string(pid)));
+  }
+
+  return bpfj_pid_data{.version = BPFJ_PID_DATA_VERSION};
+}
+
+struct UuidLess {
+  bool operator()(const bpfj_uuid& lhs, const bpfj_uuid& rhs) const noexcept {
+    return std::memcmp(lhs.uuid, rhs.uuid, sizeof(lhs.uuid)) < 0;
+  }
+};
+
+// A uuid get_next_key handed back that bpfj_pod_map no longer held by lookup
+// time. It stays in the index so the wrap check below sees the key.
+constexpr std::size_t kDropped = static_cast<std::size_t>(-1);
+
+/// @brief The thread group ids /proc currently lists.
+[[nodiscard]] Expected<std::vector<pid_t>> runningPids() noexcept {
+  DIR* dir = ::opendir("/proc");
+  if (dir == nullptr) {
+    return makeUnexpected(makeErrnoError("failed to open /proc"));
+  }
+
+  std::vector<pid_t> pids;
+  while (const struct dirent* entry = ::readdir(dir)) {
+    // /proc holds one numeric directory per thread group, alongside named
+    // entries that are not processes.
+    char* end = nullptr;
+    const long value = std::strtol(entry->d_name, &end, 10);
+    if (end == entry->d_name || *end != '\0' || value <= 0) {
+      continue;
+    }
+
+    pids.push_back(static_cast<pid_t>(value));
+  }
+
+  ::closedir(dir);
+
+  return pids;
+}
+
+} // namespace
+
+Expected<bpfj_uuid> enrollPod(
+    const PinConfig& cfg,
+    std::string_view roleId,
+    std::string_view userId,
+    std::span<const PodVar> vars,
+    pid_t pid,
+    Threads threads) noexcept {
+  auto active = registerActiveEnroll(cfg);
+  if (!active) {
+    return makeUnexpected(active.error());
+  }
+  auto release = makeGuard(
+      [&] { (void)::bpf_map_delete_elem(active->map.get(), &active->pid); });
+
+  if (auto res = checkNotFrozen(cfg); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  auto podMap = openPinnedMap(cfg, kPodMap);
+  if (!podMap) {
+    return makeUnexpected(podMap.error());
+  }
+
+  auto taskMap = openPinnedMap(cfg, kTaskMap);
+  if (!taskMap) {
+    return makeUnexpected(taskMap.error());
+  }
+
+  auto pidFd = openPidFd(pid);
+  if (!pidFd) {
+    return makeUnexpected(pidFd.error());
+  }
+
+  auto pidData = readPidData(*taskMap, *pidFd, pid);
+  if (!pidData) {
+    return makeUnexpected(pidData.error());
+  }
+
+  // Before the pod is created, so a refused enrollment leaves no unreferenced
+  // pod behind.
+  if (pidData->num_pods >= BPFJ_MAX_POD_PER_PID) {
+    return makeUnexpected(makeError(
+        std::errc::value_too_large,
+        "pid ",
+        std::to_string(pid),
+        " is already in the maximum of ",
+        std::to_string(BPFJ_MAX_POD_PER_PID),
+        " pods"));
+  }
+
+  auto pod = makePod(roleId, userId);
+  if (!pod) {
+    return makeUnexpected(pod.error());
+  }
+
+  // The iterator takes one reference per task it enrolls and leaves the pod
+  // owned by nobody if it reaches none.
+  pod->refs = 0;
+
+  // Opened only when there is something to resolve, so enrolling without
+  // variables still works against a jail attached before bpfj_var_map was
+  // part of the pin tree.
+  if (!vars.empty()) {
+    auto varMap = openVarMap(cfg);
+    if (!varMap) {
+      return makeUnexpected(varMap.error());
+    }
+
+    if (auto res = setVars(pod->var_array, vars, *varMap); !res) {
+      return makeUnexpected(res.error());
+    }
+  }
+
+  const bpfj_uuid uuid = pod->uuid;
+  const bpfj_pod& podValue = *pod;
+  if (::bpf_map_update_elem(podMap->get(), &uuid, &podValue, BPF_NOEXIST) !=
+      0) {
+    return makeUnexpected(makeErrnoError("failed to create pod"));
+  }
+
+  // So a failed enrollment does not hold a bpfj_pod_map slot forever.
+  const auto dropPod = [&] {
+    (void)::bpf_map_delete_elem(podMap->get(), &uuid);
+  };
+
+  auto enrolled = enrollTasks(
+      cfg, pid, uuid, threads, static_cast<std::uint32_t>(::getpid()));
+  if (!enrolled) {
+    dropPod();
+    return makeUnexpected(enrolled.error());
+  }
+
+  if (*enrolled == 0) {
+    dropPod();
+    return makeUnexpected(makeError(
+        std::errc::no_such_process,
+        "no task of pid ",
+        std::to_string(pid),
+        " could be enrolled"));
+  }
+
+  release.dismiss();
+  return uuid;
+}
+
+Expected<std::vector<bpfj_pod>> listPods(
+    const PinConfig& cfg,
+    pid_t pid) noexcept {
+  auto taskMap = openPinnedMap(cfg, kTaskMap);
+  if (!taskMap) {
+    return makeUnexpected(taskMap.error());
+  }
+
+  auto pidFd = openPidFd(pid);
+  if (!pidFd) {
+    return makeUnexpected(pidFd.error());
+  }
+
+  auto pidData = readPidData(*taskMap, *pidFd, pid);
+  if (!pidData) {
+    return makeUnexpected(pidData.error());
+  }
+
+  auto podMap = openPinnedMap(cfg, kPodMap);
+  if (!podMap) {
+    return makeUnexpected(podMap.error());
+  }
+
+  // Clamped, since num_pods comes from a map BPF writes concurrently and
+  // nothing else bounds the read of pod_uuids.
+  const std::uint8_t count =
+      std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
+
+  std::vector<bpfj_pod> pods;
+  pods.reserve(count);
+  for (std::uint8_t i = 0; i < count; ++i) {
+    const bpfj_uuid uuid = pidData->pod_uuids[i];
+    bpfj_pod pod{};
+    if (::bpf_map_lookup_elem(podMap->get(), &uuid, &pod) != 0) {
+      // Two maps read one after the other, so a pod can be released between
+      // them; report the ones still there.
+      continue;
+    }
+
+    pods.push_back(pod);
+  }
+
+  return pods;
+}
+
+Expected<std::vector<PodMembers>> listAllPods(const PinConfig& cfg) noexcept {
+  auto podMap = openPinnedMap(cfg, kPodMap);
+  if (!podMap) {
+    return makeUnexpected(podMap.error());
+  }
+
+  auto taskMap = openPinnedMap(cfg, kTaskMap);
+  if (!taskMap) {
+    return makeUnexpected(taskMap.error());
+  }
+
+  std::vector<PodMembers> members;
+  std::map<bpfj_uuid, std::size_t, UuidLess> index;
+
+  bpfj_uuid curr{};
+  bpfj_uuid next{};
+  const void* from = nullptr;
+  while (::bpf_map_get_next_key(podMap->get(), from, &next) == 0) {
+    // Deleting the key the walk resumes from restarts it at the first key, so
+    // a uuid arriving twice means the walk wrapped rather than advanced.
+    auto [entry, inserted] = index.emplace(next, kDropped);
+    if (!inserted) {
+      break;
+    }
+
+    bpfj_pod pod{};
+    if (::bpf_map_lookup_elem(podMap->get(), &next, &pod) == 0) {
+      entry->second = members.size();
+      members.push_back(PodMembers{.pod = pod, .pids = {}});
+    }
+
+    curr = next;
+    from = &curr;
+  }
+
+  auto pids = runningPids();
+  if (!pids) {
+    return makeUnexpected(pids.error());
+  }
+
+  for (const pid_t pid : *pids) {
+    auto pidFd = openPidFd(pid);
+    if (!pidFd) {
+      // Exited between /proc and here, which contributes nothing either way.
+      continue;
+    }
+
+    auto pidData = readPidData(*taskMap, *pidFd, pid);
+    if (!pidData) {
+      continue;
+    }
+
+    const std::uint8_t count =
+        std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
+    for (std::uint8_t i = 0; i < count; ++i) {
+      const auto entry = index.find(pidData->pod_uuids[i]);
+      if (entry != index.end() && entry->second != kDropped) {
+        members[entry->second].pids.push_back(pid);
+      }
+    }
+  }
+
+  // bpfj_pod_map is a hash, so the walk arrives in an order that means nothing
+  // and changes between runs. Oldest first is stable.
+  std::sort(
+      members.begin(), members.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.pod.creation_time_ns != rhs.pod.creation_time_ns) {
+          return lhs.pod.creation_time_ns < rhs.pod.creation_time_ns;
+        }
+        return UuidLess{}(lhs.pod.uuid, rhs.pod.uuid);
+      });
+
+  return members;
+}
+
+std::string uuidToString(const bpfj_uuid& uuid) noexcept {
+  static constexpr char kHex[] = "0123456789abcdef";
+
+  std::string out;
+  out.reserve(POD_UUID_LEN - 1);
+  for (std::size_t i = 0; i < BPFJ_UUID_BYTES; ++i) {
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      out.push_back('-');
+    }
+
+    out.push_back(kHex[uuid.uuid[i] >> 4]);
+    out.push_back(kHex[uuid.uuid[i] & 0x0f]);
+  }
+
+  return out;
+}
+
+Expected<std::int64_t> monotonicNs() noexcept {
+  struct timespec ts{};
+  if (::clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return makeUnexpected(makeErrnoError("failed to read CLOCK_MONOTONIC"));
+  }
+
+  return static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+}
+
+} // namespace bpfjailer

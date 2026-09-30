@@ -1,0 +1,30 @@
+# One role, opened to unprivileged callers and restricted once they are in it.
+#
+# `unpriv-enroll: true` is what lets a process that is not root take this role
+# through bpfjsrv. Without it the enrollment is refused and only root can ask,
+# which is the default for every role that says nothing.
+#
+# The four restrictions below:
+#
+#   no-bpf:  the role may not call bpf(2) at all. This is what stops a shell in
+#            the jail deleting its own entry from the jailer's maps and walking
+#            out, so it is the one that makes the rest mean anything. An empty
+#            `bpf:` would not do it -- that confines the role to the objects
+#            its own role owns, and the jailer's maps are owned by no role
+#            here, which leaves them ungated.
+#   kill:    the role may signal only inside its own pod.
+#   ptrace:  the role may attach only inside its own pod.
+#   enroll:  bpfjsrv may add no further role to a process in this one, not
+#            even another `sandbox` pod, so the jail cannot be widened or its
+#            pod slots used up from inside.
+#
+# `kill`, `ptrace` and `enroll` are written empty, with nothing under them.
+# Leaving a key out entirely says something different -- see RolePolicy in
+# bpfj/policy/Policy.h.
+roles:
+  sandbox:
+    unpriv-enroll: true
+    no-bpf: true
+    kill:
+    ptrace:
+    enroll:

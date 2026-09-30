@@ -1,0 +1,65 @@
+# BpfJailer
+
+## Overview
+
+BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. The policy decides per role which binaries must be fs-verity signed, which roles it may kill, ptrace, open BPF objects of, and write the fs-verity keyring of. See README.md for the user facing overview.
+
+## Layout
+
+- bpfj/ is the core library. bpfj/enforce/ holds the jailer and the enforcers, with their BPF programs in bpfj/enforce/bpf/. bpfj/policy/ parses the YAML policy, bpfj/fsverity/ handles signatures and keyrings, and bpfj/libbpf-cpp/ has C++ helpers for working with BPF, which you should use and extend as needed.
+- ctl/ builds bpfjctl, the general purpose tool: `attach`, `replace`, `check`, `detach`, `enroll`, `wrap`, `show`, `list`. Subcommands live in ctl/commands/ and are routed by ctl/Dispatch.cpp.
+- cmd/ builds bpfjcmd, which is bpfjctl with its args statically baked in (argv is never read) and optionally a baked policy (`make cmd CMD_POLICY=...`), which puts the policy under the signature rather than only the path it would be read from. The `-compiled` commands (`attach-compiled`, `replace-compiled`, `check-compiled`) are the ones that read it; their path-taking twins are unchanged. This lets the binary be fully statically linked and signed, so it is validated in one go when run.
+- srv/ builds bpfjsrv, a socket activated server that performs unprivileged enrollment into roles with `unpriv-enroll: true`, subject to the caller's current roles' `enroll` lists. client/ builds bpfjclient, which must only depend on libc and srv/Client.h.
+- tests/ is the bpfjtest suite, and tests/verity/Makefile builds the signed fixtures for the fs-verity tests.
+- examples/ has end to end scripts for a signed bpfjcmd and for unprivileged enrollment.
+- yaml/ is mini-yaml, vendored and kept as close to upstream as possible.
+
+## Building and testing
+
+`make` builds build/bpfjctl, `make test` builds and runs bpfjtest, and `make config` prints the resolved toolchain. Requires clang, bpftool, a C++20 compiler, libbpf and libkeyutils.
+
+BpfJailer is only tested on 6.16+ kernels and support for anything older is not guaranteed. Kernel features available from 6.16 may be used freely, without fallbacks for older kernels.
+
+Run `make test` as your user, not under sudo: it builds unprivileged and only escalates the test binary, while `sudo make` leaves build/ owned by root.
+
+bpfjtest must run as root. Each test body runs in a forked child with its own mount namespace and private bpffs, so tests cannot collide on pin paths and a failed ASSERT can simply end the process. There is no filter for running a single test.
+
+Tests run several at a time, `-j N` or `BPFJTEST_JOBS` wide, defaulting to half the cores capped at 8 — past that the failure rate rises without getting faster. What makes it safe is not the namespaces, since BPF LSM programs are attached host-wide and see every task on the box: it is that a task no tree enrolled carries no roles, so one test's enforcers abstain on another's processes. `TEST_EXCLUSIVE` runs a test alone, after the rest, for one where that does not hold — exec-time enrollment is the case to watch, because `bpfj_enroll_from_xattr` makes every loaded tree read the policy xattr off a binary and enroll it. Reach for `-j1` when a failure might be cross-talk; the ordering is then exactly what it was before threading.
+
+Tests that need fs-verity use the harness's disposable ext4 image on a loop device. EdenFS checkouts support neither fs-verity nor user xattrs, so never try to sign or enable verity on files in the source tree.
+
+`STATIC=1` cannot be combined with `SANITIZE=...`. Use a separate `BUILD=build-asan` directory for sanitized builds.
+
+The bpfj/ libraries with BUCK targets are also compiled into the closed source jailer in fbcode/bpfjailer, which reaches them through `-Ibpfjailer_oss` and substitutes a few headers from fbcode/bpfjailer/oss_shim. When changing them, also run `buck build fbcode//bpfjailer/...`.
+
+## Policy semantics
+
+For `kill`, `ptrace`, `bpf`, `keyring` and `enroll`, an absent key, an empty key and a list mean different things: absent is unrestricted, empty confines the role to its own pod or its own role's objects (for `enroll`, to no new role at all), and a list adds the roles named. Preserve this three way distinction (the `has*` flags in bpfj/policy/Policy.h) in any new gate.
+
+Every walk over a task's roles requires each configured role to permit, so one denial denies; unconfigured roles abstain. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
+
+`no-bpf: true` denies bpf(2) entirely and is the only thing that stops a jailed process with CAP_BPF from editing the jailer's maps; an empty `bpf:` is not a substitute.
+
+`override-stacked: true` makes the enforcers stop at that role when walking an actor's roles newest first, so it can grant what the roles under it deny. It must never short circuit the walk over a target's roles, the target side of the kill and ptrace gates.
+
+## Rules
+
+Comments should be 1 sentence unless absolutely necessary.
+
+Every source file must start with the header `Copyright (c) Meta Platforms, Inc. and affiliates.` in the file's comment syntax, after the shebang if there is one. Never add it to the vendored files under yaml/, which carry only their upstream MIT notice.
+
+The project is MIT licensed. BPF programs must declare `char LICENSE[] SEC("license") = "Dual MIT/GPL";`, which the kernel treats as GPL compatible.
+
+Always check changes with make test, and write new tests as needed.
+
+Never leave BpfJailer eBPF programs pinned and running after testing.
+
+## Tips
+
+For eBPF verifier debugging, use constructs like bpf_for/bpf_repeat for loops to avoid blowing the instruction limit. Nesting them is safe, including through an `__always_inline` helper that hides one: the macro declares its `struct bpf_iter_num` in the `for`-init clause, so an inner expansion shadows the outer rather than sharing it, and the verifier tracks each by its own stack slot. What nesting does cost is 8 bytes of the 512 byte stack per live iterator and more verifier state against the instruction limit, both of which fail loudly. Place large data structures off the stack because it is only 512 bytes. Use global (non-static) functions, which are verified separately, to reduce instruction count. Global functions must return void, int, or long, and are limited in what kinds of pointers can be passed in. Arena pointers can be passed freely (__arg_arena). Kernel pointers may require __arg_trusted or __arg_untrusted to verify correctly. Copying the pointer into a u64 or placing it in a map that can be accessed within the function is a useful escape hatch as well. There is __arg_nonnull if you want to avoid a null check.
+
+Avoid percpu maps in sleepable eBPF hooks. They can be clobbered by other eBPF hooks sharing the same map executing on the same CPU during suspension. Instead use arena memory (BPFJ_HEAP_ALLOC, or BPFJ_HEAP_ALLOC_GUARD for RAII), or ringbuffers. For const values just use global variables.
+
+The BPF arena needs kernel 6.9+. bpfj_heap_enabled lets the verifier prune every arena branch when it is false, but only the closed source tree ever clears it, so the open source tree currently requires an arena capable kernel. Keep arena use behind that gate anyway (see bpfj/lib/bpf/heap.h).
+
+Arena memory is mmaped to userspace, while other maps require an update syscall. Use this as needed.

@@ -1,0 +1,55 @@
+# Template. build.sh replaces the placeholder line below with the minted
+# certificate and writes the result to $WORK/policy.yaml. The same file is loaded by the
+# bootstrap attach and compiled into bpfjcmd, so both halves agree by
+# construction.
+#
+# Two roles, and the shape of each is load-bearing.
+#
+# `floor` is the base role, so every process on the host is in it. It names no
+# certificate, which leaves execs unchecked -- a base role with
+# `enforce-binary-certs` would demand a signature from every binary on the
+# host, which is not what this example is about.
+#
+# `floor` restricts every process on the host to the BPF objects `floor`
+# itself owns. It is written as an empty `bpf:` rather than left out so that
+# the restriction is stated rather than inherited.
+#
+# `untracked-bpf` is what keeps that from meaning the opposite. Configuring a
+# role for bpf is also what makes it take ownership of what it creates, and a
+# base role is held by every process on the host -- so without this `floor`
+# would come to own every BPF object on the machine, the restriction would be
+# to the whole host, and `bpfjailer` could not reach the jailer's own maps.
+#
+# `bpfjailer` is the role a helper enters through `bpfjctl enroll`.
+#
+#   override-stacked  this role answers on its own. A task that execs the
+#                     signed binary holds [floor, bpfjailer]; every enforcer
+#                     walks that newest first and stops here, so `floor` gets
+#                     no say over what the upgrade binary may do.
+#   enforce-binary-certs
+#                     no binary may take this role without a signature from
+#                     the key below, over its fs-verity digest.
+#   min-seq:          the lowest signed sequence number the role still accepts.
+#                     A valid signature below it is refused, so a binary can be
+#                     retired without changing the key that signed it.
+#   bpf:              written empty: may call bpf(2), and reaches only the
+#                     objects its own role owns. Those are the jailer's.
+#   keyring:          written empty: may rewrite its own role's keyring,
+#                     which is what a replace does when it reloads the
+#                     fs-verity enforcer, and no other role's.
+base-role: floor
+certs:
+  signer: |
+@CERT@
+roles:
+  floor:
+    bpf:
+    untracked-bpf: true
+    keyring:
+  bpfjailer:
+    override-stacked: true
+    enforce-binary-certs:
+      - signer
+    min-seq: @CURRENT_SEQ@
+    bpf:
+    keyring:

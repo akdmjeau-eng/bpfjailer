@@ -1,0 +1,227 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#pragma once
+
+#include "bpfj/enforce/bpf/types.h"
+#include "bpfj/var/bpf/var.h"
+
+// The jail membership maps, shared by every BPF object in the open source
+// jailer. Each including object gets its own definition and the pin is what
+// joins them, so a definition that drifts fails pin adoption rather than
+// silently splitting the jail in two. These layouts must also match
+// bpfjailer/enforce/bpf/maps.h, the ABI the internal tree shares.
+
+// Which pods a task belongs to. Every task carries its own entry, threads
+// included, unlike the internal jailer's leader-only model
+// (bpf_enforcer_constraints.md), so a thread that execs keeps its entry through
+// de_thread() and the task carrying the jail never dies under the survivor.
+struct {
+  __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __type(key, int);
+  __type(value, struct bpfj_pid_data);
+} bpfj_task_map SEC(".maps");
+
+// The pods themselves, keyed by the uuid held in bpfj_pid_data. Resized by
+// userspace at load time.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 1);
+  __type(key, struct bpfj_uuid);
+  __type(value, struct bpfj_pod);
+} bpfj_pod_map SEC(".maps");
+
+// The roles an unprivileged caller is allowed to enroll itself in, from each
+// role's `unpriv-enroll` key; present means allowed, absent means root only.
+// bpfjsrv serves an abstract socket anyone in the network namespace can reach,
+// so this map and not the socket's permissions is what decides. Sized outright
+// rather than resized at load, because both skeletons have to agree on
+// max_entries for pin adoption.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, BPFJ_MAX_UNPRIV_ROLES);
+  __type(key, struct bpfj_role_id);
+  __type(value, __u8);
+} bpfj_unpriv_enroll_map SEC(".maps");
+
+// The roles that terminate a pod-stack walk, from each role's
+// `override-stacked` key. Keyed on the role rather than the pod, since the
+// flag is a property of the policy, and sized outright like the map above.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, BPFJ_MAX_UNPRIV_ROLES);
+  __type(key, struct bpfj_role_id);
+  __type(value, __u8);
+} bpfj_pod_override_map SEC(".maps");
+
+// A userspace-only flag raised while `replace` is copying membership out of
+// this tree, so bpfjctl enroll, wrap and bpfjsrv refuse to add pods the new
+// tree would miss. A one-slot array rather than rodata because the tree being
+// replaced and the tree replacing it can disagree.
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, __u8);
+} bpfj_replace_frozen SEC(".maps");
+
+// Userspace enrollments currently in flight, keyed by their process id. A
+// replace raises bpfj_replace_frozen and then waits for this map to empty, so
+// an enrollment already past the flag check still finishes before the copy.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 1024);
+  __type(key, __u32);
+  __type(value, __u8);
+} bpfj_active_enrolls SEC(".maps");
+
+// bpfj_var_map comes in from bpfj/var/bpf/var.h above, but belongs in this
+// header's list: a bpfj_var carries a numeric id rather than its name, so the
+// pod variables in bpfj_pod_map only mean anything next to it.
+
+// A pod is owned by the task-map entries that name it, one reference per uuid,
+// so it outlives its enroller for as long as some descendant is still jailed.
+// Nothing else removes a pod, and several CPUs write the counter at once.
+
+static __always_inline void bpfj_pod_refs_inc(struct bpfj_pod* pod) {
+  __sync_fetch_and_add(&pod->refs, 1);
+}
+
+static __always_inline void bpfj_pod_refs_dec(struct bpfj_pod* pod) {
+  // The pre-subtraction value, so 1 is the last reference; re-reading
+  // pod->refs would let two concurrent putters both decide they were last.
+  if (__sync_fetch_and_sub(&pod->refs, 1) <= 1) {
+    bpf_map_delete_elem(&bpfj_pod_map, &pod->uuid);
+  }
+}
+
+/// Whether two pod uuids name the same pod. Zero when they do, as memcmp.
+static __always_inline int bpfj_uuid_cmp(
+    const struct bpfj_uuid* a,
+    const struct bpfj_uuid* b) {
+  const __u64* a_i = (const __u64*)a->uuid;
+  const __u64* b_i = (const __u64*)b->uuid;
+  return !(a_i[0] == b_i[0] && a_i[1] == b_i[1]);
+}
+
+/// Whether two role ids name the same role. Zero when they do, as memcmp.
+/// Word-wise because __builtin_memcmp over 16 bytes lowers to a memcmp call,
+/// which BPF has no symbol for.
+static __always_inline int bpfj_role_id_cmp(
+    const struct bpfj_role_id* a,
+    const struct bpfj_role_id* b) {
+  const __u64* a_i = (const __u64*)a->id;
+  const __u64* b_i = (const __u64*)b->id;
+  return !(a_i[0] == b_i[0] && a_i[1] == b_i[1]);
+}
+
+/// @brief Whether `role_id` terminates a pod-stack walk, so the roles stacked
+/// under it get no say. bpfj_pid_data::pod_uuids runs oldest first with the
+/// base role at slot 0, so actor walks run *backwards* and break on the first
+/// override role; the walk over a *target's* roles, bpfj_gate_covers(),
+/// ignores the flag, or a target could shed a restriction by holding one.
+static __always_inline bool bpfj_is_override(
+    const struct bpfj_role_id* role_id) {
+  const __u8* flag = bpf_map_lookup_elem(&bpfj_pod_override_map, role_id);
+  return flag && *flag;
+}
+
+/// @brief `task`'s jail membership, or NULL if it is not jailed; `task` must be
+/// a trusted pointer, the current task or a hook argument.
+static __always_inline struct bpfj_pid_data* bpfj_get_task_pid_data(
+    struct task_struct* task) {
+  if (!task) {
+    return NULL;
+  }
+
+  return bpf_task_storage_get(&bpfj_task_map, task, NULL, 0);
+}
+
+/// Name `uuid` in `pid_data`, if it does not already and there is room.
+/// Returns whether the entry changed, which is exactly when the caller owes
+/// the pod a reference -- taken *after* this call, since one taken first and
+/// handed back on a refusal would free the pod under its creator.
+static __always_inline bool bpfj_pid_data_add_uuid(
+    struct bpfj_pid_data* pid_data,
+    const struct bpfj_uuid* uuid) {
+  __u32 num_pods = pid_data->num_pods;
+  if (num_pods > BPFJ_MAX_POD_PER_PID) {
+    num_pods = BPFJ_MAX_POD_PER_PID;
+  }
+
+  // A second naming would take a reference nothing ever gives back.
+  for (int i = 0; i < BPFJ_MAX_POD_PER_PID; ++i) {
+    if (i >= num_pods) {
+      break;
+    }
+    if (bpfj_uuid_cmp(&pid_data->pod_uuids[i], uuid) == 0) {
+      return false;
+    }
+  }
+
+  if (num_pods >= BPFJ_MAX_POD_PER_PID) {
+    return false;
+  }
+
+  // The mask alone is not enough: clang drops the check as redundant, but the
+  // verifier does not always carry the range this far, so barrier_var makes
+  // the index opaque and keeps the check below in the object.
+  __u32 slot = num_pods & (BPFJ_MAX_POD_PER_PID - 1);
+  barrier_var(slot);
+  if (slot >= BPFJ_MAX_POD_PER_PID) {
+    return false;
+  }
+
+  pid_data->version = BPFJ_PID_DATA_VERSION;
+  pid_data->pod_uuids[slot] = *uuid;
+  pid_data->num_pods = num_pods + 1;
+  return true;
+}
+
+/// The calling task's jail membership, or NULL if it is not jailed.
+static __always_inline struct bpfj_pid_data* bpfj_get_current_pid_data(void) {
+  return bpfj_get_task_pid_data(bpf_get_current_task_btf());
+}
+
+/// @brief Release the reference `pid_data` holds on each pod it names, leaving
+/// the entry alone for the caller to delete or overwrite.
+static __always_inline void bpfj_put_pid_data_refs(
+    struct bpfj_pid_data* pid_data) {
+  __u32 num_pods = pid_data->num_pods;
+  if (num_pods > BPFJ_MAX_POD_PER_PID) {
+    num_pods = BPFJ_MAX_POD_PER_PID;
+  }
+
+  for (int i = 0; i < BPFJ_MAX_POD_PER_PID; ++i) {
+    if (i >= num_pods) {
+      break;
+    }
+
+    struct bpfj_pod* pod =
+        bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[i]);
+    if (pod) {
+      bpfj_pod_refs_dec(pod);
+    }
+  }
+}
+
+/// @brief bpfj_get_task_pid_data against a caller-named task map, for
+/// `replace`, which reaches the tree it is building and the one it is
+/// migrating off at once. __always_inline is what makes the map argument
+/// legal, the verifier wanting it resolved where it is used.
+static __always_inline struct bpfj_pid_data* bpfj_get_pid_data_from(
+    void* task_map,
+    struct task_struct* task) {
+  return bpf_task_storage_get(task_map, task, NULL, 0);
+}
+
+/// @brief Create `task`'s entry in `task_map`, seeded with `init` or zeroed if
+/// it is NULL.
+/// @return The stored copy, or NULL if the allocation failed.
+static __always_inline struct bpfj_pid_data* bpfj_set_pid_data_in(
+    void* task_map,
+    struct task_struct* task,
+    struct bpfj_pid_data* init) {
+  return bpf_task_storage_get(
+      task_map, task, init, BPF_LOCAL_STORAGE_GET_F_CREATE);
+}

@@ -1,0 +1,12 @@
+# Everything the Makefile writes goes under $(BUILD): object files and their
+# generated .d dependency lists, the vmlinux.h dumped from the running kernel,
+# the BPF skeleton, bpfjctl, bpfjcmd and bpfjtest, and the development key
+# `make signing-key` creates. The source tree itself is never written to --
+# `make test` included, whose per-test mounts and temp directories live under
+# /tmp and are removed as each test is reaped.
+#
+# BUILD is overridable, and a second configuration conventionally takes the
+# build-* shape, as in `make BUILD=build-asan SANITIZE=address,undefined`. A
+# tree built somewhere else entirely needs that path ignored on its own.
+/build/
+/build-*/

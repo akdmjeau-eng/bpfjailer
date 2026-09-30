@@ -1,0 +1,188 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#include "bpfj/enforce/Pins.h"
+
+#include <bpf/bpf.h>
+#include <linux/magic.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+
+#include <array>
+
+#include "bpfj/libbpf-cpp/BpfLink.h"
+
+namespace bpfjailer {
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// The jail membership every BPF object declares: the per-task membership, the
+// pods it names, the variable names those pods' variables are identified by,
+// and the roles policy opens to unprivileged callers.
+constexpr std::array<std::string_view, 7> kSharedMapNames = {
+    "bpfj_task_map",
+    "bpfj_pod_map",
+    "bpfj_var_map",
+    "bpfj_unpriv_enroll_map",
+    "bpfj_pod_override_map",
+    "bpfj_replace_frozen",
+    "bpfj_active_enrolls",
+};
+
+// The scratch pool, separate from the list above because an enforcer with no
+// buffer too big for the stack never includes bpfj/lib/bpf/scratch.h. Pinned
+// for the same reason the maps above are: the pin is what makes one pool for
+// the host rather than a megabyte per object that declares it.
+constexpr std::array<std::string_view, 4> kScratchMapNames = {
+    "bpfj_scratch_small",
+    "bpfj_scratch_large",
+    "bpfj_scratch_small_claimed",
+    "bpfj_scratch_large_claimed",
+};
+
+// bpfj_pod_map is declared with a single entry and sized at load time, so
+// until the internal jailer's policy-driven sizing is ported this is a flat
+// ceiling on concurrently jailed pods.
+constexpr std::uint32_t kMaxPods = 4096;
+
+// 0700 because the tree exposes the jail membership of every task on the host.
+[[nodiscard]] Expected<> makeDir(const fs::path& path) noexcept {
+  if (::mkdir(path.c_str(), S_IRWXU) != 0 && errno != EEXIST) {
+    return makeUnexpected(makeErrnoError("failed to create ", path.string()));
+  }
+
+  return unit;
+}
+
+} // namespace
+
+std::string PinConfig::root() const noexcept {
+  return (fs::path(bpffsPath) / pinDir).string();
+}
+
+fs::path PinConfig::mapDir() const noexcept {
+  return fs::path(root()) / "maps";
+}
+
+std::string PinConfig::mapPath(std::string_view name) const noexcept {
+  return (mapDir() / name).string();
+}
+
+fs::path PinConfig::linkDir() const noexcept {
+  return fs::path(root()) / "links";
+}
+
+namespace pins {
+
+Expected<> checkBpffs(const std::string& path) noexcept {
+  struct statfs sfs{};
+  if (::statfs(path.c_str(), &sfs) != 0) {
+    return makeUnexpected(makeErrnoError("failed to stat ", path));
+  }
+
+  if (sfs.f_type != BPF_FS_MAGIC) {
+    return makeUnexpected(
+        makeError(std::errc::invalid_argument, path, " is not a bpffs mount"));
+  }
+
+  return unit;
+}
+
+Expected<> makeTree(const PinConfig& cfg) noexcept {
+  if (auto res = checkBpffs(cfg.bpffsPath); !res) {
+    return res;
+  }
+
+  for (const auto& dir : {fs::path(cfg.root()), cfg.mapDir(), cfg.linkDir()}) {
+    if (auto res = makeDir(dir); !res) {
+      return res;
+    }
+  }
+
+  return unit;
+}
+
+Expected<> pinLink(
+    struct bpf_link* link,
+    std::string_view name,
+    const fs::path& dir) noexcept {
+  if (!link) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument, "program ", name, " did not attach"));
+  }
+
+  bpfj::libbpf::BpfLink wrapped(link);
+  return wrapped.pin((dir / name).c_str());
+}
+
+Expected<> pinMapAt(
+    bpfj::libbpf::BpfSkelBase& skel,
+    std::string_view name,
+    const fs::path& pinPath,
+    std::optional<std::uint32_t> maxEntries) noexcept {
+  auto map = skel.getMap(name.data());
+  if (!map) {
+    return makeUnexpected(
+        makeError(std::errc::no_such_file_or_directory, "no map named ", name));
+  }
+
+  if (maxEntries) {
+    if (auto res = map->setMaxEntries(*maxEntries); !res) {
+      return res;
+    }
+  }
+
+  return map->setPinPath(pinPath.c_str());
+}
+
+Expected<> pinMap(
+    bpfj::libbpf::BpfSkelBase& skel,
+    std::string_view name,
+    const fs::path& mapDir,
+    std::optional<std::uint32_t> maxEntries) noexcept {
+  return pinMapAt(skel, name, mapDir / name, maxEntries);
+}
+
+Expected<Fd> openPinnedMap(
+    const PinConfig& cfg,
+    std::string_view name) noexcept {
+  const std::string path = cfg.mapPath(name);
+  const int fd = ::bpf_obj_get(path.c_str());
+  if (fd < 0) {
+    return makeUnexpected(makeErrnoError("failed to open pinned map ", path));
+  }
+
+  return Fd(fd);
+}
+
+Expected<> pinSharedMaps(
+    bpfj::libbpf::BpfSkelBase& skel,
+    const fs::path& mapDir) noexcept {
+  for (const auto& name : kSharedMapNames) {
+    const auto maxEntries = name == "bpfj_pod_map"
+        ? std::optional<std::uint32_t>(kMaxPods)
+        : std::nullopt;
+
+    if (auto res = pinMap(skel, name, mapDir, maxEntries); !res) {
+      return res;
+    }
+  }
+
+  return unit;
+}
+
+Expected<> pinScratchMaps(
+    bpfj::libbpf::BpfSkelBase& skel,
+    const fs::path& mapDir) noexcept {
+  for (const auto& name : kScratchMapNames) {
+    if (auto res = pinMap(skel, name, mapDir); !res) {
+      return res;
+    }
+  }
+
+  return unit;
+}
+
+} // namespace pins
+} // namespace bpfjailer
