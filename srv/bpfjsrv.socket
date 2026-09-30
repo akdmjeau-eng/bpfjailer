@@ -1,34 +1,10 @@
 [Unit]
 Description=bpfjailer enrollment socket
-Documentation=file:///usr/share/doc/bpfjailer/srv/Client.h
 
 [Socket]
-# The abstract namespace, which is what the leading @ means to both systemd and
-# Client.h. No file, so no directory to create before binding and nothing to
-# clean up after -- and no mode or ownership either. SocketUser=, SocketGroup=
-# and SocketMode= have no effect on an abstract socket, so do not add them
-# expecting them to keep anyone out: every process in the network namespace can
-# connect, deliberately.
-#
-# What a caller may actually obtain is decided in bpfjsrv, from the SO_PEERCRED
-# uid and the role's `unpriv-enroll` policy. Roles are root-only until a policy
-# opens them.
 ListenSequentialPacket=@bpfj
-
-# SOCK_SEQPACKET: a request is one datagram and a reply is one more, so neither
-# bpfjsrv nor Client.h has to frame or read to EOF. Keep this in step with the
-# SOCK_SEQPACKET in Client.h -- a stream socket here makes connect() fail.
-
-# One bpfjsrv per connection, handed the accepted socket rather than the
-# listening one. bpfjsrv reads the peer's credentials off that socket, which is
-# what makes a connection self-identifying; it refuses to serve a listening
-# socket precisely so that setting this to no fails loudly.
 Accept=yes
 
-# A jail request is a few map updates, so a queue this deep is already a
-# backlog of clients waiting on something that should not be slow. It is also
-# the only thing bounding an unprivileged caller that connects in a loop, since
-# an abstract socket cannot be closed to them by permissions.
 Backlog=128
 MaxConnectionsPerSource=16
 
