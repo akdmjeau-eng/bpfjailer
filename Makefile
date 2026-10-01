@@ -170,8 +170,6 @@ COMMON_SRCS := \
 	bpfj/lib/Fd.cpp \
 	bpfj/lib/Privileges.cpp \
 	bpfj/libbpf-cpp/BpfSkel.cpp \
-	bpfj/libbpf-cpp/Conv.cpp \
-	bpfj/var/VarManager.cpp \
 	bpfj/fsverity/FsVerityFile.cpp \
 	bpfj/fsverity/Keyring.cpp \
 	bpfj/policy/Policy.cpp \
