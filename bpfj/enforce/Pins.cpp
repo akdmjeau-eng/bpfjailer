@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 // The jail membership every BPF object declares: the per-task membership, the
 // pods it names, the variable names those pods' variables are identified by,
 // and the roles policy opens to unprivileged callers.
-constexpr std::array<std::string_view, 7> kSharedMapNames = {
+constexpr std::array<std::string_view, 8> kSharedMapNames = {
     "bpfj_task_map",
     "bpfj_pod_map",
     "bpfj_var_map",
@@ -28,6 +28,7 @@ constexpr std::array<std::string_view, 7> kSharedMapNames = {
     "bpfj_pod_override_map",
     "bpfj_replace_frozen",
     "bpfj_active_enrolls",
+    "bpfj_log_map",
 };
 
 // The scratch pool, separate from the list above because an enforcer with no
@@ -45,6 +46,14 @@ constexpr std::array<std::string_view, 4> kScratchMapNames = {
 // until the internal jailer's policy-driven sizing is ported this is a flat
 // ceiling on concurrently jailed pods.
 constexpr std::uint32_t kMaxPods = 4096;
+
+// logging_bpf.h measures the ring buffer in 4 KiB pages and the closed source
+// jailer uses 64 of them for bpfj_log_map.
+constexpr std::uint32_t kBpfLogMapEntries = 64 * 4096;
+
+[[nodiscard]] bool isOptionalSharedMap(std::string_view name) noexcept {
+  return name == "bpfj_log_map";
+}
 
 // 0700 because the tree exposes the jail membership of every task on the host.
 [[nodiscard]] Expected<> makeDir(const fs::path& path) noexcept {
@@ -162,9 +171,15 @@ Expected<> pinSharedMaps(
   for (const auto& name : kSharedMapNames) {
     const auto maxEntries = name == "bpfj_pod_map"
         ? std::optional<std::uint32_t>(kMaxPods)
+        : name == "bpfj_log_map"
+        ? std::optional<std::uint32_t>(kBpfLogMapEntries)
         : std::nullopt;
 
     if (auto res = pinMap(skel, name, mapDir, maxEntries); !res) {
+      if (isOptionalSharedMap(name) &&
+          res.error().code() == std::errc::no_such_file_or_directory) {
+        continue;
+      }
       return res;
     }
   }

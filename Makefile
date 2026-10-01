@@ -10,6 +10,7 @@
 #   make cmd          same, for a bpfjcmd with its arguments, and optionally
 #                     its policy, compiled in
 #   make srv          same, for the socket activated bpfjsrv
+#   make log          build bpfjlog, which drains the pinned BPF log ringbuf
 #   make client       build bpfjclient, which needs no BPF toolchain
 #   make signing-key  generate a development signing key and certificate
 #   make clean        remove the build directory
@@ -213,6 +214,7 @@ COMMON_SRCS := \
 	bpfj/enforce/KillEnforcer.cpp \
 	bpfj/enforce/PtraceEnforcer.cpp \
 	bpfj/enforce/Pods.cpp \
+	log/BpfLog.cpp \
 	ctl/Dispatch.cpp \
 	ctl/Options.cpp \
 	ctl/PodPrinter.cpp \
@@ -234,6 +236,8 @@ SRV_SRCS := \
 	srv/Server.cpp \
 	srv/Main.cpp
 
+LOG_SRCS := log/Main.cpp
+
 # bpfjclient is the one binary here that links nothing else: srv/Client.h is
 # header-only, which is the whole point of it.
 CLIENT_SRCS := client/Main.cpp
@@ -241,6 +245,7 @@ CLIENT_SRCS := client/Main.cpp
 # A third entry point, on the same footing as the two above: the harness
 # brings its own main() and links everything else.
 TEST_SRCS := \
+	tests/BpfLogTest.cpp \
 	tests/BpfEnforcerTest.cpp \
 	tests/CtlCommand.cpp \
 	tests/CtlTest.cpp \
@@ -255,23 +260,25 @@ TEST_SRCS := \
 	tests/PtraceEnforcerTest.cpp \
 	tests/VerityEnforcerTest.cpp
 
-SRCS := $(COMMON_SRCS) $(CTL_SRCS) $(CMD_SRCS) $(SRV_SRCS) $(CLIENT_SRCS) \
+SRCS := $(COMMON_SRCS) $(CTL_SRCS) $(CMD_SRCS) $(SRV_SRCS) $(LOG_SRCS) $(CLIENT_SRCS) \
 	$(TEST_SRCS)
 
 COMMON_OBJS := $(COMMON_SRCS:%.cpp=$(BUILD)/%.o)
 CTL_OBJS    := $(CTL_SRCS:%.cpp=$(BUILD)/%.o)
 CMD_OBJS    := $(CMD_SRCS:%.cpp=$(BUILD)/%.o)
 SRV_OBJS    := $(SRV_SRCS:%.cpp=$(BUILD)/%.o)
+LOG_OBJS    := $(LOG_SRCS:%.cpp=$(BUILD)/%.o)
 CLIENT_OBJS := $(CLIENT_SRCS:%.cpp=$(BUILD)/%.o)
 TEST_OBJS   := $(TEST_SRCS:%.cpp=$(BUILD)/%.o)
 
-OBJS := $(COMMON_OBJS) $(CTL_OBJS) $(CMD_OBJS) $(SRV_OBJS) $(CLIENT_OBJS) \
+OBJS := $(COMMON_OBJS) $(CTL_OBJS) $(CMD_OBJS) $(SRV_OBJS) $(LOG_OBJS) $(CLIENT_OBJS) \
 	$(TEST_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 BIN     := $(BUILD)/bpfjctl
 CMD_BIN := $(BUILD)/bpfjcmd
 SRV_BIN := $(BUILD)/bpfjsrv
+LOG_BIN := $(BUILD)/bpfjlog
 CLIENT_BIN := $(BUILD)/bpfjclient
 TEST_BIN := $(BUILD)/bpfjtest
 
@@ -492,7 +499,7 @@ endef
 
 # cmd and srv name directories as well as targets, so without .PHONY make would
 # find those directories up to date and build nothing.
-.PHONY: all clean config signed signing-key client cmd srv test libarena-check FORCE
+.PHONY: all clean config signed signing-key client cmd srv log test libarena-check FORCE
 all: $(BIN)
 
 FORCE:
@@ -596,6 +603,9 @@ $(CMD_BIN): $(COMMON_OBJS) $(CMD_OBJS) $(LINKMODE)
 $(SRV_BIN): $(COMMON_OBJS) $(SRV_OBJS) $(LINKMODE)
 	$(CXX) $(LDFLAGS) $(COMMON_OBJS) $(SRV_OBJS) $(LDLIBS) -o $@
 
+$(LOG_BIN): $(COMMON_OBJS) $(LOG_OBJS) $(LINKMODE)
+	$(CXX) $(LDFLAGS) $(COMMON_OBJS) $(LOG_OBJS) $(LDLIBS) -o $@
+
 # Spelled out rather than left to the pattern rule above, which waits on every
 # BPF skeleton: a caller of srv/Client.h should not need clang or bpftool.
 $(BUILD)/client/%.o: client/%.cpp
@@ -607,6 +617,8 @@ $(CLIENT_BIN): $(CLIENT_OBJS) $(LINKMODE)
 	$(CXX) $(LDFLAGS) $(CLIENT_OBJS) -o $@
 
 client: $(CLIENT_BIN)
+
+log: $(LOG_BIN)
 
 $(TEST_BIN): $(COMMON_OBJS) $(TEST_OBJS) $(LINKMODE)
 	$(CXX) $(LDFLAGS) $(COMMON_OBJS) $(TEST_OBJS) $(LDLIBS) -o $@

@@ -84,6 +84,7 @@ TEST(Ctl, AttachPinsTheMapsAndLinks) {
 
   ASSERT(exists(pinRoot() + "/maps/bpfj_pod_map"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_task_map"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_log_map"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_exec"));
 }
