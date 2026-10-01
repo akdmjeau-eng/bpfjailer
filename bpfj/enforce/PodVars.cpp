@@ -4,7 +4,6 @@
 
 #include <bpf/bpf.h>
 
-#include <array>
 #include <cstring>
 
 #include "bpfj/var/bpf/types_var.h"
@@ -15,38 +14,33 @@ namespace {
 
 constexpr std::string_view kVarMap = "bpfj_var_map";
 
-// Mirrors DefaultVars in the closed tree. Append only: an id is a position in
-// this list, and renumbering one re-points every pod already enrolled against
-// it without anything failing to build or load.
-constexpr std::array<std::string_view, 2> kVarNames = {
-    "vm_uuid",
-    "root_device",
-};
-
-// Slot 0 is reserved for "no name", so the names take one more slot than there
-// are of them.
-static_assert(
-    kVarNames.size() + 1 <= BPFJ_VAR_MAP_SIZE,
-    "bpfj_var_map has no room for every name in kVarNames");
-
 } // namespace
-
-std::span<const std::string_view> defaultVarNames() noexcept {
-  return kVarNames;
-}
 
 Expected<Fd> openVarMap(const PinConfig& cfg) noexcept {
   return pins::openPinnedMap(cfg, kVarMap);
 }
 
-Expected<> publishVarNames(const PinConfig& cfg) noexcept {
+Expected<> publishVarNames(
+    const PinConfig& cfg,
+    std::span<const std::string> names) noexcept {
+  // Slot 0 means "no name", so the names need one more slot than there are
+  // names.
+  if (names.size() + 1 > BPFJ_VAR_MAP_SIZE) {
+    return makeUnexpected(makeError(
+        std::errc::value_too_large,
+        "a policy may declare at most ",
+        std::to_string(BPFJ_VAR_MAP_SIZE - 1),
+        " vars, got ",
+        std::to_string(names.size())));
+  }
+
   auto varMap = openVarMap(cfg);
   if (!varMap) {
     return makeUnexpected(varMap.error());
   }
 
-  for (std::uint32_t i = 0; i < kVarNames.size(); ++i) {
-    const std::string_view name = kVarNames[i];
+  for (std::uint32_t i = 0; i < names.size(); ++i) {
+    const std::string_view name = names[i];
     if (name.size() >= BPFJ_VAR_NAME_LEN) {
       return makeUnexpected(makeError(
           std::errc::value_too_large,
@@ -68,6 +62,21 @@ Expected<> publishVarNames(const PinConfig& cfg) noexcept {
   }
 
   return unit;
+}
+
+Expected<std::vector<std::string>> readVarNames(const Fd& varMap) noexcept {
+  std::vector<std::string> names(BPFJ_VAR_MAP_SIZE);
+  for (std::uint32_t id = 1; id < BPFJ_VAR_MAP_SIZE; ++id) {
+    bpfj_var_name entry{};
+    if (::bpf_map_lookup_elem(varMap.get(), &id, &entry) != 0) {
+      return makeUnexpected(makeErrnoError(
+          "failed to read the name of variable ", std::to_string(id)));
+    }
+
+    names[id].assign(entry.name, ::strnlen(entry.name, BPFJ_VAR_NAME_LEN));
+  }
+
+  return names;
 }
 
 Expected<std::uint32_t> lookupVarId(

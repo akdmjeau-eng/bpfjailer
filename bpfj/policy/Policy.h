@@ -102,9 +102,10 @@ struct RolePolicy {
 };
 
 /// @brief The jailer's policy file: `base-role` names the floor every process
-/// starts on, `certs` is the trust store, and `roles` is keyed by the role id
-/// a binary claims through `user.bpfj.policy.exec`. Lists must use block style,
-/// since the vendored parser treats flow syntax as scalars.
+/// starts on, and `certs` is the trust store. `roles` maps the role id that a
+/// binary claims through `user.bpfj.policy.exec` to that role's policy, and
+/// `vars` lists the variable names an enrollment may set. Lists must use block
+/// style, since the vendored parser treats flow syntax as scalars.
 struct Policy {
   /// @brief The role every process on the host is enrolled in, or empty.
   /// Applied once when the jailer loads, so one carrying `enforceBinaryCerts`
@@ -116,6 +117,11 @@ struct Policy {
 
   /// @brief Role id to that role's policy.
   std::map<std::string, RolePolicy> roles;
+
+  /// @brief The variable names a pod may carry. The jailer refuses an
+  /// enrollment that names any other, which keeps a caller from creating
+  /// variables of its own. If the policy leaves this out, no pod carries any.
+  std::vector<std::string> vars;
 
   /// @brief Parse and validate `path`, decoding certificates here so a
   /// mistyped one is reported against the policy file rather than later as a

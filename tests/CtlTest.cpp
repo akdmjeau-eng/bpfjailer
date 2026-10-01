@@ -282,6 +282,37 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
   ASSERT_EQ(ctl({"replace", policy}).status, 0);
 }
 
+// Ids are positions in the policy's vars, so dropping `first` moves `second`
+// from id 2 to id 1. A pod copied across by id would come out with no name.
+TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
+  const std::string before = writePolicy("vars:\n  - first\n  - second\n");
+  ASSERT_EQ(ctl({"attach", before}).status, 0);
+  ASSERT_EQ(
+      ctl({"enroll", "carried", "user", selfPid(), "second=kept"}).status, 0);
+
+  const std::string after = writePolicy("vars:\n  - second\n");
+  ASSERT_EQ(ctl({"replace", after}).status, 0);
+
+  const CommandResult shown = ctl({"show", selfPid()});
+  ASSERT_EQ(shown.status, 0);
+  ASSERT(shown.outHas("vars:    second=kept"));
+}
+
+TEST(Ctl, ReplaceRefusesToDropAVarAPodCarries) {
+  const std::string before = writePolicy("vars:\n  - kept\n");
+  ASSERT_EQ(ctl({"attach", before}).status, 0);
+  ASSERT_EQ(ctl({"enroll", "carried", "user", selfPid(), "kept=x"}).status, 0);
+
+  const CommandResult replaced = ctl({"replace", "/dev/null"});
+  ASSERT_EQ(replaced.status, 1);
+  ASSERT(replaced.errHas("carries variable 'kept'"));
+
+  // The running jail is left as it was.
+  const CommandResult shown = ctl({"show", selfPid()});
+  ASSERT_EQ(shown.status, 0);
+  ASSERT(shown.outHas("vars:    kept=x"));
+}
+
 TEST(Ctl, ReplaceNeedsAPolicyPath) {
   const CommandResult res = ctl({"replace"});
   ASSERT_EQ(res.status, kUsageError);
@@ -377,6 +408,22 @@ TEST(Ctl, CheckRejectsAnEnrollTargetNotInRoles) {
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("role 'sandbox' allows enrolling in 'missing'"));
+}
+
+TEST(Ctl, CheckRejectsAVarNameThatIsNotAnIdentifier) {
+  const std::string policy = writePolicy("vars:\n  - vm-uuid\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("var 'vm-uuid' must be letters, digits and '_'"));
+}
+
+TEST(Ctl, CheckRejectsAVarListedTwice) {
+  const std::string policy = writePolicy("vars:\n  - vm_uuid\n  - vm_uuid\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("var 'vm_uuid' is listed twice"));
 }
 
 TEST(Ctl, CheckRejectsANoBpfThatIsNotABoolean) {
@@ -550,6 +597,29 @@ TEST(Ctl, EnrollThenShowNamesTheRole) {
   ASSERT(shown.outHas("testrole"));
   ASSERT(shown.outHas("tester@meta"));
   ASSERT(shown.outHas("source:  client"));
+}
+
+// A policy's vars are the whole allowlist, so a name it does not list cannot
+// be set, however well-formed.
+TEST(Ctl, EnrollRejectsAVarThePolicyDoesNotDeclare) {
+  attach();
+
+  const CommandResult res =
+      ctl({"enroll", "role", "user", selfPid(), "vm_uuid=abc"});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("no variable named vm_uuid"));
+}
+
+TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
+  const std::string policy = writePolicy("vars:\n  - vm_uuid\n");
+  ASSERT_EQ(ctl({"attach", policy}).status, 0);
+
+  ASSERT_EQ(
+      ctl({"enroll", "role", "user", selfPid(), "vm_uuid=abc"}).status, 0);
+
+  const CommandResult shown = ctl({"show", selfPid()});
+  ASSERT_EQ(shown.status, 0);
+  ASSERT(shown.outHas("vars:    vm_uuid=abc"));
 }
 
 TEST(Ctl, ShowOnAnUnjailedPidSaysSo) {

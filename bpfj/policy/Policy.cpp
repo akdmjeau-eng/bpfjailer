@@ -7,6 +7,8 @@
 #include <cerrno>
 #include <cstdlib>
 #include <exception>
+#include <set>
+#include <string_view>
 #include <utility>
 
 #include "bpfj/lib/Base64.h"
@@ -19,6 +21,7 @@ namespace {
 constexpr std::string_view kBaseRole = "base-role";
 constexpr std::string_view kCerts = "certs";
 constexpr std::string_view kRoles = "roles";
+constexpr std::string_view kVars = "vars";
 constexpr std::string_view kEnforceBinaryCerts = "enforce-binary-certs";
 constexpr std::string_view kBpf = "bpf";
 constexpr std::string_view kNoBpf = "no-bpf";
@@ -168,6 +171,36 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   }
 
   return ids;
+}
+
+/// @brief Read the variable allowlist: names made of letters, digits and '_',
+/// each written once.
+[[nodiscard]] err::Expected<std::vector<std::string>> parseVars(
+    Yaml::Node& node) noexcept {
+  auto names = parseIdList("'vars'", node);
+  if (names.hasError()) {
+    return names.error();
+  }
+
+  std::set<std::string_view> seen;
+  for (const auto& name : *names) {
+    const bool wellFormed = !name.empty() &&
+        std::all_of(name.begin(), name.end(), [](unsigned char c) {
+          return std::isalnum(c) != 0 || c == '_';
+        });
+    if (!wellFormed) {
+      return err::Error(
+          std::errc::invalid_argument,
+          "var '" + name + "' must be letters, digits and '_'");
+    }
+
+    if (!seen.insert(name).second) {
+      return err::Error(
+          std::errc::invalid_argument, "var '" + name + "' is listed twice");
+    }
+  }
+
+  return names;
 }
 
 [[nodiscard]] err::Expected<std::vector<std::string>> parseCertRefs(
@@ -610,6 +643,12 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
       return res.error();
     }
   }
+
+  auto vars = parseVars(root[std::string(kVars)]);
+  if (vars.hasError()) {
+    return vars.error();
+  }
+  policy.vars = std::move(*vars);
 
   Yaml::Node& baseRole = root[std::string(kBaseRole)];
   if (!isBlank(baseRole)) {

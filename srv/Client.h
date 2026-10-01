@@ -106,7 +106,7 @@ class ClientFd {
 /// @brief Enroll the calling process in a pod, returning the pod uuid.
 /// Blocking, and over in one round trip, bpfjsrv being socket activated.
 /// Every field has to be a bare scalar (see isBareScalar), and a variable name
-/// has to already be published in the running jail's bpfj_var_map -- see
+/// has to be one the running jail's policy declares in `vars` -- see
 /// publishVarNames() in bpfj/enforce/PodVars.h.
 [[nodiscard]] inline Expected<std::string> enroll(
     const EnrollRequest& req,

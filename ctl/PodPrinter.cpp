@@ -2,8 +2,11 @@
 
 #include "ctl/PodPrinter.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string_view>
+
+#include "bpfj/enforce/PodVars.h"
 
 namespace bpfjailer::ctl {
 
@@ -45,9 +48,44 @@ std::string_view boundedId(const char* id, std::size_t size) {
   return {id, ::strnlen(id, size)};
 }
 
+void printVars(
+    std::ostream& os,
+    const bpfj_var_array& vars,
+    std::span<const std::string> names) {
+  const auto count = std::min<std::size_t>(vars.count, BPFJ_VAR_MAX);
+  for (std::size_t i = 0; i < count; ++i) {
+    const bpfj_var& var = vars.vars[i];
+    os << (i == 0 ? "    vars:    " : "             ");
+    if (var.id < names.size() && !names[var.id].empty()) {
+      os << names[var.id];
+    } else {
+      os << "#" << var.id;
+    }
+    os << "="
+       << boundedId(
+              var.val.str_val,
+              std::min<std::size_t>(var.size, sizeof(var.val.str_val)))
+       << "\n";
+  }
+}
+
 } // namespace
 
-void printPod(std::ostream& os, const bpfj_pod& pod, std::int64_t nowNs) {
+std::vector<std::string> jailVarNames(const PinConfig& cfg) noexcept {
+  auto varMap = openVarMap(cfg);
+  if (!varMap) {
+    return {};
+  }
+
+  auto names = readVarNames(*varMap);
+  return names ? std::move(*names) : std::vector<std::string>{};
+}
+
+void printPod(
+    std::ostream& os,
+    const bpfj_pod& pod,
+    std::int64_t nowNs,
+    std::span<const std::string> varNames) {
   os << "  pod " << uuidToString(pod.uuid) << "\n"
      << "    role:    " << boundedId(pod.role_id.id, ROLE_ID_LEN) << "\n"
      << "    user id: " << boundedId(pod.user_id.id, POD_USER_ID_LEN) << "\n"
@@ -55,6 +93,7 @@ void printPod(std::ostream& os, const bpfj_pod& pod, std::int64_t nowNs) {
      << "    refs:    " << pod.refs << "\n"
      << "    age:     " << (nowNs - pod.creation_time_ns) / 1'000'000'000
      << "s\n";
+  printVars(os, pod.var_array, varNames);
 }
 
 } // namespace bpfjailer::ctl

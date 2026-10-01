@@ -5,14 +5,17 @@
 #include <bpf/bpf.h>
 #include <signal.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "bpfj/enforce/BpfEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
@@ -53,10 +56,72 @@ struct UuidLess {
   }
 };
 
+/// @brief Both trees' variable names, indexed by id, for translateVars().
+struct VarNames {
+  std::vector<std::string> oldNames;
+  std::vector<std::string> newNames;
+};
+
+[[nodiscard]] Expected<VarNames> readBothVarNames(
+    const PinConfig& oldCfg,
+    const PinConfig& newCfg) noexcept {
+  VarNames names;
+  for (auto [cfg, out] :
+       {std::pair{&oldCfg, &names.oldNames},
+        std::pair{&newCfg, &names.newNames}}) {
+    auto varMap = openVarMap(*cfg);
+    if (!varMap) {
+      return makeUnexpected(varMap.error());
+    }
+
+    auto read = readVarNames(*varMap);
+    if (!read) {
+      return makeUnexpected(read.error());
+    }
+    *out = std::move(*read);
+  }
+
+  return names;
+}
+
+/// @brief Re-point `pod`'s variables from their ids in the old tree to the ids
+/// the new policy gives the same names. An id is a position in a policy's
+/// `vars`, so a new policy can renumber them, and a pod copied across as is
+/// would carry a different variable with nothing failing. A name the new
+/// policy dropped fails the replace rather than leave the pod without it.
+[[nodiscard]] Expected<> translateVars(
+    bpfj_pod& pod,
+    const VarNames& names) noexcept {
+  const auto count = std::min<std::size_t>(pod.var_array.count, BPFJ_VAR_MAX);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto& var = pod.var_array.vars[i];
+    const std::string_view name = var.id < names.oldNames.size()
+        ? std::string_view(names.oldNames[var.id])
+        : std::string_view();
+
+    const auto found =
+        std::find(names.newNames.begin(), names.newNames.end(), name);
+    if (name.empty() || found == names.newNames.end()) {
+      return makeUnexpected(makeError(
+          std::errc::invalid_argument,
+          "pod ",
+          uuidToString(pod.uuid),
+          " carries variable '",
+          name,
+          "', which the new policy does not declare in vars"));
+    }
+
+    var.id = static_cast<__u32>(found - names.newNames.begin());
+  }
+
+  return unit;
+}
+
 /// @brief Copy the old tree's pods into the new one, less its base role, which
 /// Jailer::load has already remade and reseeded. Refs are zeroed on the way
 /// across and counted back up by the backfill iterator, which also treats a
-/// uuid it cannot resolve here as deliberately left behind.
+/// uuid it cannot resolve here as deliberately left behind. Variables cross
+/// by name (see translateVars()).
 [[nodiscard]] Expected<std::size_t> copyPods(
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
@@ -74,6 +139,10 @@ struct UuidLess {
   // it does when the key it resumed from is deleted under it.
   std::set<bpfj_uuid, UuidLess> seen;
 
+  // Read only once a pod carries a variable, so a tree with none replaces
+  // without either var map.
+  std::optional<VarNames> varNames;
+
   std::size_t copied = 0;
   bpfj_uuid curr{};
   bpfj_uuid next{};
@@ -87,6 +156,21 @@ struct UuidLess {
     if (::bpf_map_lookup_elem(oldMap->get(), &next, &pod) == 0 &&
         pod.enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
       pod.refs = 0;
+
+      if (pod.var_array.count != 0) {
+        if (!varNames) {
+          auto read = readBothVarNames(oldCfg, newCfg);
+          if (!read) {
+            return makeUnexpected(read.error());
+          }
+          varNames = std::move(*read);
+        }
+
+        if (auto res = translateVars(pod, *varNames); !res) {
+          return makeUnexpected(res.error());
+        }
+      }
+
       if (::bpf_map_update_elem(newMap->get(), &next, &pod, BPF_ANY) != 0) {
         return makeUnexpected(makeErrnoError("failed to copy a pod across"));
       }
@@ -396,7 +480,7 @@ struct UuidLess {
   // Filled before anything reads them: an enrollment naming a variable
   // resolves it against the var map, and bpfjsrv refuses a role missing from
   // the other.
-  if (auto res = publishVarNames(newCfg); !res) {
+  if (auto res = publishVarNames(newCfg, policy.vars); !res) {
     return makeUnexpected(res.error());
   }
 

@@ -90,7 +90,7 @@ int attachPolicy(
 
   // Before anything can be enrolled, since an enrollment naming a variable
   // resolves it against this map and fails if the name is not in it yet.
-  if (auto res = publishVarNames(pin); !res) {
+  if (auto res = publishVarNames(pin, policy.vars); !res) {
     std::cerr << "publishing variable names failed: " << res.error()
               << std::endl;
     return 1;

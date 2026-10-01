@@ -72,10 +72,11 @@ int showRun(int argc, char** argv) {
     return 1;
   }
 
+  const auto varNames = jailVarNames(args.pin);
   std::cout << "pid " << *pid << " is in " << pods->size() << " pod(s)"
             << std::endl;
   for (const auto& pod : *pods) {
-    printPod(std::cout, pod, *nowNs);
+    printPod(std::cout, pod, *nowNs, varNames);
   }
 
   return 0;

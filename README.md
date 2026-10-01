@@ -125,6 +125,8 @@ roles:
     unpriv-enroll: true        # bpfjsrv may enroll non-root callers
     enroll:                    # empty: bpfjsrv may add no further role
     override-stacked: true     # answers alone, ignoring roles stacked below
+vars:                          # the only variable names a pod may carry
+  - vm_uuid
 ```
 
 For `kill`, `ptrace`, `bpf` and `keyring`, leaving a key out and writing it
@@ -143,6 +145,11 @@ consulted newest first, and an `override-stacked` role answers for the roles
 under it. The target side of `kill` and `ptrace` ignores override: every role
 the target holds has to be listed. The full semantics are documented in
 `bpfj/policy/Policy.h`.
+
+`vars` is an allowlist. An enrollment setting a variable the policy does not
+list is refused, and with no `vars` at all no pod carries any. A `replace`
+carries each pod's variables across by name, and fails if the new policy no
+longer lists one a pod is carrying.
 
 ## Examples
 
