@@ -8,6 +8,8 @@
 // count moves under lock-free atomics compatible with the BPF side's __sync
 // builtins, so acquire and release may interleave.
 
+#include <utility>
+
 #include "bpfj/lib/Heap.h"
 #include "bpfj/lib/bpf/types_shared_ptr.h"
 
@@ -62,10 +64,12 @@ inline bpfj_shared_ptr acquire(bpfj_shared_ptr sp) {
   return sp;
 }
 
-// Drop this reference, freeing the buffer and count at 0. Clears '*sp' so a
-// second release is a no-op.
-template <typename Skel>
-inline void release(Skel&& skel, bpfj_shared_ptr* sp) {
+// Drop this reference. At 0, free the count and hand the buffer to
+// `destroy(skel, buf)`. That callback releases whatever the buffer owns and
+// then the buffer itself. It is BPFJ_SHARED_PTR_RELEASE's destructor on this
+// side. Clears `*sp` so a second release is a no-op.
+template <typename Skel, typename Destroy>
+inline void release(Skel&& skel, bpfj_shared_ptr* sp, Destroy&& destroy) {
   if (sp->refcount == nullptr) {
     return;
   }
@@ -73,12 +77,21 @@ inline void release(Skel&& skel, bpfj_shared_ptr* sp) {
   if (__atomic_sub_fetch(sp->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
     // Bind to an lvalue before reaching the heap twice, as in make().
     auto& skelRef = skel;
-    heap::free(skelRef, sp->buf);
     heap::free(skelRef, sp->refcount);
+    std::forward<Destroy>(destroy)(skelRef, sp->buf);
   }
 
   sp->buf = nullptr;
   sp->refcount = nullptr;
+}
+
+// Drop this reference, freeing the buffer and count at 0, for a buffer that
+// owns nothing else.
+template <typename Skel>
+inline void release(Skel&& skel, bpfj_shared_ptr* sp) {
+  release(std::forward<Skel>(skel), sp, [](auto& skelRef, void* buf) {
+    heap::free(skelRef, buf);
+  });
 }
 
 } // namespace bpfjailer::shared_ptr
