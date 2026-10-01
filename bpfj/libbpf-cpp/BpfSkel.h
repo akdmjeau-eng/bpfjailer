@@ -3,6 +3,8 @@
 #pragma once
 
 #include <errno.h>
+#include <sys/utsname.h>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -35,6 +37,17 @@ concept HasData = requires(T t) { t.data; };
 template <typename T>
 concept HasBss = requires(T t) { t.bss; };
 
+inline bool kernelSupportsHeapSyscall() noexcept {
+  struct utsname name{};
+  unsigned int major = 0;
+  unsigned int minor = 0;
+  if (::uname(&name) != 0 ||
+      std::sscanf(name.release, "%u.%u", &major, &minor) != 2) {
+    return false;
+  }
+  return major > 6 || (major == 6 && minor >= 11);
+}
+
 } // namespace detail
 
 template <typename Skel>
@@ -66,20 +79,8 @@ class BpfSkel final : public BpfSkelBase {
 
   [[nodiscard]] Expected<> open(
       const std::optional<OpenOpts>& opts = {}) noexcept override {
-    const struct bpf_object_open_opts* optsPtr = nullptr;
-    if (opts) {
-      optsPtr = &opts->opts_;
-    }
-
-    {
-      std::lock_guard<std::mutex> guard(skeletonOpenMutex());
-      skel_ = Skel::open(optsPtr);
-    }
-    if (!skel_) {
-      return makeUnexpected(Error::fromErrno("failed to open BPF skeleton"));
-    }
-
-    return unit;
+    std::lock_guard<std::mutex> guard(skeletonOpenMutex());
+    return openUnlocked(opts);
   }
 
   [[nodiscard]] Expected<> load() noexcept override {
@@ -92,15 +93,11 @@ class BpfSkel final : public BpfSkelBase {
   }
 
   [[nodiscard]] Expected<> openAndLoad() noexcept override {
-    // open_and_load() also touches libelf (see skeletonOpenMutex). Unused
-    // today, but keeps the invariant if a caller lands.
     std::lock_guard<std::mutex> guard(skeletonOpenMutex());
-    if (!(skel_ = Skel::open_and_load())) {
-      return makeUnexpected(
-          Error::fromErrno("failed to open and load BPF skeleton"));
+    if (auto result = openUnlocked(); !result) {
+      return result;
     }
-
-    return unit;
+    return load();
   }
 
   [[nodiscard]] Expected<> attach() noexcept override {
@@ -181,6 +178,33 @@ class BpfSkel final : public BpfSkelBase {
   }
 
  private:
+  [[nodiscard]] Expected<> openUnlocked(
+      const std::optional<OpenOpts>& opts = {}) noexcept {
+    const struct bpf_object_open_opts* optsPtr = nullptr;
+    if (opts) {
+      optsPtr = &opts->opts_;
+    }
+
+    skel_ = Skel::open(optsPtr);
+    if (!skel_) {
+      return makeUnexpected(Error::fromErrno("failed to open BPF skeleton"));
+    }
+
+    if constexpr (requires { skel_->progs.bpfj_heap_syscall; }) {
+      if (!detail::kernelSupportsHeapSyscall()) {
+        const int error =
+            bpf_program__set_autoload(skel_->progs.bpfj_heap_syscall, false);
+        if (error != 0) {
+          return makeUnexpected(makeError(
+              std::errc::invalid_argument,
+              "failed to disable unsupported heap syscall program"));
+        }
+      }
+    }
+
+    return unit;
+  }
+
   Skel* skel_ = nullptr;
 };
 

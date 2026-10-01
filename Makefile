@@ -248,6 +248,7 @@ TEST_SRCS := \
 	tests/EnrollGateTest.cpp \
 	tests/Harness.cpp \
 	tests/HarnessTest.cpp \
+	tests/HeapTest.cpp \
 	tests/KeyringTest.cpp \
 	tests/KillEnforcerTest.cpp \
 	tests/Main.cpp \

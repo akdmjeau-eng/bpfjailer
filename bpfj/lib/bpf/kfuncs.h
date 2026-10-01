@@ -32,3 +32,8 @@ extern int bpf_get_file_xattr(
 // libarena headers, which call the pair without declaring it.
 extern void bpf_preempt_disable(void) __weak __ksym;
 extern void bpf_preempt_enable(void) __weak __ksym;
+
+// And by arena_spin_lock_irqsave() and arena_spin_unlock_irqrestore(), which
+// BPFJ_LOCK_WAIT_GUARD in the same header uses.
+extern void bpf_local_irq_save(unsigned long* flags) __weak __ksym;
+extern void bpf_local_irq_restore(unsigned long* flags) __weak __ksym;

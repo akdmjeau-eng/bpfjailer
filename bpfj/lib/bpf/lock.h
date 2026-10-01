@@ -113,3 +113,86 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
   __attribute__((                                                         \
       cleanup(bpfj_lock_guard_cleanup))) struct bpfj_lock_guard _name = { \
       .lock = (_lock_ptr)}
+
+// Waiting acquisition through libarena's arena_spin_lock_irqsave(), which
+// queues behind other waiters and holds the lock with interrupts off, so
+// nothing that interrupts a holder can spin on it from the same CPU.
+// lsm/task_free, for one, runs from an RCU callback in softirq context.
+// BPFJ_LOCK_WAIT_HELD() says whether the guard holds the lock. If not,
+// libarena gave up waiting.
+//
+// Only for a lock that no caller holds while it takes another lock this way.
+// Two such waiters, each holding what the other wants, spin until libarena
+// gives up, and a lock it gives up on can be left unusable. The trylock guard
+// above is for everything else, including locks userspace may hold while it
+// triggers the BPF program that wants them.
+
+// libarena's arena_spin_lock_irqsave() where the kernel has
+// bpf_local_irq_save(), which arrived in 6.14. Older kernels cannot verify
+// libarena's waiting lock at all -- 6.11 rejects the call to its global slow
+// path with preemption disabled -- so there the lock stays the single
+// arena_spin_trylock() it was before, and a collision fails with -EBUSY.
+// bpf_ksym_exists() is a load-time constant, so the verifier prunes the branch
+// the running kernel cannot take.
+#define BPFJ_ARENA_LOCK(_lock, _flags)              \
+  (bpf_ksym_exists(bpf_local_irq_save)              \
+       ? arena_spin_lock_irqsave((_lock), (_flags)) \
+       : (arena_spin_trylock((_lock)) ? 0 : -EBUSY))
+
+// The release matching BPFJ_ARENA_LOCK. The trylock branch is
+// arena_spin_unlock() minus its bpf_preempt_enable(), the trylock never having
+// disabled preemption.
+#define BPFJ_ARENA_UNLOCK(_lock, _flags)               \
+  do {                                                 \
+    if (bpf_ksym_exists(bpf_local_irq_save)) {         \
+      arena_spin_unlock_irqrestore((_lock), (_flags)); \
+    } else {                                           \
+      smp_store_release(&(_lock)->locked, 0);          \
+    }                                                  \
+  } while (0)
+
+// Out of line, so libarena's code is verified in a frame of its own rather
+// than among the caller's live values, which pushed its result through a
+// 4-byte stack slot the verifier could not follow. Static rather than global:
+// the verifier checks a global function as a program of its own, and rejects
+// one that returns with preemption or interrupts still disabled, which a lock
+// function has to.
+static __noinline int bpfj_lock_acquire(
+    struct bpfj_lock __arena* l,
+    unsigned long* flags) {
+  return BPFJ_ARENA_LOCK(bpfj_lock_qspinlock(l), *flags);
+}
+
+static __noinline void bpfj_lock_release(
+    struct bpfj_lock __arena* l,
+    unsigned long* flags) {
+  BPFJ_ARENA_UNLOCK(bpfj_lock_qspinlock(l), *flags);
+}
+
+struct bpfj_lock_wait_guard {
+  struct bpfj_lock __arena* lock;
+  unsigned long flags;
+  // 1 or 0, a full 8 bytes in its own stack slot: the verifier keeps a stored
+  // value exactly only when a whole slot is written at once, and it has to know
+  // this on every path to see that exactly the paths that saved the flags
+  // restore them. It cannot get that from the lock pointer, an arena pointer it
+  // cannot rule out being null.
+  long held;
+};
+
+#define BPFJ_LOCK_WAIT_HELD(_name) ((_name).held != 0)
+
+static __always_inline void bpfj_lock_wait_guard_cleanup(
+    struct bpfj_lock_wait_guard* guard) {
+  if (guard->held) {
+    bpfj_lock_release(guard->lock, &guard->flags);
+    guard->held = 0;
+  }
+}
+
+// This expands to two statements and must be used in a braced scope.
+#define BPFJ_LOCK_WAIT_GUARD(_name, _lock_ptr)                              \
+  __attribute__((cleanup(                                                   \
+      bpfj_lock_wait_guard_cleanup))) struct bpfj_lock_wait_guard _name = { \
+      .lock = (_lock_ptr)};                                                 \
+  _name.held = bpfj_lock_acquire(_name.lock, &_name.flags) == 0

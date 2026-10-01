@@ -15,7 +15,6 @@
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-
 #include "bpfj/err/StdExpected.h"
 #include "bpfj/lib/Lock.h"
 #include "bpfj/lib/Log.h"
@@ -29,6 +28,12 @@ constexpr auto kLockTimeout = std::chrono::seconds{5};
 
 template <typename T>
 concept BpfSkelWithHeap = requires(T obj) { obj.bss().bpfj_heap_ctrl; };
+
+template <typename Skel>
+concept BpfSkelWithHeapSyscall = requires(Skel&& skel) {
+  skel->rodata().bpfj_heap_enabled;
+  skel->progs().bpfj_heap_syscall;
+};
 
 template <typename Skel>
 err::Expected<> init(Skel& obj) {
@@ -91,6 +96,60 @@ inline __u32 ptrToOffset(void* base, const void* ptr) {
   return static_cast<__u32>(
       reinterpret_cast<std::uintptr_t>(ptr) -
       reinterpret_cast<std::uintptr_t>(base));
+}
+
+template <typename Skel>
+inline long
+runHeapSyscall(Skel&& skel, __u32 op, __u32 arg, __u32 expectedArenaSize = 0) {
+  if (!skel->rodata().bpfj_heap_enabled) {
+    return op == BPFJ_HEAP_SYSCALL_FREE ? 0 : BPFJ_HEAP_NULL;
+  }
+
+  const int progFd = bpf_program__fd(skel->progs().bpfj_heap_syscall);
+  if (progFd < 0) {
+    BPFJ_LOG(ERR) << "heap: bpfj_heap_syscall fd is invalid";
+    return -EBADF;
+  }
+
+  bpfj_heap_syscall_req req{
+      .op = op,
+      .arg = arg,
+      .expected_arena_size = expectedArenaSize,
+  };
+  LIBBPF_OPTS(
+      bpf_test_run_opts, opts, .ctx_in = &req, .ctx_size_in = sizeof(req));
+
+  const int err = bpf_prog_test_run_opts(progFd, &opts);
+  if (err < 0) {
+    BPFJ_LOG(ERR) << "heap: bpf_prog_test_run_opts failed: " << err;
+    return err;
+  }
+
+  return static_cast<long>(static_cast<std::int32_t>(opts.retval));
+}
+
+inline long
+prefaultGrowth(void* base, __u32 minBytes, __u32& expectedArenaSize) {
+  auto* ctrl = reinterpret_cast<struct bpfj_heap_control*>(base);
+  expectedArenaSize = ctrl->arena_size;
+  if (expectedArenaSize >= BPFJ_HEAP_MAX_ARENA_SIZE) {
+    return -ENOMEM;
+  }
+
+  const __u32 bytes = bpfj_heap_growth_size(minBytes, expectedArenaSize);
+
+  auto* start = reinterpret_cast<std::uint8_t*>(base) + expectedArenaSize;
+  for (__u64 offset = 0; offset < bytes; offset += BPFJ_HEAP_PAGE_SIZE) {
+    std::uint8_t expected = 0;
+    __atomic_compare_exchange_n(
+        start + offset,
+        &expected,
+        0,
+        false,
+        __ATOMIC_RELAXED,
+        __ATOMIC_RELAXED);
+  }
+  return 0;
 }
 
 // Userspace alloc/free (call after init)
@@ -172,11 +231,51 @@ inline long alloc(void* base, __u32 size) {
   return offset;
 }
 
+// Allocate through the BPF helper so userspace does not take the shared arena
+// lock directly. On exhaustion, ask BPF to grow the arena and then retry once.
+template <typename Skel>
+inline long allocOffset(Skel&& skel, __u32 size) {
+  if constexpr (!BpfSkelWithHeapSyscall<Skel>) {
+    return alloc(base(std::forward<Skel>(skel)), size);
+  } else {
+    if (!skel->rodata().bpfj_heap_enabled) {
+      return BPFJ_HEAP_NULL;
+    }
+    if (bpf_program__fd(skel->progs().bpfj_heap_syscall) < 0) {
+      return alloc(base(std::forward<Skel>(skel)), size);
+    }
+
+    long offset =
+        runHeapSyscall(std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_ALLOC, size);
+    if (offset == -ENOMEM) {
+      __u32 expectedArenaSize = 0;
+      long ret = prefaultGrowth(
+          base(std::forward<Skel>(skel)), size, expectedArenaSize);
+      if (ret < 0) {
+        BPFJ_LOG(ERR) << "heap: prefault growth failed: " << ret;
+        return ret;
+      }
+      ret = runHeapSyscall(
+          std::forward<Skel>(skel),
+          BPFJ_HEAP_SYSCALL_GROW,
+          size,
+          expectedArenaSize);
+      if (ret < 0) {
+        BPFJ_LOG(ERR) << "heap: publishing prefaulted growth failed: " << ret;
+        return ret;
+      }
+      offset = runHeapSyscall(
+          std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_ALLOC, size);
+    }
+    return offset;
+  }
+}
+
 // Allocate 'size' bytes, returning an arena pointer (nullptr on failure).
 template <typename Skel>
 inline void* alloc(Skel&& skel, __u32 size) {
   void* arena = base(std::forward<Skel>(skel));
-  long offset = alloc(arena, size);
+  long offset = allocOffset(std::forward<Skel>(skel), size);
   if (offset <= 0) {
     return nullptr;
   }
@@ -225,11 +324,33 @@ inline long free(void* base, __u32 offset) {
   return bpfj_heap_free_impl(base, ctrl, offset);
 }
 
+template <typename Skel>
+inline long freeOffset(Skel&& skel, __u32 offset) {
+  if (offset == BPFJ_HEAP_NULL) {
+    return 0;
+  }
+  if constexpr (!BpfSkelWithHeapSyscall<Skel>) {
+    return free(base(std::forward<Skel>(skel)), offset);
+  } else {
+    if (!skel->rodata().bpfj_heap_enabled) {
+      return 0;
+    }
+    if (bpf_program__fd(skel->progs().bpfj_heap_syscall) < 0) {
+      return free(base(std::forward<Skel>(skel)), offset);
+    }
+    return runHeapSyscall(
+        std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_FREE, offset);
+  }
+}
+
 // Free a previously allocated block by arena pointer. A nullptr is a no-op.
 template <typename Skel, typename T>
 inline long free(Skel&& skel, T* ptr) {
+  if (ptr == nullptr) {
+    return 0;
+  }
   void* arena = base(std::forward<Skel>(skel));
-  return free(arena, ptrToOffset(arena, ptr));
+  return freeOffset(std::forward<Skel>(skel), ptrToOffset(arena, ptr));
 }
 
 template <typename Skel>

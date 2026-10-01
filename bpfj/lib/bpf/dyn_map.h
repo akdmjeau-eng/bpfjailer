@@ -725,20 +725,23 @@ __noinline long bpfj_dyn_map_update_word(
   return 0;
 }
 
-// The body of bpfj_dyn_map_insert and bpfj_dyn_map_insert_shared. `out` is
-// NULL for the plain insert, a constant at both call sites, so that one
-// compiles to what it was before `out` existed.
+// The body of the three inserts. `out` and `may_grow` are constants at every
+// call site, so each insert compiles to its own path: the plain insert to what
+// it was before either existed, and bpfj_dyn_map_insert_fixed with no call to
+// bpfj_dyn_map_grow at all.
 static __always_inline long bpfj_dyn_map_insert_impl(
     __arena struct bpfj_dyn_map* map,
     __u64 __arena* key,
     void __arena* val,
-    struct bpfj_shared_ptr* out) {
+    struct bpfj_shared_ptr* out,
+    bool may_grow) {
   if (map->capacity == 0) {
     bpfj_dyn_map_free_entry(key, val);
     return -EINVAL;
   }
 
-  if (bpfj_dyn_map_should_grow(
+  if (may_grow &&
+      bpfj_dyn_map_should_grow(
           BPFJ_DYN_READ_ONCE(map->size),
           BPFJ_DYN_READ_ONCE(map->tombstones),
           BPFJ_DYN_READ_ONCE(map->capacity))) {
@@ -842,6 +845,18 @@ static __always_inline long bpfj_dyn_map_insert_impl(
   return 0;
 }
 
+// bpfj_dyn_map_insert for a map sized up front, which never grows it. Growing
+// puts bpfj_dyn_map_grow and the heap calls under it on the caller's stack
+// chain, and some callers sit on chains with no room for them. An entry that
+// finds no slot within BPFJ_DYN_MAP_MAX_PROBES fails with -EOVERFLOW, so the
+// caller has to size the map to stay well below its load factor.
+__noinline long bpfj_dyn_map_insert_fixed(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena,
+    void __arena* val __arg_arena) {
+  return bpfj_dyn_map_insert_impl(map, key, val, NULL, false);
+}
+
 // Takes ownership of the `key` and `val` blocks, which must be arena
 // allocations of the map's key_size and val_size; re-inserting a live key
 // replaces its value, and every failure releases both.
@@ -849,7 +864,7 @@ __noinline long bpfj_dyn_map_insert(
     __arena struct bpfj_dyn_map* map __arg_arena,
     __u64 __arena* key __arg_arena,
     void __arena* val __arg_arena) {
-  return bpfj_dyn_map_insert_impl(map, key, val, NULL);
+  return bpfj_dyn_map_insert_impl(map, key, val, NULL, true);
 }
 
 // bpfj_dyn_map_insert, also handing back in `*out` a reference to the value
@@ -862,7 +877,7 @@ __noinline long bpfj_dyn_map_insert_shared(
     struct bpfj_shared_ptr* out __arg_nonnull) {
   out->buf = NULL;
   out->refcount = NULL;
-  return bpfj_dyn_map_insert_impl(map, key, val, out);
+  return bpfj_dyn_map_insert_impl(map, key, val, out, true);
 }
 
 // Empty the slot holding `key` in one buffer, handing the entry back rather

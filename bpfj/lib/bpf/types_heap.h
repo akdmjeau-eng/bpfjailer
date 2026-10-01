@@ -32,6 +32,12 @@
 #define BPFJ_HEAP_MAX_ARENA_SIZE \
   ((__u32)BPFJ_HEAP_MAX_ARENA_PAGES * BPFJ_HEAP_PAGE_SIZE)
 
+#ifdef __cplusplus
+static_assert(BPFJ_HEAP_MAX_ARENA_SIZE % BPFJ_HEAP_PAGE_SIZE == 0);
+#else
+_Static_assert(BPFJ_HEAP_MAX_ARENA_SIZE % BPFJ_HEAP_PAGE_SIZE == 0, "");
+#endif
+
 // Pages the arena map carries above the heap's ceiling, reserved for the
 // __arena globals libbpf places in the map's last pages -- today just
 // libarena's 64 KiB qnodes array -- so a fully grown heap cannot allocate over
@@ -81,6 +87,22 @@ struct bpfj_heap_control {
   __u64 current_used; // stats: bytes in use
   struct bpfj_lock lock; // guards every field above and the free lists
   __u32 grow_gen; // bumped by whichever side grows the arena
+};
+
+enum bpfj_heap_syscall_op {
+  BPFJ_HEAP_SYSCALL_ALLOC = 1,
+  BPFJ_HEAP_SYSCALL_FREE = 2,
+  BPFJ_HEAP_SYSCALL_GROW = 3,
+};
+
+// One heap operation request from userspace to the SEC("syscall") helper in
+// bpf/heap.h. The helper returns its result in the BPF program retval: a heap
+// offset or errno-style negative code for alloc, and 0 or a negative code for
+// free.
+struct bpfj_heap_syscall_req {
+  __u32 op;
+  __u32 arg;
+  __u32 expected_arena_size;
 };
 
 // Platform compatibility (BPF vs. userspace C++)
@@ -164,6 +186,24 @@ static __always_inline __u32 bpfj_heap_adjust_size(__u32 size) {
 
 static __always_inline __u32 bpfj_heap_fls(__u32 x) {
   return 31 - __builtin_clz(x);
+}
+
+static __always_inline __u32
+bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size) {
+  if (min_bytes == 0 || arena_size >= BPFJ_HEAP_MAX_ARENA_SIZE) {
+    return 0;
+  }
+
+  __u64 want = bpfj_heap_adjust_size(min_bytes);
+  want += (1ULL << (bpfj_heap_fls((__u32)want) - BPFJ_HEAP_SLI_LOG2)) - 1;
+  __u64 pages = (want + BPFJ_HEAP_PAGE_SIZE - 1) / BPFJ_HEAP_PAGE_SIZE;
+  if (pages < BPFJ_HEAP_GROW_PAGES) {
+    pages = BPFJ_HEAP_GROW_PAGES;
+  }
+
+  __u64 bytes = pages * BPFJ_HEAP_PAGE_SIZE;
+  __u32 remaining = BPFJ_HEAP_MAX_ARENA_SIZE - arena_size;
+  return bytes > remaining ? remaining : (__u32)bytes;
 }
 
 static __always_inline void
