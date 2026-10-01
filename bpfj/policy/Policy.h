@@ -44,6 +44,10 @@ struct RolePolicy {
   /// @brief Whether `kill` was written at all. See above.
   bool hasKill = false;
 
+  /// @brief Whether this role is denied signalling entirely, the one state
+  /// `kill` cannot express; setting it alongside `kill` is rejected.
+  bool noKill = false;
+
   /// @brief Role ids whose processes this role may ptrace, with the same three
   /// states as `kill`. Only an attach is gated, since gating the read-only
   /// modes would break `ps`.
@@ -52,12 +56,21 @@ struct RolePolicy {
   /// @brief Whether `ptrace` was written at all. See above.
   bool hasPtrace = false;
 
+  /// @brief Whether this role is denied ptrace entirely, the one state
+  /// `ptrace` cannot express; setting it alongside `ptrace` is rejected.
+  bool noPtrace = false;
+
   /// @brief Role ids whose fs-verity keyrings this role may write: absent may
   /// write any, empty only its own, and non-empty adds the listed ones.
   std::vector<std::string> keyring;
 
   /// @brief Whether `keyring` was written at all. See above.
   bool hasKeyring = false;
+
+  /// @brief Whether this role is denied keyring writes entirely, the one
+  /// state `keyring` cannot express; setting it alongside `keyring` is
+  /// rejected.
+  bool noKeyring = false;
 
   /// @brief Whether this role answers for a task on its own: every enforcer
   /// walks a task's roles newest first and stops at the first one carrying

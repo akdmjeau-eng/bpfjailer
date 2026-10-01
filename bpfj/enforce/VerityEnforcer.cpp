@@ -46,6 +46,7 @@ constexpr RoleGate kGate{
     .rolesMap = "bpfj_keyring_roles",
     .accessMap = "bpfj_keyring_access",
     .configured = &RolePolicy::hasKeyring,
+    .denied = &RolePolicy::noKeyring,
     .targets = &RolePolicy::keyring,
 };
 

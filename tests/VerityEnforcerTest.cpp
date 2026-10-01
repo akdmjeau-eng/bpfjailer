@@ -718,6 +718,14 @@ TEST(VerityEnforcer, ARestrictedRoleMayWriteItsOwnKeyring) {
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
 }
 
+TEST(VerityEnforcer, ARoleWithNoKeyringMayNotWriteItsOwnKeyring) {
+  Fixture fixture;
+  attach(signedPolicy(fixture) + "    no-keyring: true\n");
+  enroll("svc", ::getpid());
+
+  ASSERT_EQ(addKeyErrno(keyringOf("svc")), EPERM);
+}
+
 TEST(VerityEnforcer, ARoleNamedInAKeyringListMayWriteThatKeyring) {
   Fixture fixture;
   attach(signedPolicy(fixture) + "  admin:\n    keyring:\n      - svc\n");

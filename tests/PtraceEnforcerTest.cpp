@@ -90,6 +90,15 @@ TEST(PtraceEnforcer, ARestrictedRoleMayAttachInsideItsOwnPod) {
   ASSERT_EQ(attachErrno(inPod.pid()), 0);
 }
 
+TEST(PtraceEnforcer, ARoleWithNoPtraceMayNotAttachInsideItsOwnPod) {
+  attach("roles:\n  svc:\n    no-ptrace: true\n");
+
+  enroll("svc", ::getpid());
+  Child inPod;
+
+  ASSERT_EQ(attachErrno(inPod.pid()), EPERM);
+}
+
 TEST(PtraceEnforcer, ARestrictedRoleMayNotAttachToAnUnjailedProcess) {
   attach("roles:\n  svc:\n    ptrace:\n");
 
@@ -154,4 +163,13 @@ TEST(PtraceEnforcer, TracemeIsAllowedInsideTheParentsPod) {
   Child inPod(tracemeErrno);
 
   ASSERT_EQ(inPod.run(), 0);
+}
+
+TEST(PtraceEnforcer, NoPtraceRefusesTracemeInsideTheParentsPod) {
+  attach("roles:\n  svc:\n    no-ptrace: true\n");
+
+  enroll("svc", ::getpid());
+  Child inPod(tracemeErrno);
+
+  ASSERT_EQ(inPod.run(), EPERM);
 }

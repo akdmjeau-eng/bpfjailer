@@ -24,7 +24,7 @@ then decides what each role may do:
   may call `bpf(2)` at all. This is also what stops a jailed process from
   editing the jailer's own maps.
 - **`keyring`** — which roles' fs-verity keyrings a role may add certificates
-  to.
+  to, or whether it may write keyrings at all.
 
 A binary can claim a role through the `user.bpfj.policy.exec` xattr and is
 enrolled in it at exec time. Running processes can also be enrolled directly,
@@ -120,6 +120,8 @@ roles:
     keyring:                   # empty: only its own role's keyring
   sandbox:
     no-bpf: true               # bpf(2) denied outright
+    no-kill: true              # kill denied outright
+    no-keyring: true           # keyring writes denied outright
     unpriv-enroll: true        # bpfjsrv may enroll non-root callers
     enroll:                    # empty: bpfjsrv may add no further role
     override-stacked: true     # answers alone, ignoring roles stacked below
@@ -128,6 +130,9 @@ roles:
 For `kill`, `ptrace`, `bpf` and `keyring`, leaving a key out and writing it
 empty mean different things. A missing key leaves that operation unrestricted,
 an empty one confines the role to itself, and a list adds the roles named.
+`no-bpf`, `no-kill`, `no-ptrace` and `no-keyring` are the outright-deny states
+those lists cannot spell, and so each is rejected if written alongside its
+list.
 `enroll` has the same three states over which roles bpfjsrv may add to a
 process already holding this one: missing is unrestricted, empty allows none
 (not even this role again), and a list allows those roles.

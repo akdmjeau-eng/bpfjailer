@@ -18,7 +18,8 @@ constexpr std::uint32_t kMaxRoles = 1024;
 constexpr std::uint32_t kMaxAccessPairs = 4096;
 
 // Presence is the whole signal on both maps, so the value is a placeholder.
-constexpr std::uint8_t kSet = 1;
+constexpr std::uint8_t kRestricted = 1;
+constexpr std::uint8_t kDenied = 2;
 
 } // namespace
 
@@ -52,7 +53,7 @@ Expected<> writePolicy(
   }
 
   for (const auto& [name, rolePolicy] : policy.roles) {
-    if (!(rolePolicy.*gate.configured)) {
+    if (!(rolePolicy.*gate.configured) && !(rolePolicy.*gate.denied)) {
       continue;
     }
 
@@ -61,8 +62,13 @@ Expected<> writePolicy(
       return makeUnexpected(actor.error());
     }
 
-    if (auto res = roles->updateElem(*actor, kSet); !res) {
+    const std::uint8_t mode = (rolePolicy.*gate.denied) ? kDenied : kRestricted;
+    if (auto res = roles->updateElem(*actor, mode); !res) {
       return res;
+    }
+
+    if (mode == kDenied) {
+      continue;
     }
 
     for (const auto& targetRole : rolePolicy.*gate.targets) {
@@ -75,7 +81,7 @@ Expected<> writePolicy(
       key.actor = *actor;
       key.target = *target;
 
-      if (auto res = access->updateElem(key, kSet); !res) {
+      if (auto res = access->updateElem(key, kRestricted); !res) {
         return res;
       }
     }

@@ -15,6 +15,7 @@ constexpr RoleGate kGate{
     .rolesMap = "bpfj_kill_roles",
     .accessMap = "bpfj_kill_access",
     .configured = &RolePolicy::hasKill,
+    .denied = &RolePolicy::noKill,
     .targets = &RolePolicy::kill,
 };
 

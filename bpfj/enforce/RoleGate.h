@@ -21,8 +21,9 @@ struct RolePair {
 };
 
 /// @brief Which maps a role-pair gate lives in, and which policy field fills
-/// them, so an enforcer need only name its two maps and the two `RolePolicy`
-/// members holding its list; `bpfj/enforce/bpf/role_gate.h` is the BPF side.
+/// them, so an enforcer need only name its two maps and the `RolePolicy`
+/// members holding its list and outright-deny flag;
+/// `bpfj/enforce/bpf/role_gate.h` is the BPF side.
 struct RoleGate {
   /// @brief The map holding one entry per role that wrote its list.
   std::string_view rolesMap;
@@ -32,6 +33,9 @@ struct RoleGate {
 
   /// @brief Whether the role wrote the list at all, e.g. `hasKill`.
   bool RolePolicy::* configured;
+
+  /// @brief Whether the role is denied the operation outright, e.g. `noKill`.
+  bool RolePolicy::* denied;
 
   /// @brief The list itself, e.g. `kill`.
   std::vector<std::string> RolePolicy::* targets;

@@ -6,7 +6,8 @@
 // enforcer asks it of `kill` and the ptrace enforcer of `ptrace`, so the rule
 // lives here and each enforcer supplies its own two maps:
 //
-//   roles    one entry per role that wrote its list, an empty list included.
+//   roles    one entry per role that wrote its list, an empty list included,
+//            or set its outright-deny flag.
 //   access   one entry per (actor, target) role pair the lists permit.
 //
 // Which gives a role three states:
@@ -14,6 +15,7 @@
 //   list absent    unrestricted
 //   list empty     may act only inside its own pod
 //   list [a, b]    that, and on a process whose roles are all in {a, b}
+//   no-* true      may not act at all
 //
 // Acting inside the restricting role's *own* pod is always allowed, a pod
 // being one jail instance -- not any pod the two share, since a base role puts
@@ -34,6 +36,11 @@
 struct bpfj_role_pair {
   struct bpfj_role_id actor;
   struct bpfj_role_id target;
+};
+
+enum {
+  BPFJ_GATE_RESTRICTED = 1,
+  BPFJ_GATE_DENIED = 2,
 };
 
 static __always_inline __u32
@@ -98,6 +105,13 @@ static __always_inline bool bpfj_gate_covers(
   return true;
 }
 
+/// The mode recorded for `role`, or 0 when it is unconfigured.
+static __always_inline __u8
+bpfj_gate_role_mode(void* roles, const struct bpfj_role_id* role) {
+  const __u8* mode = bpf_map_lookup_elem(roles, role);
+  return mode ? *mode : 0;
+}
+
 /// Whether the actor may act on something `owner` owns, under the gate
 /// `roles`/`access`. The object form of bpfj_gate_allowed(): the target
 /// belongs to exactly one role, so naming that role is the whole test and the
@@ -124,7 +138,12 @@ static __always_inline bool bpfj_gate_allowed_owner(
       continue;
     }
 
-    if (bpf_map_lookup_elem(roles, &pod->role_id) &&
+    const __u8 mode = bpfj_gate_role_mode(roles, &pod->role_id);
+    if (mode == BPFJ_GATE_DENIED) {
+      return false;
+    }
+
+    if (mode == BPFJ_GATE_RESTRICTED &&
         bpfj_role_id_cmp(&pod->role_id, owner) != 0) {
       struct bpfj_role_pair key = {};
       __builtin_memcpy(&key.actor, &pod->role_id, sizeof(key.actor));
@@ -163,7 +182,7 @@ static __always_inline bool bpfj_gate_restricted(
       continue;
     }
 
-    if (bpf_map_lookup_elem(roles, &pod->role_id)) {
+    if (bpfj_gate_role_mode(roles, &pod->role_id) != 0) {
       return true;
     }
 
@@ -208,7 +227,12 @@ static __always_inline bool bpfj_gate_allowed(
       continue;
     }
 
-    if (bpf_map_lookup_elem(roles, &pod->role_id) &&
+    const __u8 mode = bpfj_gate_role_mode(roles, &pod->role_id);
+    if (mode == BPFJ_GATE_DENIED) {
+      return false;
+    }
+
+    if (mode == BPFJ_GATE_RESTRICTED &&
         !bpfj_gate_in_pod(target, &actor->pod_uuids[i]) &&
         !bpfj_gate_covers(access, &pod->role_id, target)) {
       return false;

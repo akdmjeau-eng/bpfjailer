@@ -76,6 +76,15 @@ TEST(KillEnforcer, ARestrictedRoleMaySignalInsideItsOwnPod) {
   ASSERT_EQ(signalErrno(inPod.pid()), 0);
 }
 
+TEST(KillEnforcer, ARoleWithNoKillMayNotSignalInsideItsOwnPod) {
+  attach("roles:\n  svc:\n    no-kill: true\n");
+
+  enroll("svc", ::getpid());
+  Child inPod;
+
+  ASSERT_EQ(signalErrno(inPod.pid()), EPERM);
+}
+
 TEST(KillEnforcer, ARestrictedRoleMayNotSignalAnUnjailedProcess) {
   attach("roles:\n  svc:\n    kill:\n");
 

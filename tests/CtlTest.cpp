@@ -334,6 +334,33 @@ TEST(Ctl, CheckRejectsNoBpfAlongsideABpfList) {
   ASSERT(res.errHas("contradict each other"));
 }
 
+TEST(Ctl, CheckRejectsNoKillAlongsideAKillList) {
+  const std::string policy = writePolicy(
+      "roles:\n  muddled:\n    no-kill: true\n    kill:\n      - muddled\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict each other"));
+}
+
+TEST(Ctl, CheckRejectsNoPtraceAlongsideAPtraceList) {
+  const std::string policy = writePolicy(
+      "roles:\n  muddled:\n    no-ptrace: true\n    ptrace:\n      - muddled\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict each other"));
+}
+
+TEST(Ctl, CheckRejectsNoKeyringAlongsideAKeyringList) {
+  const std::string policy = writePolicy(
+      "roles:\n  muddled:\n    no-keyring: true\n    keyring:\n      - muddled\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict each other"));
+}
+
 TEST(Ctl, CheckRejectsUntrackedBpfWithoutABpfList) {
   const std::string policy =
       writePolicy("roles:\n  exempt:\n    untracked-bpf: true\n");
@@ -355,6 +382,33 @@ TEST(Ctl, CheckRejectsAnEnrollTargetNotInRoles) {
 TEST(Ctl, CheckRejectsANoBpfThatIsNotABoolean) {
   const std::string policy =
       writePolicy("roles:\n  muddled:\n    no-bpf: maybe\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("neither true nor false"));
+}
+
+TEST(Ctl, CheckRejectsANoKillThatIsNotABoolean) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    no-kill: maybe\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("neither true nor false"));
+}
+
+TEST(Ctl, CheckRejectsANoPtraceThatIsNotABoolean) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    no-ptrace: maybe\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("neither true nor false"));
+}
+
+TEST(Ctl, CheckRejectsANoKeyringThatIsNotABoolean) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    no-keyring: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);

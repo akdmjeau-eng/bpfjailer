@@ -18,6 +18,7 @@ constexpr RoleGate kGate{
     .rolesMap = "bpfj_ptrace_roles",
     .accessMap = "bpfj_ptrace_access",
     .configured = &RolePolicy::hasPtrace,
+    .denied = &RolePolicy::noPtrace,
     .targets = &RolePolicy::ptrace,
 };
 

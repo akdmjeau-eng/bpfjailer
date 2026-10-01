@@ -23,8 +23,11 @@ constexpr std::string_view kEnforceBinaryCerts = "enforce-binary-certs";
 constexpr std::string_view kBpf = "bpf";
 constexpr std::string_view kNoBpf = "no-bpf";
 constexpr std::string_view kKill = "kill";
+constexpr std::string_view kNoKill = "no-kill";
 constexpr std::string_view kPtrace = "ptrace";
+constexpr std::string_view kNoPtrace = "no-ptrace";
 constexpr std::string_view kKeyring = "keyring";
+constexpr std::string_view kNoKeyring = "no-keyring";
 constexpr std::string_view kUnprivEnroll = "unpriv-enroll";
 constexpr std::string_view kEnroll = "enroll";
 constexpr std::string_view kOverrideStacked = "override-stacked";
@@ -409,6 +412,23 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         policy.hasKill = true;
       }
 
+      if (Yaml::Node* noKill = findChild(value, kNoKill)) {
+        auto denied = parseRoleFlag(id, kNoKill, *noKill);
+        if (denied.hasError()) {
+          return denied.error();
+        }
+        policy.noKill = *denied;
+      }
+
+      if (policy.noKill && policy.hasKill) {
+        return err::Error(
+            std::errc::invalid_argument,
+            "role '" + id + "': " + std::string(kNoKill) + " and " +
+                std::string(kKill) +
+                " contradict each other; no-kill denies signalling outright, "
+                "so there is nothing for kill to grant");
+      }
+
       if (Yaml::Node* ptrace = findChild(value, kPtrace)) {
         auto targets = parseIdList("role '" + id + "': ptrace", *ptrace);
         if (targets.hasError()) {
@@ -418,6 +438,23 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         policy.hasPtrace = true;
       }
 
+      if (Yaml::Node* noPtrace = findChild(value, kNoPtrace)) {
+        auto denied = parseRoleFlag(id, kNoPtrace, *noPtrace);
+        if (denied.hasError()) {
+          return denied.error();
+        }
+        policy.noPtrace = *denied;
+      }
+
+      if (policy.noPtrace && policy.hasPtrace) {
+        return err::Error(
+            std::errc::invalid_argument,
+            "role '" + id + "': " + std::string(kNoPtrace) + " and " +
+                std::string(kPtrace) +
+                " contradict each other; no-ptrace denies ptrace outright, "
+                "so there is nothing for ptrace to grant");
+      }
+
       if (Yaml::Node* keyring = findChild(value, kKeyring)) {
         auto targets = parseIdList("role '" + id + "': keyring", *keyring);
         if (targets.hasError()) {
@@ -425,6 +462,23 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         }
         policy.keyring = std::move(*targets);
         policy.hasKeyring = true;
+      }
+
+      if (Yaml::Node* noKeyring = findChild(value, kNoKeyring)) {
+        auto denied = parseRoleFlag(id, kNoKeyring, *noKeyring);
+        if (denied.hasError()) {
+          return denied.error();
+        }
+        policy.noKeyring = *denied;
+      }
+
+      if (policy.noKeyring && policy.hasKeyring) {
+        return err::Error(
+            std::errc::invalid_argument,
+            "role '" + id + "': " + std::string(kNoKeyring) + " and " +
+                std::string(kKeyring) +
+                " contradict each other; no-keyring denies keyring writes "
+                "outright, so there is nothing for keyring to grant");
       }
 
       // Absent is the same as false, as for the flags above: a role that says
