@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 // The jail membership every BPF object declares: the per-task membership, the
 // pods it names, the variable names those pods' variables are identified by,
 // and the roles policy opens to unprivileged callers.
-constexpr std::array<std::string_view, 8> kSharedMapNames = {
+constexpr std::array<std::string_view, 9> kSharedMapNames = {
     "bpfj_task_map",
     "bpfj_pod_map",
     "bpfj_var_map",
@@ -28,6 +28,7 @@ constexpr std::array<std::string_view, 8> kSharedMapNames = {
     "bpfj_pod_override_map",
     "bpfj_replace_frozen",
     "bpfj_active_enrolls",
+    "bpfj_event_map",
     "bpfj_log_map",
 };
 
@@ -49,6 +50,7 @@ constexpr std::uint32_t kMaxPods = 4096;
 
 // logging_bpf.h measures the ring buffer in 4 KiB pages and the closed source
 // jailer uses 64 of them for bpfj_log_map.
+constexpr std::uint32_t kBpfEventMapEntries = 512 * 4096;
 constexpr std::uint32_t kBpfLogMapEntries = 64 * 4096;
 
 [[nodiscard]] bool isOptionalSharedMap(std::string_view name) noexcept {
@@ -171,6 +173,8 @@ Expected<> pinSharedMaps(
   for (const auto& name : kSharedMapNames) {
     const auto maxEntries = name == "bpfj_pod_map"
         ? std::optional<std::uint32_t>(kMaxPods)
+        : name == "bpfj_event_map"
+        ? std::optional<std::uint32_t>(kBpfEventMapEntries)
         : name == "bpfj_log_map"
         ? std::optional<std::uint32_t>(kBpfLogMapEntries)
         : std::nullopt;

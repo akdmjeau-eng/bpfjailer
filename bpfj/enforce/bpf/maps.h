@@ -75,6 +75,12 @@ struct {
   __type(value, __u8);
 } bpfj_active_enrolls SEC(".maps");
 
+// Structured enforcer events for bpfjlog, shared host-wide through the pin.
+struct {
+  __uint(type, BPF_MAP_TYPE_RINGBUF);
+  __uint(max_entries, 1);
+} bpfj_event_map SEC(".maps");
+
 // bpfj_var_map comes in from bpfj/var/bpf/var.h above, but belongs in this
 // header's list: a bpfj_var carries a numeric id rather than its name, so the
 // pod variables in bpfj_pod_map only mean anything next to it.
@@ -181,6 +187,59 @@ static __always_inline bool bpfj_pid_data_add_uuid(
 /// The calling task's jail membership, or NULL if it is not jailed.
 static __always_inline struct bpfj_pid_data* bpfj_get_current_pid_data(void) {
   return bpfj_get_task_pid_data(bpf_get_current_task_btf());
+}
+
+/// @brief The newest pod named by `pid_data`, or NULL when it names none or
+/// the pod itself has already disappeared.
+static __always_inline struct bpfj_pod* bpfj_get_primary_pod(
+    struct bpfj_pid_data* pid_data) {
+  if (!pid_data || pid_data->num_pods == 0) {
+    return NULL;
+  }
+
+  __u32 index = pid_data->num_pods - 1;
+  if (index >= BPFJ_MAX_POD_PER_PID) {
+    index = BPFJ_MAX_POD_PER_PID - 1;
+  }
+
+  return bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[index]);
+}
+
+/// @brief Reserve one structured event in the shared ring buffer and seed its
+/// common fields. Returns NULL if the ring buffer is full or no pod is known.
+static __always_inline struct bpfj_event* bpfj_event_reserve(
+    enum bpfj_event_type type,
+    struct bpfj_pod* pod,
+    struct task_struct* task) {
+  if (!pod || !task) {
+    return NULL;
+  }
+
+  struct bpfj_event* ev = bpf_ringbuf_reserve(&bpfj_event_map, sizeof(*ev), 0);
+  if (!ev) {
+    return NULL;
+  }
+
+  ev->type = type;
+  __builtin_memcpy(&ev->pod, pod, sizeof(*pod));
+  ev->pid = task->tgid;
+  ev->tid = task->pid;
+  ev->timestamp_ns = bpf_ktime_get_ns();
+  return ev;
+}
+
+/// @brief Reserve an event for the calling task's newest pod.
+static __always_inline struct bpfj_event* bpfj_event_reserve_current(
+    enum bpfj_event_type type) {
+  struct task_struct* task = bpf_get_current_task_btf();
+  return bpfj_event_reserve(
+      type, bpfj_get_primary_pod(bpfj_get_current_pid_data()), task);
+}
+
+static __always_inline void bpfj_event_submit(struct bpfj_event* ev) {
+  if (ev) {
+    bpf_ringbuf_submit(ev, BPF_RB_FORCE_WAKEUP);
+  }
 }
 
 /// @brief Release the reference `pid_data` holds on each pod it names, leaving

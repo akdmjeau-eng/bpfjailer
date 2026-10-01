@@ -65,6 +65,8 @@ static int bpfj_verity_check(struct file* file, bool is_exec) {
     enum bpfj_fsverity_reason reason = BPFJ_FSVERITY_REASON_NONE;
     if (bpfj_check_fsverity_pkcs7(file, pod->role_id.id, is_exec, &reason) <
         0) {
+      struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_VERITY, pod, task);
+      bpfj_event_submit(ev);
       return -EPERM;
     }
 
@@ -207,6 +209,8 @@ int bpfj_keyring_check(__u64* ctx) {
     return 0;
   }
 
+  struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_VERITY);
+  bpfj_event_submit(ev);
   BPFJ_LOG("Denied write to keyring %u", serial);
   return -EPERM;
 }

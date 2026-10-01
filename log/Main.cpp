@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -24,25 +25,50 @@ using bpfjailer::pins::openPinnedMap;
 
 volatile std::sig_atomic_t gRunning = 1;
 constexpr std::string_view kLogMapName = "bpfj_log_map";
+constexpr std::string_view kEventMapName = "bpfj_event_map";
 
 constexpr char kDoc[] =
-    "bpfjlog -- print BPF log messages from the pinned bpfj_log_map ring buffer"
-    "\vConsumes the shared logging_bpf ring buffer and writes each record to "
-    "stderr until it is signalled to stop.";
+    "bpfjlog -- print BPF log and enforcer event ring buffers from bpffs"
+    "\vConsumes the pinned bpfj_log_map and bpfj_event_map ring buffers. BPF "
+    "log records go to stderr and structured enforcer events go to stdout "
+    "until the process is signalled to stop.";
+
+enum class RecordKind {
+  BpfLog,
+  Event,
+};
+
+struct CallbackContext {
+  RecordKind kind;
+  std::string_view mapName;
+};
 
 void handleStopSignal(int /* signum */) {
   gRunning = 0;
 }
 
-int handleEvent(void* /* ctx */, void* data, std::size_t size) noexcept {
+int handleEvent(void* ctx, void* data, std::size_t size) noexcept {
   try {
-    auto line = bpfjailer::log::formatBpfLog(data, size);
-    if (!line) {
-      std::cerr << "bpfjlog: " << line.error() << std::endl;
+    const auto* callback = static_cast<const CallbackContext*>(ctx);
+    if (callback == nullptr) {
+      std::cerr << "bpfjlog: missing callback context" << std::endl;
       return 0;
     }
 
-    std::cerr << *line << std::endl;
+    const bool isEvent = callback->kind == RecordKind::Event;
+    auto line = isEvent ? bpfjailer::log::formatBpfEvent(data, size)
+                        : bpfjailer::log::formatBpfLog(data, size);
+    if (!line) {
+      std::cerr << "bpfjlog: " << callback->mapName << ": " << line.error()
+                << std::endl;
+      return 0;
+    }
+
+    if (isEvent) {
+      std::cout << *line << std::endl;
+    } else {
+      std::cerr << *line << std::endl;
+    }
   } catch (const std::exception& ex) {
     std::cerr << "bpfjlog: failed to format log message: " << ex.what()
               << std::endl;
@@ -65,8 +91,8 @@ int pollLoop(struct ring_buffer* ringBuffer) {
     }
 
     const auto err = std::error_code(-ret, std::generic_category());
-    std::cerr << "bpfjlog: failed to poll " << kLogMapName << ": "
-              << err.message() << std::endl;
+    std::cerr << "bpfjlog: failed to poll ring buffers: " << err.message()
+              << std::endl;
     return 1;
   }
 
@@ -76,6 +102,20 @@ int pollLoop(struct ring_buffer* ringBuffer) {
 bool installSignalHandlers() {
   return std::signal(SIGINT, handleStopSignal) != SIG_ERR &&
       std::signal(SIGTERM, handleStopSignal) != SIG_ERR;
+}
+
+bool addMap(
+    struct ring_buffer* ringBuffer,
+    int fd,
+    CallbackContext* ctx,
+    std::string_view mapName) {
+  if (::ring_buffer__add(ringBuffer, fd, handleEvent, ctx) == 0) {
+    return true;
+  }
+
+  std::cerr << "bpfjlog: failed to attach to " << mapName << ": "
+            << std::strerror(errno) << std::endl;
+  return false;
 }
 
 } // namespace
@@ -90,17 +130,31 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto map = openPinnedMap(cfg, kLogMapName);
-  if (!map) {
-    std::cerr << "bpfjlog: " << map.error() << std::endl;
+  auto logMap = openPinnedMap(cfg, kLogMapName);
+  if (!logMap) {
+    std::cerr << "bpfjlog: " << logMap.error() << std::endl;
     return 1;
   }
 
+  auto eventMap = openPinnedMap(cfg, kEventMapName);
+  if (!eventMap) {
+    std::cerr << "bpfjlog: " << eventMap.error() << std::endl;
+    return 1;
+  }
+
+  CallbackContext logCtx{RecordKind::BpfLog, kLogMapName};
+  CallbackContext eventCtx{RecordKind::Event, kEventMapName};
+
   struct ring_buffer* ringBuffer =
-      ::ring_buffer__new(map->get(), handleEvent, nullptr, nullptr);
+      ::ring_buffer__new(logMap->get(), handleEvent, &logCtx, nullptr);
   if (!ringBuffer) {
     std::cerr << "bpfjlog: failed to attach to " << kLogMapName << ": "
               << std::strerror(errno) << std::endl;
+    return 1;
+  }
+
+  if (!addMap(ringBuffer, eventMap->get(), &eventCtx, kEventMapName)) {
+    ::ring_buffer__free(ringBuffer);
     return 1;
   }
 

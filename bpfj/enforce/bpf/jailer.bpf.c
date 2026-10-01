@@ -129,6 +129,10 @@ int BPF_PROG(
     // Allow the fork rather than deny it, as the internal jailer does.
     BPFJ_LOG_ERR(
         ENOMEM, "Failed to clone pod data on fork for pid %d", parent->tgid);
+  } else {
+    struct bpfj_event* ev = bpfj_event_reserve(
+        BPFJ_EVENT_JAILER, bpfj_get_primary_pod(pid_data), child);
+    bpfj_event_submit(ev);
   }
 
   return 0;
@@ -203,6 +207,8 @@ int BPF_PROG(
   }
 
   BPFJ_LOG("Enrolled role id %s from xattr", pod->role_id.id);
+  struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_JAILER, pod, task);
+  bpfj_event_submit(ev);
 
   return 0;
 }
@@ -261,6 +267,8 @@ int bpfj_jailer_seed_base_role(struct bpf_iter__task* ctx) {
   }
 
   bpfj_pod_refs_inc(pod);
+  struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_JAILER, pod, task);
+  bpfj_event_submit(ev);
 
   return 0;
 }

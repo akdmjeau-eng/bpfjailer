@@ -239,6 +239,8 @@ bpfj_bpf_check_object(void* owners, __u64 addr, __u32 id) {
   }
 
   if (!bpfj_bpf_access_allowed(bpfj_get_current_pid_data(), &owner->role)) {
+    struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_BPF);
+    bpfj_event_submit(ev);
     BPFJ_LOG("Denied BPF object %u owned by %s", id, owner->role.id);
     return -EPERM;
   }
@@ -272,6 +274,8 @@ int BPF_PROG(
     return 0;
   }
 
+  struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_BPF);
+  bpfj_event_submit(ev);
   BPFJ_LOG("Denied bpf(2) cmd %d", cmd);
   return -EPERM;
 }

@@ -68,6 +68,8 @@ int BPF_PROG(
     return 0;
   }
 
+  struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_PTRACE);
+  bpfj_event_submit(ev);
   BPFJ_LOG("Denied ptrace attach to pid %d", child->tgid);
   return -EPERM;
 }
@@ -92,6 +94,8 @@ int BPF_PROG(bpfj_ptrace_traceme, struct task_struct* parent, int lsm_ret) {
     return 0;
   }
 
+  struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_PTRACE);
+  bpfj_event_submit(ev);
   BPFJ_LOG("Denied PTRACE_TRACEME by pid %d", parent->tgid);
   return -EPERM;
 }

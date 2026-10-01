@@ -49,6 +49,16 @@
 #define BPFJ_ENROLL_BASE_ROLE 10
 #define BPFJ_ENROLL_FFC_PTY 11
 
+enum bpfj_event_type {
+  BPFJ_EVENT_UNKNOWN = 0,
+  BPFJ_EVENT_JAILER = 1,
+  BPFJ_EVENT_ENROLL = 2,
+  BPFJ_EVENT_VERITY = 3,
+  BPFJ_EVENT_KILL = 4,
+  BPFJ_EVENT_PTRACE = 5,
+  BPFJ_EVENT_BPF = 6,
+};
+
 struct bpfj_role_id {
   // null terminated. String role id.
   char id[ROLE_ID_LEN];
@@ -74,6 +84,14 @@ struct bpfj_pod {
   // How many attempts before we decide a pod is stale
   __u16 gc_removal_attempts;
   __u8 enrollment_source;
+};
+
+struct bpfj_event {
+  enum bpfj_event_type type;
+  struct bpfj_pod pod;
+  __u32 pid;
+  __u32 tid;
+  __u64 timestamp_ns;
 };
 
 // Which role owns a BPF map or program, keyed in bpfj_bpf_map_owners and

@@ -90,6 +90,9 @@ int bpfj_enroll_threads(struct bpf_iter__task* ctx) {
   // Atomic because the walk is not serialised against itself across CPUs.
   __sync_fetch_and_add(&bpfj_enroll_count, 1);
 
+  struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_ENROLL, pod, task);
+  bpfj_event_submit(ev);
+
   return 0;
 }
 

@@ -64,6 +64,8 @@ int BPF_PROG(
     return 0;
   }
 
+  struct bpfj_event* ev = bpfj_event_reserve_current(BPFJ_EVENT_KILL);
+  bpfj_event_submit(ev);
   BPFJ_LOG("Denied signal %d to pid %d", sig, p->tgid);
   return -EPERM;
 }
