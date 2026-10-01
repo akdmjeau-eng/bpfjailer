@@ -28,7 +28,7 @@ struct bpfj_glob_run {
   __u32 num_matches;
   // By value, since a plain pointer stashed in arena run state decays to a
   // scalar across the global-function boundary.
-  struct bpfj_var_array vars;
+  struct bpfj_glob_bindings bindings;
   __u64 state[BPFJ_GLOB_MAP_MAX_WORDS];
   __u64 var_advance[BPFJ_GLOB_MAP_MAX_WORDS]; // per-byte gadget advance scratch
   char str[BPFJ_GLOB_MAP_MAX_STR_LEN];
@@ -44,26 +44,65 @@ bpfj_glob_ptr_off(void __arena* base, __arena const void* ptr) {
   return (__u32)((unsigned long)ptr - (unsigned long)base);
 }
 
-// The bound bpfj_var for a gadget's variable id, or NULL if unbound.
-static __always_inline __arena const struct bpfj_var* bpfj_glob_find_var(
-    const struct bpfj_var_array __arena* vars,
-    __u32 id) {
-  u32 count = vars->count;
-  for (u32 v = 0; v < BPFJ_VAR_MAX; ++v) {
-    if (v >= count) {
+// The binding for a gadget's key, or NULL if unbound. Key 0 is never assigned,
+// so a zeroed slot cannot bind anything.
+static __always_inline __arena const struct bpfj_glob_binding*
+bpfj_glob_find_binding(
+    const struct bpfj_glob_bindings __arena* bindings,
+    __u32 key) {
+  if (key == 0) {
+    return NULL;
+  }
+
+  u32 count = bindings->count;
+  for (u32 b = 0; b < BPFJ_GLOB_MAP_MAX_BINDINGS; ++b) {
+    if (b >= count) {
       break;
     }
-    if (vars->vars[v].id == id) {
-      return &vars->vars[v];
+    if (bindings->b[b].key == key) {
+      return &bindings->b[b];
     }
   }
   return NULL;
 }
 
-// GLOBAL function: resolve every gadget's variable once and copy its string
-// value into the gadget scratch. A sibling leaf of
-// bpfj_glob_step/bpfj_glob_close, so the verifier charges max() not a sum.
-__noinline int bpfj_glob_load_vars(
+// Whether `map` has a gadget for `key`, for a converter holding more variables
+// than fit in a bpfj_glob_bindings to bind only the ones the patterns use.
+static __always_inline bool bpfj_glob_map_wants_key(
+    const struct bpfj_glob_map __arena* map,
+    __u32 key) {
+  if (map == NULL || key == 0) {
+    return false;
+  }
+
+  u32 num_vars = map->num_vars;
+  bool found = false;
+  u32 v = 0;
+  bpf_for(v, 0, BPFJ_GLOB_MAP_MAX_BINDINGS) {
+    if (v >= num_vars) {
+      break;
+    }
+    if (map->var_keys[v] == key) {
+      found = true;
+      break;
+    }
+  }
+  return found;
+}
+
+static __always_inline void bpfj_glob_poison_binding(
+    __arena struct bpfj_glob_run* run,
+    u32 g) {
+  // Path components cannot contain NUL, so a full-width NUL string makes the
+  // gadget impossible to satisfy and keeps malformed bindings fail closed.
+  run->gadget_len[g] = BPFJ_GLOB_MAP_MAX_VAR_LEN;
+  bpfj_heap_zero_arena(run->gadget_val[g], BPFJ_GLOB_MAP_MAX_VAR_LEN);
+}
+
+// GLOBAL function: resolve every gadget's binding once and copy its value into
+// the gadget scratch. A sibling leaf of bpfj_glob_step/bpfj_glob_close, so the
+// verifier charges max() not a sum.
+__noinline int bpfj_glob_load_bindings(
     __arena struct bpfj_glob_run* run __arg_arena) {
   u32 num_gadgets = run->map->num_gadgets;
 
@@ -73,20 +112,18 @@ __noinline int bpfj_glob_load_vars(
       break;
     }
     u32 vlen = 0;
-    __arena const struct bpfj_var* var =
-        bpfj_glob_find_var(&run->vars, run->map->gadget_var[g]);
-    if (var != NULL && var->type == BPFJ_VAR_TYPE_STR) {
-      vlen = var->size;
-      // A value longer than the gadget is truncated, and the gadget then
-      // expects end-of-component, so bind long values with a trailing wildcard
-      // ("$LONG*").
+    __arena const struct bpfj_glob_binding* binding =
+        bpfj_glob_find_binding(&run->bindings, run->map->gadget_key[g]);
+    if (binding != NULL) {
+      vlen = binding->len;
       if (vlen > BPFJ_GLOB_MAP_MAX_VAR_LEN) {
-        vlen = BPFJ_GLOB_MAP_MAX_VAR_LEN;
+        bpfj_glob_poison_binding(run, g);
+        continue;
       }
       // Not unrolled, so the copy spills no temporaries onto this frame.
 #pragma clang loop unroll(disable)
       for (u32 k = 0; k < BPFJ_GLOB_MAP_MAX_VAR_LEN; ++k) {
-        run->gadget_val[g][k] = var->val.str_val[k];
+        run->gadget_val[g][k] = binding->val[k];
       }
     }
     run->gadget_len[g] = vlen;
@@ -193,7 +230,7 @@ __noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
   u32 num_words = run->map->num_words;
 
   // A separate frame, to stay within the bpf2bpf stack budget.
-  bpfj_glob_load_vars(run);
+  bpfj_glob_load_bindings(run);
 
   // Every slot, so later reads are definitely initialized for the verifier.
   u32 w = 0;
@@ -241,33 +278,40 @@ __noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
 // Bind a run to the compiled header it will match against and copy in the
 // caller's variable bindings, both fixed across lookups.
 //
-// map:  the arena-resident compiled header (see GlobMap.h); NULL matches
-//       nothing.
-// vars: bindings each ${NAME} gadget resolves its variable id against; an
-//       unbound id matches the empty string, and NULL means no bindings.
+// map:      the arena-resident compiled header (see GlobMap.h); NULL matches
+//           nothing.
+// bindings: what each ${NAME} gadget resolves its key against; an unbound key
+//           matches the empty string, and NULL means no bindings.
 static __noinline void bpfj_glob_run_bind(
     struct bpfj_glob_run __arena* run,
     const struct bpfj_glob_map __arena* map,
-    const struct bpfj_var_array __arena* vars) {
+    const struct bpfj_glob_bindings __arena* bindings) {
   run->map = map;
 
   // Word-wise, not a struct assignment: clang lowers that to a memcpy whose
-  // destination base folds back to the pre-addr_space_cast scalar. u32 words
-  // because bpfj_var is only 4-byte aligned.
+  // destination base folds back to the pre-addr_space_cast scalar. Only the
+  // bindings in use, most lookups carrying a handful of the sixteen.
   _Static_assert(
-      (BPFJ_VAR_MAX * sizeof(struct bpfj_var)) % 4 == 0,
-      "bpfj_var array must be a whole number of u32s to copy word-wise");
-  if (vars != NULL) {
-    u32 __arena* dst = (__arena u32*)run->vars.vars;
-    const u32* src = (const u32*)vars->vars;
-    for (u32 w = 0; w < (BPFJ_VAR_MAX * sizeof(struct bpfj_var)) / 4; ++w) {
+      sizeof(struct bpfj_glob_binding) % 4 == 0 &&
+          __builtin_offsetof(struct bpfj_glob_bindings, b) % 4 == 0,
+      "bpfj_glob_bindings must be a whole number of u32s to copy word-wise");
+  u32 count = 0;
+  if (bindings != NULL) {
+    count = bindings->count;
+    if (count > BPFJ_GLOB_MAP_MAX_BINDINGS) {
+      count = BPFJ_GLOB_MAP_MAX_BINDINGS;
+    }
+
+    u32 __arena* dst = (__arena u32*)run->bindings.b;
+    const u32 __arena* src = (const u32 __arena*)bindings->b;
+    u32 words = count * (sizeof(struct bpfj_glob_binding) / 4);
+    u32 w = 0;
+    bpf_for(w, 0, words) {
       // TODO eliminate copy
       dst[w] = src[w];
     }
-    run->vars.count = vars->count;
-  } else {
-    run->vars.count = 0;
   }
+  run->bindings.count = count;
 }
 
 // Public entry point. Copies the search string into the run, runs the matcher,
@@ -349,7 +393,10 @@ static __noinline void bpfj_glob_map_destroy(
   if (map->num_gadgets != 0) {
     bpfj_heap_free(bpfj_glob_ptr_off(base, map->gadget_word));
     bpfj_heap_free(bpfj_glob_ptr_off(base, map->gadget_base));
-    bpfj_heap_free(bpfj_glob_ptr_off(base, map->gadget_var));
+    bpfj_heap_free(bpfj_glob_ptr_off(base, map->gadget_key));
+  }
+  if (map->num_vars != 0) {
+    bpfj_heap_free(bpfj_glob_ptr_off(base, map->var_keys));
   }
 
   map->char_mask = NULL;
@@ -360,7 +407,8 @@ static __noinline void bpfj_glob_map_destroy(
   map->accept_val = NULL;
   map->gadget_word = NULL;
   map->gadget_base = NULL;
-  map->gadget_var = NULL;
+  map->gadget_key = NULL;
+  map->var_keys = NULL;
   map->num_words = 0;
   map->num_accepts = 0;
   map->num_gadgets = 0;

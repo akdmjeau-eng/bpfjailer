@@ -7,7 +7,6 @@
 #endif
 
 #include "bpfj/lib/bpf/types_heap.h"
-#include "bpfj/var/bpf/types_var.h"
 
 // Glob matcher map. Userspace compiles all glob patterns into a SINGLE
 // bit-parallel NFA, so a lookup evaluates every pattern in one pass over the
@@ -40,12 +39,16 @@
   64 // output vector capacity the matcher bounds
 #define BPFJ_GLOB_MAP_MAX_ACCEPTS \
   1024 // total patterns (<= words * patterns/word)
-// Gadget width in bits, equal to the max bpfj_var string value length so any
-// bound value fits. It trades against gadgets per pattern -- two at this width
-// need 78 bits, past the 63 BPFJ_GLOB_MAP_MAX_TOKENS allows -- and one is all
-// FileMatchCached needs, compiling each path component into its own pattern.
-#define BPFJ_GLOB_MAP_MAX_VAR_LEN (BPFJ_VAR_VAL_LEN - 1)
-#define BPFJ_GLOB_MAP_MAX_VARS 64
+// Gadget width in bits, and so the longest value a binding can match in full.
+// It trades against gadgets per pattern -- two at this width need 78 bits, past
+// the 63 BPFJ_GLOB_MAP_MAX_TOKENS allows -- and one is all FileMatchCached
+// needs, compiling each path component into its own pattern. A var type whose
+// values can be longer has to reject them before binding; malformed oversize
+// bindings are treated as impossible matches rather than truncated prefixes.
+#define BPFJ_GLOB_MAP_MAX_VAR_LEN 39
+// Distinct ${NAME} keys one map may reference, and so the bindings a lookup
+// carries.
+#define BPFJ_GLOB_MAP_MAX_BINDINGS 16
 #define BPFJ_GLOB_MAP_MAX_GADGETS 256
 // Epsilon-closure passes needed to reach a fixpoint. Collapsing consecutive
 // '*' and closing adjacent gadgets in one ascending sweep leaves only
@@ -62,9 +65,27 @@ struct bpfj_glob_map {
   __arena __u64* accept_val; // [num_accepts], the pattern's value
   __arena __u32* gadget_word; // [num_gadgets], the state word of each gadget
   __arena __u32* gadget_base; // [num_gadgets], the gadget's first (state-0) bit
-  __arena __u32* gadget_var; // [num_gadgets], the variable id matched there
+  __arena __u32* gadget_key; // [num_gadgets], the binding key matched there
+  __arena __u32* var_keys; // [num_vars], each distinct key, ascending
   __u32 num_words;
   __u32 num_accepts; // one per pattern
   __u32 num_gadgets; // one per ${NAME} occurrence
-  __u32 num_vars; // distinct variable ids referenced
+  __u32 num_vars; // distinct binding keys referenced
+};
+
+// What the matcher knows of variables: a key the compiler assigned to ${NAME},
+// never 0, and the bytes that name stands for in this lookup. The key is
+// whatever the caller's var type identifies a variable by, and a converter
+// from that type fills these in, so nothing here depends on how vars are
+// stored. A key with no binding matches the empty string.
+struct bpfj_glob_binding {
+  __u32 key;
+  __u32 len;
+  char val[BPFJ_GLOB_MAP_MAX_VAR_LEN];
+};
+
+struct bpfj_glob_bindings {
+  __u32 count;
+  __u32 _pad;
+  struct bpfj_glob_binding b[BPFJ_GLOB_MAP_MAX_BINDINGS];
 };
