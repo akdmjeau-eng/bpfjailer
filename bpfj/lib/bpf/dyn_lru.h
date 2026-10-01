@@ -20,7 +20,9 @@ static __always_inline void bpfj_dyn_lru_destroy_val(void __arena* p) {
   BPFJ_HEAP_FREE(dyn);
 }
 
-static void bpfj_dyn_lookup_guard_cleanup(struct bpfj_shared_ptr* ptr) {
+// Out of line, so the destroy's walk stays off the frame holding the guard.
+static __noinline void bpfj_dyn_lookup_guard_cleanup(
+    struct bpfj_shared_ptr* ptr) {
   BPFJ_SHARED_PTR_RELEASE(ptr, bpfj_dyn_lru_destroy_val);
 }
 

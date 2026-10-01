@@ -3,17 +3,16 @@
 #pragma once
 
 // A spin lock that lives in the BPF arena, so the same lock word can be taken
-// from BPF and from userspace (bpfj/lib/Lock.h). Only the uncontended path of
-// the underlying qspinlock is used, so the word only ever holds 0 or LOCKED;
-// arena_spin_lock()'s blocking slow path is unsafe against a userspace holder
-// on two counts:
+// from BPF and from userspace (bpfj/lib/Lock.h). Two ways to take it from BPF:
+// a trylock, and libarena's waiting arena_spin_lock_irqsave() through
+// BPFJ_LOCK_WAIT_GUARD or bpfj_lock_acquire(). The waiting one is unsafe
+// against a userspace holder on two counts:
 //
 //   - it waits with preemption disabled, so a BPF program spinning on a
 //     userspace holder parked on the same CPU keeps it from running, and
-//   - its bail-out returns with the pending bit set and never cleared, which
-//     wedges the lock for both sides.
+//   - its bail-out can return with the pending bit set or its queue node
+//     still linked, which wedges the lock for both sides.
 //
-// BPF must therefore treat acquisition as fallible: take the lock or move on.
 // Userspace may wait, since it yields rather than spins and a BPF holder
 // always releases before its program returns.
 //
@@ -106,14 +105,6 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
 
 #define BPFJ_LOCK_GUARD_RELEASE(_name) _name.lock = NULL
 
-// One declaration and no second statement: the guard must be declared in the
-// caller's own scope for the cleanup to run there, and a following assignment
-// would escape an unbraced if or loop body.
-#define BPFJ_LOCK_GUARD_TAKE_OVER(_name, _lock_ptr)                       \
-  __attribute__((                                                         \
-      cleanup(bpfj_lock_guard_cleanup))) struct bpfj_lock_guard _name = { \
-      .lock = (_lock_ptr)}
-
 // Waiting acquisition through libarena's arena_spin_lock_irqsave(), which
 // queues behind other waiters and holds the lock with interrupts off, so
 // nothing that interrupts a holder can spin on it from the same CPU.
@@ -121,11 +112,12 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
 // BPFJ_LOCK_WAIT_HELD() says whether the guard holds the lock. If not,
 // libarena gave up waiting.
 //
-// Only for a lock that no caller holds while it takes another lock this way.
-// Two such waiters, each holding what the other wants, spin until libarena
-// gives up, and a lock it gives up on can be left unusable. The trylock guard
-// above is for everything else, including locks userspace may hold while it
-// triggers the BPF program that wants them.
+// Locks taken this way while holding another must nest in one order across
+// every caller: two waiters each holding what the other wants spin until
+// libarena gives up, and a lock it gives up on can be left unusable. They also
+// come off in the reverse order they went on, which the verifier enforces for
+// the interrupt state. The trylock guard above is for locks userspace may hold
+// while it triggers the BPF program that wants them.
 
 // libarena's arena_spin_lock_irqsave() where the kernel has
 // bpf_local_irq_save(), which arrived in 6.14. Older kernels cannot verify
@@ -156,7 +148,9 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
 // 4-byte stack slot the verifier could not follow. Static rather than global:
 // the verifier checks a global function as a program of its own, and rejects
 // one that returns with preemption or interrupts still disabled, which a lock
-// function has to.
+// function has to. Called directly for a lock held across a return: the
+// release takes the same `flags`, kept in a frame that outlives the hold, and
+// both calls must fall within one global function.
 static __noinline int bpfj_lock_acquire(
     struct bpfj_lock __arena* l,
     unsigned long* flags) {

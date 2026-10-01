@@ -9,9 +9,15 @@
 #include "bpfj/lib/bpf/types_dyn_map.h"
 
 // Open-addressing map of fixed-width arena-owned keys and values; insert
-// consumes them, lookup borrows the key and returns a reference, and every
-// lock is a trylock so a collision reports -EBUSY. Inlining here is mostly
-// verifier budget management.
+// consumes them, lookup borrows the key and returns a reference, and -EBUSY
+// reports a lock that could not be had. Inlining here is mostly verifier
+// budget management.
+//
+// Locks nest in one order: map->lock, then a slot of the retiring buffer, then
+// a slot of the growing one, with at most one slot of a buffer held at a time.
+// They are taken with bpfj_lock_acquire() rather than BPFJ_LOCK_WAIT_GUARD,
+// whose guard costs 16 bytes more a frame on stack chains that already reach
+// the verifier's 512-byte limit through here.
 
 #ifndef BPFJ_DYN_READ_ONCE
 #define BPFJ_DYN_READ_ONCE(x) (*(const volatile __typeof__(x)*)&(x))
@@ -151,28 +157,24 @@ static __always_inline void bpfj_dyn_map_slots_guard_cleanup(
 #define BPFJ_DYN_MAP_SLOTS(_name) \
   ((struct bpfj_dyn_map_slot __arena*)(_name).sp.buf)
 
-// What one step of a walk found; the two actionable ones leave the slot locked.
+// What one step of a walk found.
 enum {
-  BPFJ_DYN_TRY_MATCH = 0, // holds this key -- LOCKED
-  BPFJ_DYN_TRY_FREE = 1, // holds nothing, ends the chain -- LOCKED
+  BPFJ_DYN_TRY_MATCH = 0, // holds this key
+  BPFJ_DYN_TRY_FREE = 1, // holds nothing, ends the chain
   BPFJ_DYN_TRY_MISS = 2, // holds another key
   BPFJ_DYN_TRY_DEAD = 3, // a tombstone
 };
 
-// Lock one slot and say what is in it; global so the verifier checks it once.
-__noinline long bpfj_dyn_map_try_slot(
+// Say what a slot the caller has locked holds; global so the verifier checks
+// it once. The locking stays with the caller, since a global function must
+// return with interrupts on and the lock holds them off.
+__noinline long bpfj_dyn_map_classify(
     struct bpfj_dyn_map_slot __arena* slot __arg_arena,
     const __u64 __arena* key __arg_arena,
     __u32 key_words,
     __u64 hash) {
-  BPFJ_LOCK_GUARD(dm, &slot->lock);
-  if (!BPFJ_LOCK_IS_ACQUIRED(dm)) {
-    return -EBUSY;
-  }
-
   __u32 state = slot->state;
   if (state == BPFJ_DYN_SLOT_EMPTY) {
-    BPFJ_LOCK_GUARD_RELEASE(dm);
     return BPFJ_DYN_TRY_FREE;
   }
   if (state != BPFJ_DYN_SLOT_OCCUPIED) {
@@ -181,18 +183,19 @@ __noinline long bpfj_dyn_map_try_slot(
 
   // The hash first, to settle most slots without walking two keys word by word.
   if (slot->hash == hash && bpfj_dyn_map_key_eq(slot->key, key, key_words)) {
-    BPFJ_LOCK_GUARD_RELEASE(dm);
     return BPFJ_DYN_TRY_MATCH;
   }
   return BPFJ_DYN_TRY_MISS;
 }
 
-// The slot holding `key`, or a negative error; success returns it locked.
+// The slot holding `key`, or a negative error; success returns it locked, to
+// be released with bpfj_lock_release() and the same `flags`.
 static __noinline long bpfj_dyn_map_probe_lookup(
     struct bpfj_dyn_map_slot __arena* slots,
     __u32 cap,
     const __u64 __arena* key,
-    __u32 key_words) {
+    __u32 key_words,
+    unsigned long* flags) {
   if (cap == 0 || !slots) {
     // At capacity zero the walk runs off the buffer, which in the arena reads
     // the base rather than faulting.
@@ -208,52 +211,36 @@ static __noinline long bpfj_dyn_map_probe_lookup(
   for (__u32 p = 0; p < BPFJ_DYN_MAP_MAX_PROBES; ++p) {
     struct bpfj_dyn_map_slot __arena* slot = bpfj_dyn_map_slot_at(slots, off);
 
-    long found = bpfj_dyn_map_try_slot(slot, key, key_words, hash);
-    if (found < 0) {
-      return found;
+    // libarena called directly: bpfj_lock_acquire()'s frame would put the
+    // lookups' chains a call past the verifier's limit of eight frames.
+    if (BPFJ_ARENA_LOCK(bpfj_lock_qspinlock(&slot->lock), *flags)) {
+      return -EBUSY;
     }
+
+    long found = bpfj_dyn_map_classify(slot, key, key_words, hash);
     if (found == BPFJ_DYN_TRY_MATCH) {
       return off; // handed to the caller locked
     }
+    bpfj_lock_release(&slot->lock, flags);
     if (found == BPFJ_DYN_TRY_FREE) {
-      // An empty slot ends the chain, and a miss has no use for it.
-      bpfj_lock_unlock(&slot->lock);
-      return -ENOENT;
+      return -ENOENT; // an empty slot ends the chain
     }
     off = (off + 1) & (cap - 1);
   }
   return -EOVERFLOW;
 }
 
-// Take `idx` if it is still a tombstone and stamp the arriving hash there;
-// success returns the slot locked.
-__noinline long bpfj_dyn_map_claim_tomb(
-    struct bpfj_dyn_map_slot __arena* slots __arg_arena,
-    __u32 idx,
-    __u64 hash) {
-  struct bpfj_dyn_map_slot __arena* slot = bpfj_dyn_map_slot_at(slots, idx);
-
-  BPFJ_LOCK_GUARD(dm, &slot->lock);
-  if (!BPFJ_LOCK_IS_ACQUIRED(dm)) {
-    return -EBUSY;
-  }
-  if (slot->state != BPFJ_DYN_SLOT_TOMB) {
-    return -EAGAIN; // filled since the walk passed it
-  }
-
-  slot->hash = hash;
-  BPFJ_LOCK_GUARD_RELEASE(dm);
-  return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_TOMB, idx);
-}
-
 // Choose an insert slot for `key`: an update target, an empty slot or the
-// earliest tombstone; success returns a packed locked-slot plan.
+// earliest tombstone. Success returns a packed plan with the slot locked, to
+// be released with bpfj_lock_release() and the same `flags`; the arriving hash
+// is already stamped there unless the plan is an update.
 static __always_inline long bpfj_dyn_map_probe_plan(
     struct bpfj_dyn_map_slot __arena* slots,
     __u32 cap,
     const __u64 __arena* key,
     __u32 key_words,
-    __u64 hash) {
+    __u64 hash,
+    unsigned long* flags) {
   __u32 off = bpfj_dyn_map_index(hash, cap);
 
   // The first tombstone the walk passes and the empty slot ending the chain,
@@ -266,16 +253,23 @@ static __always_inline long bpfj_dyn_map_probe_plan(
   // Unrolled for the reason in bpfj_dyn_map_probe_lookup.
 #pragma unroll
   for (__u32 p = 0; p < BPFJ_DYN_MAP_MAX_PROBES; ++p) {
-    long found = bpfj_dyn_map_try_slot(
-        bpfj_dyn_map_slot_at(slots, off), key, key_words, hash);
-    if (found < 0) {
-      return found;
+    struct bpfj_dyn_map_slot __arena* slot = bpfj_dyn_map_slot_at(slots, off);
+    if (bpfj_lock_acquire(&slot->lock, flags)) {
+      return -EBUSY;
     }
+
+    long found = bpfj_dyn_map_classify(slot, key, key_words, hash);
     if (found == BPFJ_DYN_TRY_MATCH) {
       return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_UPDATE, off);
     }
+    if (found == BPFJ_DYN_TRY_FREE && BPFJ_DYN_MARK_TOMB(marks) == kNone) {
+      slot->hash = hash;
+      return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_NEW, off);
+    }
+    bpfj_lock_release(&slot->lock, flags);
+
     if (found == BPFJ_DYN_TRY_FREE) {
-      marks = (marks & 0xffffffff00000000ULL) | off; // locked; chain ends here
+      marks = (marks & 0xffffffff00000000ULL) | off; // chain ends here
       break;
     }
     if (found == BPFJ_DYN_TRY_DEAD && BPFJ_DYN_MARK_TOMB(marks) == kNone) {
@@ -284,53 +278,48 @@ static __always_inline long bpfj_dyn_map_probe_plan(
     off = (off + 1) & (cap - 1);
   }
 
+  if (BPFJ_DYN_MARK_TOMB(marks) == kNone) {
+    return -EOVERFLOW;
+  }
+
   // A tombstone earlier in the chain is the better home, but is claimed only
-  // after the walk because the verifier explores the body once per step.
-  if (BPFJ_DYN_MARK_TOMB(marks) != kNone) {
-    long plan = bpfj_dyn_map_claim_tomb(slots, BPFJ_DYN_MARK_TOMB(marks), hash);
-    if (plan >= 0 || plan == -EBUSY) {
-      if (BPFJ_DYN_MARK_FREE(marks) != kNone) {
-        bpfj_lock_unlock(
-            &bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_FREE(marks))->lock);
-      }
-      return plan;
-    }
-
-    // -EAGAIN: filled since the walk passed it, possibly with this same key, so
-    // falling through would put the key in the table twice.
-    long refill = bpfj_dyn_map_try_slot(
-        bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_TOMB(marks)),
-        key,
-        key_words,
-        hash);
-    if (refill == BPFJ_DYN_TRY_MATCH) {
-      // Locked, and it is ours to update.
-      if (BPFJ_DYN_MARK_FREE(marks) != kNone) {
-        bpfj_lock_unlock(
-            &bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_FREE(marks))->lock);
-      }
-      return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_UPDATE, BPFJ_DYN_MARK_TOMB(marks));
-    }
-    if (refill < 0) {
-      if (BPFJ_DYN_MARK_FREE(marks) != kNone) {
-        bpfj_lock_unlock(
-            &bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_FREE(marks))->lock);
-      }
-      return refill;
-    }
-    // Somebody else's key. The empty slot it is.
+  // after the walk because the verifier explores the body once per step. The
+  // empty slot was let go first, locks having to come off in the reverse order
+  // they went on, so either may have been filled since.
+  struct bpfj_dyn_map_slot __arena* slot =
+      bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_TOMB(marks));
+  if (bpfj_lock_acquire(&slot->lock, flags)) {
+    return -EBUSY;
   }
 
-  if (BPFJ_DYN_MARK_FREE(marks) != kNone) {
-    // Stamped here because the hash is in hand; handing it back would keep it
-    // live across the walk.
-    struct bpfj_dyn_map_slot __arena* slot =
-        bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_FREE(marks));
+  long found = bpfj_dyn_map_classify(slot, key, key_words, hash);
+  if (found == BPFJ_DYN_TRY_MATCH) {
+    // Filled with this same key, so it is ours to update; falling through
+    // would put the key in the table twice.
+    return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_UPDATE, BPFJ_DYN_MARK_TOMB(marks));
+  }
+  if (found == BPFJ_DYN_TRY_DEAD || found == BPFJ_DYN_TRY_FREE) {
     slot->hash = hash;
-    return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_NEW, BPFJ_DYN_MARK_FREE(marks));
+    return BPFJ_DYN_PLAN(
+        found == BPFJ_DYN_TRY_DEAD ? BPFJ_DYN_PLAN_TOMB : BPFJ_DYN_PLAN_NEW,
+        BPFJ_DYN_MARK_TOMB(marks));
   }
+  bpfj_lock_release(&slot->lock, flags);
 
-  return -EOVERFLOW;
+  // Somebody else's key. The empty slot it is, if it still is.
+  if (BPFJ_DYN_MARK_FREE(marks) == kNone) {
+    return -EOVERFLOW;
+  }
+  slot = bpfj_dyn_map_slot_at(slots, BPFJ_DYN_MARK_FREE(marks));
+  if (bpfj_lock_acquire(&slot->lock, flags)) {
+    return -EBUSY;
+  }
+  if (slot->state != BPFJ_DYN_SLOT_EMPTY) {
+    bpfj_lock_release(&slot->lock, flags);
+    return -EBUSY;
+  }
+  slot->hash = hash;
+  return BPFJ_DYN_PLAN(BPFJ_DYN_PLAN_NEW, BPFJ_DYN_MARK_FREE(marks));
 #undef BPFJ_DYN_MARK_TOMB
 #undef BPFJ_DYN_MARK_FREE
 }
@@ -349,15 +338,17 @@ __noinline long bpfj_dyn_map_move_slot(
     struct bpfj_dyn_map_slot __arena* src __arg_arena,
     struct bpfj_dyn_map_slot __arena* dst_slots __arg_arena,
     __u32 dst_cap) {
-  BPFJ_LOCK_GUARD(src_lock, &src->lock);
-  if (!BPFJ_LOCK_IS_ACQUIRED(src_lock)) {
+  unsigned long src_flags;
+  if (bpfj_lock_acquire(&src->lock, &src_flags)) {
     return -EBUSY;
   }
 
+  long ret = -EOVERFLOW;
   __u32 state = src->state;
   if (state != BPFJ_DYN_SLOT_OCCUPIED) {
-    return state == BPFJ_DYN_SLOT_TOMB ? BPFJ_DYN_MOVE_TOMB
-                                       : BPFJ_DYN_MOVE_EMPTY;
+    ret =
+        state == BPFJ_DYN_SLOT_TOMB ? BPFJ_DYN_MOVE_TOMB : BPFJ_DYN_MOVE_EMPTY;
+    goto out;
   }
 
   __u64 hash = src->hash;
@@ -369,15 +360,17 @@ __noinline long bpfj_dyn_map_move_slot(
     struct bpfj_dyn_map_slot __arena* dst =
         bpfj_dyn_map_slot_at(dst_slots, off);
 
-    BPFJ_LOCK_GUARD(dst_lock, &dst->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(dst_lock)) {
-      return -EBUSY;
+    unsigned long dst_flags;
+    if (bpfj_lock_acquire(&dst->lock, &dst_flags)) {
+      ret = -EBUSY;
+      break;
     }
 
     if (dst->state != BPFJ_DYN_SLOT_EMPTY) {
       // Skipped without comparing keys, so a concurrent insert of the same key
       // can be double-counted in map->size and leave the older copy reachable
       // after a delete; a compare here costs stack the budget has not got.
+      bpfj_lock_release(&dst->lock, &dst_flags);
       off = (off + 1) & (dst_cap - 1);
       continue;
     }
@@ -391,12 +384,17 @@ __noinline long bpfj_dyn_map_move_slot(
     dst->hash = hash;
     dst->state = BPFJ_DYN_SLOT_OCCUPIED;
 
+    bpfj_lock_release(&dst->lock, &dst_flags);
+
     // Left occupied rather than tombstoned, so an entry is never in neither
     // buffer; the old buffer is discarded whole anyway.
-    return BPFJ_DYN_MOVE_DONE;
+    ret = BPFJ_DYN_MOVE_DONE;
+    break;
   }
 
-  return -EOVERFLOW;
+out:
+  bpfj_lock_release(&src->lock, &src_flags);
+  return ret;
 }
 
 // Insert
@@ -415,17 +413,16 @@ __noinline long bpfj_dyn_map_do_insert(
     struct bpfj_shared_ptr* val_sp __arg_nonnull) {
   __u64 hash = bpfj_dyn_map_key_hash(key, key_words);
 
-  long plan = bpfj_dyn_map_probe_plan(slots, cap, key, key_words, hash);
+  unsigned long flags;
+  long plan = bpfj_dyn_map_probe_plan(slots, cap, key, key_words, hash, &flags);
   if (plan < 0) {
     return plan;
   }
 
+  // The probe handed the slot over locked; held until the entry is whole.
   __u32 kind = BPFJ_DYN_PLAN_KIND(plan);
   struct bpfj_dyn_map_slot __arena* slot =
       bpfj_dyn_map_slot_at(slots, BPFJ_DYN_PLAN_IDX(plan));
-
-  // The probe handed the slot over locked; hold it until the entry is whole.
-  BPFJ_LOCK_GUARD_TAKE_OVER(slot_lock, &slot->lock);
 
   struct bpfj_shared_ptr displaced = bpfj_shared_ptr_take_arena(&slot->val_ptr);
   slot->val_ptr.buf = val_sp->buf;
@@ -437,6 +434,7 @@ __noinline long bpfj_dyn_map_do_insert(
     slot->key = key;
     slot->state = BPFJ_DYN_SLOT_OCCUPIED;
   }
+  bpfj_lock_release(&slot->lock, &flags);
   return kind;
 }
 
@@ -445,22 +443,24 @@ __noinline long bpfj_dyn_map_do_insert(
 // Give up a grow that could not finish: unpublish the half-filled buffer so
 // inserts go back to the live one. Its entries are NOT released here, though
 // they should be -- neither shape of the reclaiming walk fits in the stack
-// budget -- so userspace (DynLru::releaseSlots) does it.
-static __always_inline void bpfj_dyn_map_retract_grow(
+// budget -- so userspace (DynLru::releaseSlots) does it. Out of line to keep
+// its locals off bpfj_dyn_map_grow's frame, which is on the insert's stack
+// chain.
+static __noinline void bpfj_dyn_map_retract_grow(
     __arena struct bpfj_dyn_map* map) {
-  struct bpfj_shared_ptr sp = {0};
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      // Leaving growing_slots_ptr published would wedge the map, and BPF cannot
-      // spin, so mark it abandoned and let the next grow finish.
-      BPFJ_DYN_WRITE_ONCE(map->grow_abandoned, 1);
-      return;
-    }
-    sp = bpfj_shared_ptr_take_arena(&map->growing_slots_ptr);
-    map->growing_capacity = 0;
-    BPFJ_DYN_WRITE_ONCE(map->grow_abandoned, 0);
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    // Leaving growing_slots_ptr published would wedge the map, so mark it
+    // abandoned and let the next grow finish.
+    BPFJ_DYN_WRITE_ONCE(map->grow_abandoned, 1);
+    return;
   }
+  struct bpfj_shared_ptr sp =
+      bpfj_shared_ptr_take_arena(&map->growing_slots_ptr);
+  map->growing_capacity = 0;
+  BPFJ_DYN_WRITE_ONCE(map->grow_abandoned, 0);
+  bpfj_lock_release(&map->lock, &flags);
+
   bpfj_shared_ptr_release(&sp);
 }
 
@@ -497,27 +497,25 @@ static __noinline long bpfj_dyn_map_grow(__arena struct bpfj_dyn_map* map) {
     bpfj_dyn_map_retract_grow(map);
   }
 
-  struct bpfj_dyn_map_slot __arena* old_slots = NULL;
-  __u32 old_cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      // No explicit free here or below: growing_ptr's cleanup frees the buffer.
-      return -EBUSY;
-    }
-
-    if (map->growing_slots_ptr.refcount) {
-      // Still set after the retract above means a grow is genuinely running and
-      // inserts already go to its buffer, which is all this caller wanted.
-      return 0;
-    }
-
-    map->growing_slots_ptr = bpfj_shared_ptr_acquire(growing_ptr);
-    map->growing_capacity = new_cap;
-
-    old_slots = map->slots_ptr.buf;
-    old_cap = map->capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    // No explicit free here or below: growing_ptr's cleanup frees the buffer.
+    return -EBUSY;
   }
+
+  if (map->growing_slots_ptr.refcount) {
+    // Still set after the retract above means a grow is genuinely running and
+    // inserts already go to its buffer, which is all this caller wanted.
+    bpfj_lock_release(&map->lock, &flags);
+    return 0;
+  }
+
+  map->growing_slots_ptr = bpfj_shared_ptr_acquire(growing_ptr);
+  map->growing_capacity = new_cap;
+
+  struct bpfj_dyn_map_slot __arena* old_slots = map->slots_ptr.buf;
+  __u32 old_cap = map->capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   // Nothing but the call and its two outcomes belongs in this body: the
   // verifier explores it once per step over BPFJ_DYN_MAP_MAX_CAPACITY steps.
@@ -549,28 +547,26 @@ static __noinline long bpfj_dyn_map_grow(__arena struct bpfj_dyn_map* map) {
 
   // Commit. The counters are not recomputed from the walk, since concurrent
   // inserts and deletes have been maintaining them all along.
-  struct bpfj_shared_ptr retired = {0};
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      bpfj_dyn_map_retract_grow(map);
-      return -EBUSY;
-    }
-
-    if (!map->growing_slots_ptr.refcount) {
-      // We were wiped during the grow and need to abort
-      map->growing_capacity = 0;
-      return -EBUSY;
-    }
-
-    retired = bpfj_shared_ptr_take_arena(&map->slots_ptr);
-    map->slots_ptr.buf = map->growing_slots_ptr.buf;
-    map->slots_ptr.refcount = map->growing_slots_ptr.refcount;
-    map->growing_slots_ptr.buf = NULL;
-    map->growing_slots_ptr.refcount = NULL;
-    map->capacity = new_cap;
-    map->growing_capacity = 0;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    bpfj_dyn_map_retract_grow(map);
+    return -EBUSY;
   }
+
+  if (!map->growing_slots_ptr.refcount) {
+    // We were wiped during the grow and need to abort
+    map->growing_capacity = 0;
+    bpfj_lock_release(&map->lock, &flags);
+    return -EBUSY;
+  }
+
+  struct bpfj_shared_ptr retired = bpfj_shared_ptr_take_arena(&map->slots_ptr);
+  map->slots_ptr.buf = map->growing_slots_ptr.buf;
+  map->slots_ptr.refcount = map->growing_slots_ptr.refcount;
+  map->growing_slots_ptr.buf = NULL;
+  map->growing_slots_ptr.refcount = NULL;
+  map->capacity = new_cap;
+  map->growing_capacity = 0;
+  bpfj_lock_release(&map->lock, &flags);
 
   // The map's reference; the buffer goes once the last walker releases its own.
   bpfj_shared_ptr_release(&retired);
@@ -587,19 +583,15 @@ __noinline long bpfj_dyn_map_lookup(
     struct bpfj_shared_ptr* val_ptr __arg_nonnull) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
   BPFJ_DYN_MAP_SLOTS_GUARD(growing);
-  __u32 cap = 0;
-  __u32 growing_cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      return -EBUSY;
-    }
-
-    BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
-    cap = map->capacity;
-    BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
-    growing_cap = map->growing_capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    return -EBUSY;
   }
+  BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
+  __u32 cap = map->capacity;
+  BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
+  __u32 growing_cap = map->growing_capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
 
@@ -609,11 +601,11 @@ __noinline long bpfj_dyn_map_lookup(
   struct bpfj_dyn_map_slot __arena* slots = NULL;
   if (BPFJ_DYN_MAP_SLOTS(growing)) {
     slots = BPFJ_DYN_MAP_SLOTS(growing);
-    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words, &flags);
   }
   if (idx == -ENOENT) {
     slots = BPFJ_DYN_MAP_SLOTS(published);
-    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   }
   if (idx < 0) {
     return idx;
@@ -625,7 +617,7 @@ __noinline long bpfj_dyn_map_lookup(
   // Under the lock the probe left held, so a delete cannot be dropping the
   // map's reference at the same time.
   *val_ptr = bpfj_shared_ptr_acquire_arena(&slot->val_ptr);
-  bpfj_lock_unlock(&slot->lock);
+  bpfj_lock_release(&slot->lock, &flags);
   return 0;
 }
 
@@ -638,19 +630,15 @@ __noinline long bpfj_dyn_map_lookup_word(
     __u64* out __arg_nonnull) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
   BPFJ_DYN_MAP_SLOTS_GUARD(growing);
-  __u32 cap = 0;
-  __u32 growing_cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      return -EBUSY;
-    }
-
-    BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
-    cap = map->capacity;
-    BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
-    growing_cap = map->growing_capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    return -EBUSY;
   }
+  BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
+  __u32 cap = map->capacity;
+  BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
+  __u32 growing_cap = map->growing_capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
 
@@ -659,11 +647,11 @@ __noinline long bpfj_dyn_map_lookup_word(
   struct bpfj_dyn_map_slot __arena* slots = NULL;
   if (BPFJ_DYN_MAP_SLOTS(growing)) {
     slots = BPFJ_DYN_MAP_SLOTS(growing);
-    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words, &flags);
   }
   if (idx == -ENOENT) {
     slots = BPFJ_DYN_MAP_SLOTS(published);
-    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   }
   if (idx < 0) {
     return idx;
@@ -674,7 +662,7 @@ __noinline long bpfj_dyn_map_lookup_word(
 
   // Under the lock the probe left held, so a delete cannot free the block.
   *out = *(__u64 __arena*)slot->val_ptr.buf;
-  bpfj_lock_unlock(&slot->lock);
+  bpfj_lock_release(&slot->lock, &flags);
   return 0;
 }
 
@@ -686,19 +674,15 @@ __noinline long bpfj_dyn_map_update_word(
     __u64 word) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
   BPFJ_DYN_MAP_SLOTS_GUARD(growing);
-  __u32 cap = 0;
-  __u32 growing_cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      return -EBUSY;
-    }
-
-    BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
-    cap = map->capacity;
-    BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
-    growing_cap = map->growing_capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    return -EBUSY;
   }
+  BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
+  __u32 cap = map->capacity;
+  BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
+  __u32 growing_cap = map->growing_capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
 
@@ -707,11 +691,11 @@ __noinline long bpfj_dyn_map_update_word(
   struct bpfj_dyn_map_slot __arena* slots = NULL;
   if (BPFJ_DYN_MAP_SLOTS(growing)) {
     slots = BPFJ_DYN_MAP_SLOTS(growing);
-    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, growing_cap, key, key_words, &flags);
   }
   if (idx == -ENOENT) {
     slots = BPFJ_DYN_MAP_SLOTS(published);
-    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+    idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   }
   if (idx < 0) {
     return idx;
@@ -721,33 +705,20 @@ __noinline long bpfj_dyn_map_update_word(
       bpfj_dyn_map_slot_at(slots, (__u32)idx);
 
   *(__u64 __arena*)slot->val_ptr.buf = word;
-  bpfj_lock_unlock(&slot->lock);
+  bpfj_lock_release(&slot->lock, &flags);
   return 0;
 }
 
-// The body of the three inserts. `out` and `may_grow` are constants at every
-// call site, so each insert compiles to its own path: the plain insert to what
-// it was before either existed, and bpfj_dyn_map_insert_fixed with no call to
-// bpfj_dyn_map_grow at all.
+// The body of every insert, which places the entry without growing the map;
+// `out` is NULL where the caller wants no reference back.
 static __always_inline long bpfj_dyn_map_insert_impl(
     __arena struct bpfj_dyn_map* map,
     __u64 __arena* key,
     void __arena* val,
-    struct bpfj_shared_ptr* out,
-    bool may_grow) {
+    struct bpfj_shared_ptr* out) {
   if (map->capacity == 0) {
     bpfj_dyn_map_free_entry(key, val);
     return -EINVAL;
-  }
-
-  if (may_grow &&
-      bpfj_dyn_map_should_grow(
-          BPFJ_DYN_READ_ONCE(map->size),
-          BPFJ_DYN_READ_ONCE(map->tombstones),
-          BPFJ_DYN_READ_ONCE(map->capacity))) {
-    // Best effort: the rehash is maintenance, and a buffer really out of room
-    // says so through do_insert.
-    bpfj_dyn_map_grow(map);
   }
 
   // Before the map's lock, since the allocator has a lock of its own.
@@ -764,53 +735,55 @@ static __always_inline long bpfj_dyn_map_insert_impl(
   }
 
   BPFJ_DYN_MAP_SLOTS_GUARD(slots);
-  long kind = 0;
-  {
-    // Held across the write, not just the choice of buffer: otherwise a grow
-    // publishing in that window can pass the still-empty slot and commit,
-    // discarding the entry's blocks as raw memory while insert returns 0.
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      BPFJ_HEAP_FREE(key);
-      bpfj_shared_ptr_release(&val_sp);
-      if (out) {
-        bpfj_shared_ptr_release(out);
-      }
-      return -EBUSY;
+
+  // Held across the write, not just the choice of buffer: otherwise a grow
+  // publishing in that window can pass the still-empty slot and commit,
+  // discarding the entry's blocks as raw memory while insert returns 0.
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    BPFJ_HEAP_FREE(key);
+    bpfj_shared_ptr_release(&val_sp);
+    if (out) {
+      bpfj_shared_ptr_release(out);
     }
+    return -EBUSY;
+  }
 
-    // Into the buffer a grow is filling, when there is one, since it is about
-    // to be published.
-    __u32 cap = 0;
-    if (map->growing_slots_ptr.refcount) {
-      // Unless this key is still in the retiring buffer waiting for the walk,
-      // in which case writing here would put it in the table twice. Refused
-      // rather than merged: updating the retiring copy needs a second write
-      // path this frame has no stack for.
-      struct bpfj_dyn_map_slot __arena* retiring =
-          (struct bpfj_dyn_map_slot __arena*)map->slots_ptr.buf;
-      long live = bpfj_dyn_map_probe_lookup(
-          retiring, map->capacity, key, bpfj_dyn_map_key_words(map->key_size));
-      if (live >= 0) {
-        // probe_lookup hands a match back locked.
-        bpfj_lock_unlock(&bpfj_dyn_map_slot_at(retiring, (__u32)live)->lock);
-      }
-      if (live != -ENOENT) {
-        BPFJ_HEAP_FREE(key);
-        bpfj_shared_ptr_release(&val_sp);
-        if (out) {
-          bpfj_shared_ptr_release(out);
-        }
-        return live >= 0 ? -EBUSY : live;
-      }
-
+  // Into the buffer a grow is filling, when there is one, since it is about
+  // to be published.
+  long kind = 0;
+  __u32 cap = 0;
+  if (map->growing_slots_ptr.refcount) {
+    // Unless this key is still in the retiring buffer waiting for the walk,
+    // in which case writing here would put it in the table twice. Refused
+    // rather than merged: updating the retiring copy needs a second write
+    // path this frame has no stack for.
+    struct bpfj_dyn_map_slot __arena* retiring =
+        (struct bpfj_dyn_map_slot __arena*)map->slots_ptr.buf;
+    unsigned long slot_flags;
+    long live = bpfj_dyn_map_probe_lookup(
+        retiring,
+        map->capacity,
+        key,
+        bpfj_dyn_map_key_words(map->key_size),
+        &slot_flags);
+    if (live >= 0) {
+      // probe_lookup hands a match back locked.
+      bpfj_lock_release(
+          &bpfj_dyn_map_slot_at(retiring, (__u32)live)->lock, &slot_flags);
+    }
+    if (live != -ENOENT) {
+      kind = live >= 0 ? -EBUSY : live;
+    } else {
       BPFJ_DYN_MAP_SLOTS_ADOPT(slots, &map->growing_slots_ptr);
       cap = map->growing_capacity;
-    } else {
-      BPFJ_DYN_MAP_SLOTS_ADOPT(slots, &map->slots_ptr);
-      cap = map->capacity;
     }
+  } else {
+    BPFJ_DYN_MAP_SLOTS_ADOPT(slots, &map->slots_ptr);
+    cap = map->capacity;
+  }
 
+  if (kind == 0) {
     kind = bpfj_dyn_map_do_insert(
         BPFJ_DYN_MAP_SLOTS(slots),
         cap,
@@ -818,6 +791,8 @@ static __always_inline long bpfj_dyn_map_insert_impl(
         bpfj_dyn_map_key_words(map->key_size),
         &val_sp);
   }
+  bpfj_lock_release(&map->lock, &flags);
+
   if (kind < 0) {
     // Nothing was stored, so both blocks are still ours.
     BPFJ_HEAP_FREE(key);
@@ -854,7 +829,33 @@ __noinline long bpfj_dyn_map_insert_fixed(
     __arena struct bpfj_dyn_map* map __arg_arena,
     __u64 __arena* key __arg_arena,
     void __arena* val __arg_arena) {
-  return bpfj_dyn_map_insert_impl(map, key, val, NULL, false);
+  return bpfj_dyn_map_insert_impl(map, key, val, NULL);
+}
+
+// bpfj_dyn_map_insert_fixed with a reference back, `out` NULL for none: what
+// the growing inserts call after their grow, so the placement's locals are
+// not on the stack beneath bpfj_dyn_map_grow.
+__noinline long bpfj_dyn_map_place(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena,
+    void __arena* val __arg_arena,
+    struct bpfj_shared_ptr* out) {
+  return bpfj_dyn_map_insert_impl(map, key, val, out);
+}
+
+// Grow a map an insert is about to push past its load factor. Best effort:
+// the rehash is maintenance, and a buffer really out of room says so through
+// the placement.
+static __always_inline void bpfj_dyn_map_maybe_grow(
+    __arena struct bpfj_dyn_map* map) {
+  __u32 cap = BPFJ_DYN_READ_ONCE(map->capacity);
+  if (cap != 0 &&
+      bpfj_dyn_map_should_grow(
+          BPFJ_DYN_READ_ONCE(map->size),
+          BPFJ_DYN_READ_ONCE(map->tombstones),
+          cap)) {
+    bpfj_dyn_map_grow(map);
+  }
 }
 
 // Takes ownership of the `key` and `val` blocks, which must be arena
@@ -864,7 +865,8 @@ __noinline long bpfj_dyn_map_insert(
     __arena struct bpfj_dyn_map* map __arg_arena,
     __u64 __arena* key __arg_arena,
     void __arena* val __arg_arena) {
-  return bpfj_dyn_map_insert_impl(map, key, val, NULL, true);
+  bpfj_dyn_map_maybe_grow(map);
+  return bpfj_dyn_map_place(map, key, val, NULL);
 }
 
 // bpfj_dyn_map_insert, also handing back in `*out` a reference to the value
@@ -877,7 +879,8 @@ __noinline long bpfj_dyn_map_insert_shared(
     struct bpfj_shared_ptr* out __arg_nonnull) {
   out->buf = NULL;
   out->refcount = NULL;
-  return bpfj_dyn_map_insert_impl(map, key, val, out, true);
+  bpfj_dyn_map_maybe_grow(map);
+  return bpfj_dyn_map_place(map, key, val, out);
 }
 
 // Empty the slot holding `key` in one buffer, handing the entry back rather
@@ -888,7 +891,8 @@ static __noinline long bpfj_dyn_map_do_delete(
     const __u64 __arena* key,
     __u32 key_words,
     struct bpfj_dyn_map_entry* out __arg_nonnull) {
-  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+  unsigned long flags;
+  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   if (idx < 0) {
     return idx;
   }
@@ -902,7 +906,7 @@ static __noinline long bpfj_dyn_map_do_delete(
   out->val = bpfj_shared_ptr_take_arena(&slot->val_ptr);
   slot->key = NULL;
   slot->state = BPFJ_DYN_SLOT_TOMB;
-  bpfj_lock_unlock(&slot->lock);
+  bpfj_lock_release(&slot->lock, &flags);
   return 0;
 }
 
@@ -918,7 +922,8 @@ static __noinline long bpfj_dyn_map_do_delete_unique(
     const __u64 __arena* key,
     __u32 key_words,
     struct bpfj_dyn_map_entry* out __arg_nonnull) {
-  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+  unsigned long flags;
+  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   if (idx < 0) {
     return idx;
   }
@@ -930,7 +935,7 @@ static __noinline long bpfj_dyn_map_do_delete_unique(
   // already holds one, so the count was never 1 to begin with.
   __u32 __arena* refcount = slot->val_ptr.refcount;
   if (refcount && BPFJ_DYN_READ_ONCE(*refcount) != 1) {
-    bpfj_lock_unlock(&slot->lock);
+    bpfj_lock_release(&slot->lock, &flags);
     return 1;
   }
 
@@ -938,7 +943,7 @@ static __noinline long bpfj_dyn_map_do_delete_unique(
   out->val = bpfj_shared_ptr_take_arena(&slot->val_ptr);
   slot->key = NULL;
   slot->state = BPFJ_DYN_SLOT_TOMB;
-  bpfj_lock_unlock(&slot->lock);
+  bpfj_lock_release(&slot->lock, &flags);
   return 0;
 }
 
@@ -949,12 +954,13 @@ static __always_inline long bpfj_dyn_map_lookup_exists(
     __u32 cap,
     const __u64 __arena* key,
     __u32 key_words) {
-  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+  unsigned long flags;
+  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words, &flags);
   if (idx < 0) {
     return idx;
   }
 
-  bpfj_lock_unlock(&bpfj_dyn_map_slot_at(slots, (__u32)idx)->lock);
+  bpfj_lock_release(&bpfj_dyn_map_slot_at(slots, (__u32)idx)->lock, &flags);
   return 1;
 }
 
@@ -966,19 +972,15 @@ static __always_inline long bpfj_dyn_map_delete_impl(
     bool unique) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
   BPFJ_DYN_MAP_SLOTS_GUARD(growing);
-  __u32 cap = 0;
-  __u32 growing_cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      return -EBUSY;
-    }
-
-    BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
-    cap = map->capacity;
-    BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
-    growing_cap = map->growing_capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    return -EBUSY;
   }
+  BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
+  __u32 cap = map->capacity;
+  BPFJ_DYN_MAP_SLOTS_ADOPT(growing, &map->growing_slots_ptr);
+  __u32 growing_cap = map->growing_capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
 
@@ -1098,19 +1100,18 @@ __noinline long bpfj_dyn_map_init(
   return 0;
 }
 
-static __always_inline long bpfj_dyn_map_wipe(
-    __arena struct bpfj_dyn_map* map) {
+// Out of line, so the callers' frames on the insert's stack chain do not
+// carry its locals.
+__noinline long bpfj_dyn_map_wipe(
+    __arena struct bpfj_dyn_map* map __arg_arena) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
-  __u32 cap = 0;
-  {
-    BPFJ_LOCK_GUARD(map_lock, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
-      return -EBUSY;
-    }
-
-    BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
-    cap = map->capacity;
+  unsigned long flags;
+  if (bpfj_lock_acquire(&map->lock, &flags)) {
+    return -EBUSY;
   }
+  BPFJ_DYN_MAP_SLOTS_ADOPT(published, &map->slots_ptr);
+  __u32 cap = map->capacity;
+  bpfj_lock_release(&map->lock, &flags);
 
   bpfj_dyn_map_release_entries(BPFJ_DYN_MAP_SLOTS(published), cap);
 
@@ -1127,6 +1128,8 @@ static __always_inline long bpfj_dyn_map_wipe(
 }
 
 // Release everything the map holds; like init, requires the map to itself.
+// Inline, since lookup guards call it from frames already eight calls deep;
+// elsewhere bpfj_dyn_map_free keeps the walk off the caller's frame.
 static __always_inline void bpfj_dyn_map_destroy(
     __arena struct bpfj_dyn_map* map) {
   if (map->capacity == 0) {
@@ -1147,4 +1150,14 @@ static __always_inline void bpfj_dyn_map_destroy(
   map->tombstones = 0;
   map->capacity = 0;
   map->growing_capacity = 0;
+}
+
+// bpfj_dyn_map_destroy, then free the header block itself, for a map in a heap
+// allocation of its own. Out of line, so the caller's frame does not carry the
+// destroy's walk.
+__noinline long bpfj_dyn_map_free(
+    __arena struct bpfj_dyn_map* map __arg_arena) {
+  bpfj_dyn_map_destroy(map);
+  BPFJ_HEAP_FREE(map);
+  return 0;
 }
