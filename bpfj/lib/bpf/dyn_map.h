@@ -725,13 +725,14 @@ __noinline long bpfj_dyn_map_update_word(
   return 0;
 }
 
-// Takes ownership of the `key` and `val` blocks, which must be arena
-// allocations of the map's key_size and val_size; re-inserting a live key
-// replaces its value, and every failure releases both.
-__noinline long bpfj_dyn_map_insert(
-    __arena struct bpfj_dyn_map* map __arg_arena,
-    __u64 __arena* key __arg_arena,
-    void __arena* val __arg_arena) {
+// The body of bpfj_dyn_map_insert and bpfj_dyn_map_insert_shared. `out` is
+// NULL for the plain insert, a constant at both call sites, so that one
+// compiles to what it was before `out` existed.
+static __always_inline long bpfj_dyn_map_insert_impl(
+    __arena struct bpfj_dyn_map* map,
+    __u64 __arena* key,
+    void __arena* val,
+    struct bpfj_shared_ptr* out) {
   if (map->capacity == 0) {
     bpfj_dyn_map_free_entry(key, val);
     return -EINVAL;
@@ -753,6 +754,12 @@ __noinline long bpfj_dyn_map_insert(
     return -ENOMEM;
   }
 
+  // Taken before the value is published, so the caller's reference is to the
+  // value this call stored even if another CPU replaces it right after.
+  if (out) {
+    *out = bpfj_shared_ptr_acquire(val_sp);
+  }
+
   BPFJ_DYN_MAP_SLOTS_GUARD(slots);
   long kind = 0;
   {
@@ -763,6 +770,9 @@ __noinline long bpfj_dyn_map_insert(
     if (!BPFJ_LOCK_IS_ACQUIRED(map_lock)) {
       BPFJ_HEAP_FREE(key);
       bpfj_shared_ptr_release(&val_sp);
+      if (out) {
+        bpfj_shared_ptr_release(out);
+      }
       return -EBUSY;
     }
 
@@ -785,6 +795,9 @@ __noinline long bpfj_dyn_map_insert(
       if (live != -ENOENT) {
         BPFJ_HEAP_FREE(key);
         bpfj_shared_ptr_release(&val_sp);
+        if (out) {
+          bpfj_shared_ptr_release(out);
+        }
         return live >= 0 ? -EBUSY : live;
       }
 
@@ -806,6 +819,9 @@ __noinline long bpfj_dyn_map_insert(
     // Nothing was stored, so both blocks are still ours.
     BPFJ_HEAP_FREE(key);
     bpfj_shared_ptr_release(&val_sp);
+    if (out) {
+      bpfj_shared_ptr_release(out);
+    }
     return kind;
   }
 
@@ -824,6 +840,29 @@ __noinline long bpfj_dyn_map_insert(
   // What the slot gave up: the value an update replaced, or nothing at all.
   bpfj_shared_ptr_release(&val_sp);
   return 0;
+}
+
+// Takes ownership of the `key` and `val` blocks, which must be arena
+// allocations of the map's key_size and val_size; re-inserting a live key
+// replaces its value, and every failure releases both.
+__noinline long bpfj_dyn_map_insert(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena,
+    void __arena* val __arg_arena) {
+  return bpfj_dyn_map_insert_impl(map, key, val, NULL);
+}
+
+// bpfj_dyn_map_insert, also handing back in `*out` a reference to the value
+// stored. That is what a lookup afterwards would give. It saves the second
+// probe and its chance of -EBUSY. `*out` is left invalid on failure.
+__noinline long bpfj_dyn_map_insert_shared(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena,
+    void __arena* val __arg_arena,
+    struct bpfj_shared_ptr* out __arg_nonnull) {
+  out->buf = NULL;
+  out->refcount = NULL;
+  return bpfj_dyn_map_insert_impl(map, key, val, out);
 }
 
 // Empty the slot holding `key` in one buffer, handing the entry back rather
@@ -852,10 +891,64 @@ static __noinline long bpfj_dyn_map_do_delete(
   return 0;
 }
 
-// Borrows `key`; the entry it finds is the map's to release.
-__noinline long bpfj_dyn_map_delete(
-    __arena struct bpfj_dyn_map* map __arg_arena,
-    __u64 __arena* key __arg_arena) {
+// bpfj_dyn_map_do_delete, but only if the map holds the value's last
+// reference. It returns 1, with the entry left in place, when anyone else
+// still holds one. Decided under the slot's lock, which every lookup takes to
+// acquire. No lookup through this buffer can take a reference between the
+// check and the delete. A holder that already had one keeps its copy valid
+// either way.
+static __noinline long bpfj_dyn_map_do_delete_unique(
+    struct bpfj_dyn_map_slot __arena* slots,
+    __u32 cap,
+    const __u64 __arena* key,
+    __u32 key_words,
+    struct bpfj_dyn_map_entry* out __arg_nonnull) {
+  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+  if (idx < 0) {
+    return idx;
+  }
+
+  struct bpfj_dyn_map_slot __arena* slot =
+      bpfj_dyn_map_slot_at(slots, (__u32)idx);
+
+  // A plain read suffices: anyone taking a reference without this lock
+  // already holds one, so the count was never 1 to begin with.
+  __u32 __arena* refcount = slot->val_ptr.refcount;
+  if (refcount && BPFJ_DYN_READ_ONCE(*refcount) != 1) {
+    bpfj_lock_unlock(&slot->lock);
+    return 1;
+  }
+
+  out->key = slot->key;
+  out->val = bpfj_shared_ptr_take_arena(&slot->val_ptr);
+  slot->key = NULL;
+  slot->state = BPFJ_DYN_SLOT_TOMB;
+  bpfj_lock_unlock(&slot->lock);
+  return 0;
+}
+
+// Whether `key` is present in `slots`. Success returns 1 and unlocks the slot
+// the lookup matched, since the caller is only checking reachability.
+static __always_inline long bpfj_dyn_map_lookup_exists(
+    struct bpfj_dyn_map_slot __arena* slots,
+    __u32 cap,
+    const __u64 __arena* key,
+    __u32 key_words) {
+  long idx = bpfj_dyn_map_probe_lookup(slots, cap, key, key_words);
+  if (idx < 0) {
+    return idx;
+  }
+
+  bpfj_lock_unlock(&bpfj_dyn_map_slot_at(slots, (__u32)idx)->lock);
+  return 1;
+}
+
+// The body of bpfj_dyn_map_delete and bpfj_dyn_map_delete_if_unique, `unique`
+// a constant at both call sites.
+static __always_inline long bpfj_dyn_map_delete_impl(
+    __arena struct bpfj_dyn_map* map,
+    __u64 __arena* key,
+    bool unique) {
   BPFJ_DYN_MAP_SLOTS_GUARD(published);
   BPFJ_DYN_MAP_SLOTS_GUARD(growing);
   __u32 cap = 0;
@@ -874,19 +967,38 @@ __noinline long bpfj_dyn_map_delete(
 
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
 
+  // Mid-grow the same value may be reachable through both buffers without a
+  // second counted reference. A unique delete waits that out.
+  if (unique && BPFJ_DYN_MAP_SLOTS(growing)) {
+    long live = bpfj_dyn_map_lookup_exists(
+        BPFJ_DYN_MAP_SLOTS(growing), growing_cap, key, key_words);
+    if (live == -ENOENT) {
+      live = bpfj_dyn_map_lookup_exists(
+          BPFJ_DYN_MAP_SLOTS(published), cap, key, key_words);
+    }
+    return live;
+  }
+
   // One buffer only: a grow leaves the entry in both, so deleting from both
   // would free it twice.
   struct bpfj_dyn_map_entry dead = {0};
   long ret = -ENOENT;
   if (BPFJ_DYN_MAP_SLOTS(growing)) {
-    ret = bpfj_dyn_map_do_delete(
-        BPFJ_DYN_MAP_SLOTS(growing), growing_cap, key, key_words, &dead);
+    ret = unique
+        ? bpfj_dyn_map_do_delete_unique(
+              BPFJ_DYN_MAP_SLOTS(growing), growing_cap, key, key_words, &dead)
+        : bpfj_dyn_map_do_delete(
+              BPFJ_DYN_MAP_SLOTS(growing), growing_cap, key, key_words, &dead);
   }
   if (ret == -ENOENT) {
-    ret = bpfj_dyn_map_do_delete(
-        BPFJ_DYN_MAP_SLOTS(published), cap, key, key_words, &dead);
+    ret = unique
+        ? bpfj_dyn_map_do_delete_unique(
+              BPFJ_DYN_MAP_SLOTS(published), cap, key, key_words, &dead)
+        : bpfj_dyn_map_do_delete(
+              BPFJ_DYN_MAP_SLOTS(published), cap, key, key_words, &dead);
   }
-  if (ret < 0) {
+  if (ret != 0) {
+    // A negative errno, or 1 from a unique delete that found the value shared.
     return ret;
   }
 
@@ -898,6 +1010,24 @@ __noinline long bpfj_dyn_map_delete(
   }
   bpfj_shared_ptr_release(&dead.val);
   return 0;
+}
+
+// Borrows `key`; the entry it finds is the map's to release.
+__noinline long bpfj_dyn_map_delete(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena) {
+  return bpfj_dyn_map_delete_impl(map, key, false);
+}
+
+// Delete `key` only if nothing but the map holds its value: 0 once deleted, 1
+// if some other reference kept it in place, or a negative errno. For a map
+// that indexes values held elsewhere, an entry nobody else holds is one to
+// reclaim. Mid-grow it returns 1 for any reachable entry and waits for the
+// grow to settle before deciding uniqueness.
+__noinline long bpfj_dyn_map_delete_if_unique(
+    __arena struct bpfj_dyn_map* map __arg_arena,
+    __u64 __arena* key __arg_arena) {
+  return bpfj_dyn_map_delete_impl(map, key, true);
 }
 
 // `key_size` and `val_size` fix the width of every entry for the map's
