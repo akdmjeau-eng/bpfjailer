@@ -15,9 +15,10 @@
 #   make clean        remove the build directory
 #   make config       print the resolved toolchain and flags
 #
-# Requires clang (BPF codegen), bpftool, a C++20 compiler, and libbpf with its
-# headers. Set LIBBPF_CFLAGS / LIBBPF_LIBS to point at a libbpf that
-# pkg-config does not know about.
+# Requires clang (BPF codegen), bpftool, a C++20 compiler, libbpf with its
+# headers, and a checkout of libarena. Set LIBBPF_CFLAGS / LIBBPF_LIBS to point
+# at a libbpf that pkg-config does not know about, and LIBARENA to the libarena
+# checkout (see below).
 #
 # Everything is written under $(BUILD); the source tree is never touched.
 
@@ -38,6 +39,21 @@ LIBBPF_LIBS   ?= $(shell pkg-config --libs libbpf 2>/dev/null || echo -lbpf)
 # and its *_opts helpers. -isystem silences those without softening the
 # warnings that apply to this tree.
 LIBBPF_INCLUDES := $(patsubst -I%,-isystem %,$(LIBBPF_CFLAGS))
+
+# ---------------------------------------------------------------------------
+# libarena
+# ---------------------------------------------------------------------------
+
+# The arena spin lock bpfj/lib/bpf/lock.h takes comes from libarena, which
+# ships as source rather than as a package. Clone it and point LIBARENA at the
+# checkout:
+#
+#   git clone https://github.com/libbpf/libarena ~/libarena
+#   make LIBARENA=~/libarena
+#
+# Only the BPF objects read it, from $(LIBARENA)/libarena/include.
+LIBARENA ?=
+LIBARENA_INCLUDE := $(LIBARENA)/libarena/include
 
 # ---------------------------------------------------------------------------
 # Static linking
@@ -143,6 +159,18 @@ BPF_CFLAGS ?= \
 	-DBPF_NO_KFUNC_PROTOTYPES \
 	-D$(BPF_ARCH_DEF) \
 	-D__TARGET_ARCH_$(BPF_ARCH)
+
+# libarena gates arena_spinlock_t on ENABLE_ATOMICS_TESTS. Its header declares
+# the lock's queue nodes without defining them, expecting its own objects to
+# be linked in, so lock.h defines them when BPFJ_DEFINE_LIBARENA_QNODES says
+# this is that header. It includes <vmlinux.h> by bare name, hence the second
+# include directory. Kept apart from BPF_CFLAGS so overriding that does not
+# drop them.
+BPF_LIBARENA_FLAGS = \
+	-DENABLE_ATOMICS_TESTS \
+	-DBPFJ_DEFINE_LIBARENA_QNODES \
+	-I$(LIBARENA_INCLUDE) \
+	-I$(dir $(VMLINUX))
 
 # ---------------------------------------------------------------------------
 # Sources
@@ -463,7 +491,7 @@ endef
 
 # cmd and srv name directories as well as targets, so without .PHONY make would
 # find those directories up to date and build nothing.
-.PHONY: all clean config signed signing-key client cmd srv test FORCE
+.PHONY: all clean config signed signing-key client cmd srv test libarena-check FORCE
 all: $(BIN)
 
 FORCE:
@@ -487,11 +515,21 @@ $(VMLINUX):
 # the generated dependency applies to the target make actually builds. Without
 # these an edit to a header rebuilds nothing, and the stale skeleton that
 # leaves behind looks like the source change simply had no effect.
-$(BUILD)/%.bpf.o: %.bpf.c $(VMLINUX)
+$(BUILD)/%.bpf.o: %.bpf.c $(VMLINUX) | libarena-check
 	@mkdir -p $(dir $@)
-	$(CLANG) $(BPF_CFLAGS) $(INCLUDES) -MMD -MP -MT $@ -MF $(@:.bpf.o=.bpf.d) -c $< -o $@.tmp
+	$(CLANG) $(BPF_CFLAGS) $(BPF_LIBARENA_FLAGS) $(INCLUDES) -MMD -MP -MT $@ -MF $(@:.bpf.o=.bpf.d) -c $< -o $@.tmp
 	$(BPFTOOL) gen object $@ $@.tmp
 	@rm -f $@.tmp
+
+# Order-only, so it fails the build up front with instructions rather than as
+# a missing-header error deep in a BPF compile, without forcing a rebuild.
+libarena-check:
+	@if [ ! -f "$(LIBARENA_INCLUDE)/bpf_arena_spin_lock.h" ]; then \
+		echo "libarena not found at '$(LIBARENA)'. Clone it and set LIBARENA:" >&2; \
+		echo "  git clone https://github.com/libbpf/libarena ~/libarena" >&2; \
+		echo "  make LIBARENA=~/libarena" >&2; \
+		exit 1; \
+	fi
 
 $(BUILD)/%.skel.h: $(BUILD)/%.bpf.o
 	@mkdir -p $(dir $@)
@@ -678,6 +716,7 @@ config:
 	@echo "CXX         = $(CXX)"
 	@echo "CLANG       = $(CLANG)"
 	@echo "BPFTOOL     = $(BPFTOOL)"
+	@echo "LIBARENA    = $(if $(LIBARENA),$(LIBARENA),(unset))"
 	@echo "BUILD       = $(BUILD)"
 	@echo "BPF_ARCH    = $(BPF_ARCH)"
 	@echo "STATIC      = $(if $(filter 1,$(STATIC)),1,0)"

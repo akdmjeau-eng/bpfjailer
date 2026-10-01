@@ -24,9 +24,18 @@
 
 // Angle-bracket include: the BPF build gets the libarena headers as an include
 // directory, and arena_spinlock_t is gated on ENABLE_ATOMICS_TESTS -- both
-// from bpfjailer/defs.bzl. This also pulls in libarena's 64 KiB qnodes
-// __arena global, so only objects declaring an ARENA map may use it.
+// from bpfjailer/defs.bzl under Buck and from the Makefile's LIBARENA in the
+// open source build. This also pulls in libarena's 64 KiB qnodes __arena
+// global, so only objects declaring an ARENA map may use it.
 #include <bpf_arena_spin_lock.h>
+
+// Upstream libarena (the Makefile build) only declares the queue nodes its
+// slow path uses, expecting libarena's own objects to be linked in. That slow
+// path is emitted whether or not anything reaches it, so the declaration has
+// to resolve. fbsource's vendored copy, which Buck uses, defines them itself.
+#ifdef BPFJ_DEFINE_LIBARENA_QNODES
+struct arena_qnode __weak __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+#endif
 
 _Static_assert(
     sizeof(arena_spinlock_t) == sizeof(__u32),

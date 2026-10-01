@@ -16,7 +16,7 @@ BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put
 
 ## Building and testing
 
-`make` builds build/bpfjctl, `make test` builds and runs bpfjtest, and `make config` prints the resolved toolchain. Requires clang, bpftool, a C++20 compiler, libbpf and libkeyutils.
+`make` builds build/bpfjctl, `make test` builds and runs bpfjtest, and `make config` prints the resolved toolchain. Requires clang, bpftool, a C++20 compiler, libbpf and libkeyutils, and a checkout of https://github.com/libbpf/libarena passed as `LIBARENA=<path>` (or exported) on every `make`.
 
 BpfJailer is only tested on 6.16+ kernels and support for anything older is not guaranteed. Kernel features available from 6.16 may be used freely, without fallbacks for older kernels.
 

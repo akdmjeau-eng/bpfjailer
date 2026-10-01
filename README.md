@@ -48,13 +48,27 @@ and an unprivileged process can enroll itself through `bpfjsrv`.
   kernels are not supported.
 - clang (for BPF codegen), `bpftool`, and a C++20 compiler.
 - libbpf and libkeyutils, with headers.
+- A checkout of [libarena](https://github.com/libbpf/libarena), which provides
+  the arena spin lock the BPF programs use. It ships as source, not as a
+  package.
 - For signed builds: `openssl`, `fsverity` and `setfattr`, plus the static
   archives listed in the `Makefile` (`STATIC=1`).
 
-Set `LIBBPF_CFLAGS` / `LIBBPF_LIBS` if pkg-config cannot find libbpf. Run
+Set `LIBBPF_CFLAGS` / `LIBBPF_LIBS` if pkg-config cannot find libbpf. Point
+`LIBARENA` at the libarena checkout on every build:
+
+```
+git clone https://github.com/libbpf/libarena ~/libarena
+make LIBARENA=~/libarena
+```
+
+The build stops with these instructions if `LIBARENA` is unset or wrong. Run
 `make config` to see the resolved toolchain and flags.
 
 ## Building
+
+Every `make` below also needs `LIBARENA` (see Requirements), set on the
+command line or exported in the environment.
 
 ```
 make                # build/bpfjctl
