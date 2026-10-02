@@ -56,6 +56,7 @@ enum bpfj_event_type {
   BPFJ_EVENT_KILL = 4,
   BPFJ_EVENT_PTRACE = 5,
   BPFJ_EVENT_BPF = 6,
+  BPFJ_EVENT_LKM = 7,
 };
 
 struct bpfj_role_id {

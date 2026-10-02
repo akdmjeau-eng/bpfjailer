@@ -36,6 +36,8 @@ std::string eventTypeName(int type) {
       return "ptrace";
     case BPFJ_EVENT_BPF:
       return "bpf";
+    case BPFJ_EVENT_LKM:
+      return "lkm";
     default:
       return "unknown(" + std::to_string(type) + ")";
   }

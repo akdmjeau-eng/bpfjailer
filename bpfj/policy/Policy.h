@@ -30,6 +30,9 @@ struct RolePolicy {
   /// cannot express; setting it alongside `bpf` is rejected.
   bool noBpf = false;
 
+  /// @brief Whether this role is denied kernel module and kexec loading.
+  bool noLkm = false;
+
   /// @brief Whether what this role creates is left unowned, keeping `bpf`'s
   /// restriction without its ownership. Only meaningful on a role that wrote
   /// `bpf`, and needed on a base role, which would otherwise own every object

@@ -184,6 +184,7 @@ BPF_SRCS := \
 	bpfj/enforce/bpf/bpf_enforce.bpf.c \
 	bpfj/enforce/bpf/kill_enforce.bpf.c \
 	bpfj/enforce/bpf/ptrace_enforce.bpf.c \
+	bpfj/enforce/bpf/lkm_enforce.bpf.c \
 	bpfj/enforce/bpf/enroll.bpf.c
 
 BPF_OBJS := $(BPF_SRCS:%.bpf.c=$(BUILD)/%.bpf.o)
@@ -214,6 +215,7 @@ COMMON_SRCS := \
 	bpfj/enforce/RoleGate.cpp \
 	bpfj/enforce/KillEnforcer.cpp \
 	bpfj/enforce/PtraceEnforcer.cpp \
+	bpfj/enforce/LkmEnforcer.cpp \
 	bpfj/enforce/Pods.cpp \
 	log/BpfLog.cpp \
 	ctl/Dispatch.cpp \
@@ -257,6 +259,7 @@ TEST_SRCS := \
 	tests/HeapTest.cpp \
 	tests/KeyringTest.cpp \
 	tests/KillEnforcerTest.cpp \
+	tests/LkmEnforcerTest.cpp \
 	tests/Main.cpp \
 	tests/PtraceEnforcerTest.cpp \
 	tests/VerityEnforcerTest.cpp

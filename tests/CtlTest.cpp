@@ -198,12 +198,14 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   ASSERT_EQ(ctl({"replace", "/dev/null"}).status, 0);
 
   // A replace bringing up only the jailer and the verity enforcer would leave
-  // bpf(2), signals and ptrace ungated while still looking attached.
+  // bpf(2), signals, ptrace and kernel loading ungated while still looking
+  // attached.
   for (const auto* link :
        {"bpfj_jailer_fork",
         "bpfj_verity_bprm_check",
         "bpfj_kill_check",
         "bpfj_ptrace_check",
+        "bpfj_kernel_load_data",
         "bpfj_bpf_syscall",
         "bpfj_bpf_map_check"}) {
     ASSERT(exists(pinRoot() + "/links/" + link));
@@ -212,6 +214,7 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   for (const auto* map :
        {"bpfj_kill_roles",
         "bpfj_ptrace_roles",
+        "bpfj_no_lkm_roles",
         "bpfj_bpf_syscall_roles",
         "bpfj_bpf_map_owners"}) {
     ASSERT(exists(pinRoot() + "/maps/" + map));
@@ -458,6 +461,15 @@ TEST(Ctl, CheckRejectsANoPtraceThatIsNotABoolean) {
 TEST(Ctl, CheckRejectsANoKeyringThatIsNotABoolean) {
   const std::string policy =
       writePolicy("roles:\n  muddled:\n    no-keyring: maybe\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("neither true nor false"));
+}
+
+TEST(Ctl, CheckRejectsANoLkmThatIsNotABoolean) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    no-lkm: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);

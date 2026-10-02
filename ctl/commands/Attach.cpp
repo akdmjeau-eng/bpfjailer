@@ -9,6 +9,7 @@
 #include "bpfj/enforce/BpfEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
+#include "bpfj/enforce/LkmEnforcer.h"
 #include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
 #include "bpfj/enforce/UnprivRoles.h"
@@ -81,7 +82,12 @@ int attachPolicy(
     return 1;
   }
 
-  // Last of the five: this can deny bpf(2), and everything above still needs
+  if (auto res = LkmEnforcer::load(pin, policy); !res) {
+    std::cerr << "LKM enforcer load failed: " << res.error() << std::endl;
+    return 1;
+  }
+
+  // Last: this can deny bpf(2), and everything above still needs
   // the syscall to pin its links.
   if (auto res = BpfEnforcer::load(pin, policy); !res) {
     std::cerr << "bpf enforcer load failed: " << res.error() << std::endl;

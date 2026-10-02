@@ -25,6 +25,7 @@ constexpr std::string_view kVars = "vars";
 constexpr std::string_view kEnforceBinaryCerts = "enforce-binary-certs";
 constexpr std::string_view kBpf = "bpf";
 constexpr std::string_view kNoBpf = "no-bpf";
+constexpr std::string_view kNoLkm = "no-lkm";
 constexpr std::string_view kKill = "kill";
 constexpr std::string_view kNoKill = "no-kill";
 constexpr std::string_view kPtrace = "ptrace";
@@ -410,6 +411,14 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
                 std::string(kBpf) +
                 " contradict each other; no-bpf denies bpf(2) outright, so "
                 "there is nothing for bpf to grant");
+      }
+
+      if (Yaml::Node* noLkm = findChild(value, kNoLkm)) {
+        auto denied = parseRoleFlag(id, kNoLkm, *noLkm);
+        if (denied.hasError()) {
+          return denied.error();
+        }
+        policy.noLkm = *denied;
       }
 
       // Absent is the same as false again. What it turns off is ownership,

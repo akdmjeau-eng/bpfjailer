@@ -136,6 +136,7 @@ roles:
     no-bpf: true               # bpf(2) denied outright
     no-kill: true              # kill denied outright
     no-keyring: true           # keyring writes denied outright
+    no-lkm: true               # kernel module and kexec loading denied
     unpriv-enroll: true        # bpfjsrv may enroll non-root callers
     enroll:                    # empty: bpfjsrv may add no further role
     override-stacked: true     # answers alone, ignoring roles stacked below
@@ -152,6 +153,10 @@ list.
 `enroll` has the same three states over which roles bpfjsrv may add to a
 process already holding this one: missing is unrestricted, empty allows none
 (not even this role again), and a list allows those roles.
+
+`no-lkm: true` blocks kernel module autoload and insertion as well as kexec
+loading. Leaving it out, or setting it to false, leaves those operations
+unrestricted for that role.
 
 A process holding several roles is allowed an operation only if every role
 that configured it agrees; roles that did not configure it abstain. Roles are
