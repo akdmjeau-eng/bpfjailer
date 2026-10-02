@@ -37,6 +37,9 @@
 // and carry both atomically.
 #define BPFJ_MQ_OWNER_VERSION 1
 
+// Layout of both shared-memory ownership maps and the POSIX mount classifier.
+#define BPFJ_SHM_OWNER_VERSION 1
+
 #define BPFJ_EXEC_POLICY_XATTR "user.bpfj.policy.exec"
 
 // How a pod came to exist, numbered to match the internal tree's.
@@ -122,6 +125,22 @@ struct bpfj_posix_mq_key {
   __u64 ino;
 };
 
+struct bpfj_shm_owner {
+  struct bpfj_role_id role;
+  struct bpfj_uuid pod;
+};
+
+struct bpfj_posix_shm_key {
+  __u64 dev;
+  __u64 ino;
+};
+
+// A mount id is unique only within its mount namespace.
+struct bpfj_shm_mount_key {
+  __u64 namespace_ino;
+  __u64 mount_id;
+};
+
 struct bpfj_pid_data {
   __s8 version;
   __u8 num_pods;
@@ -149,5 +168,8 @@ BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 48);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_bpf_owner) == 20);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_mq_owner) == 32);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_posix_mq_key) == 16);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_shm_owner) == 32);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_posix_shm_key) == 16);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_shm_mount_key) == 16);
 
 #undef BPFJ_POD_STATIC_ASSERT

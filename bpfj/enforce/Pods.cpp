@@ -2,6 +2,8 @@
 
 #include "bpfj/enforce/Pods.h"
 
+#include "bpfj/enforce/ShmEnforcer.h"
+
 #include <bpf/bpf.h>
 #include <dirent.h>
 #include <sys/random.h>
@@ -466,6 +468,13 @@ Expected<bpfj_uuid> enrollPod(
   // The iterator takes one reference per task it enrolls and leaves the pod
   // owned by nobody if it reaches none.
   (*pod)->refs = 0;
+
+  // Publish the target's /dev/shm mount before it acquires the role. This is
+  // a no-op when the SHM enforcer is not attached.
+  if (auto res = registerPosixShmMount(cfg, pid); !res) {
+    (void)arena.free(*pod);
+    return makeUnexpected(res.error());
+  }
 
   auto enrolled = enrollTasks(
       cfg, pid, *pod, threads, static_cast<std::uint32_t>(::getpid()));

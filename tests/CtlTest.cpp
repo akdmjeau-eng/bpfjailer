@@ -88,10 +88,14 @@ TEST(Ctl, AttachPinsTheMapsAndLinks) {
   ASSERT(exists(pinRoot() + "/maps/bpfj_log_map"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_mq_sysv_owners"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_mq_posix_owners"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_shm_sysv_owners"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_shm_posix_owners"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_exec"));
   ASSERT(exists(pinRoot() + "/links/bpfj_mq_sysv_send"));
   ASSERT(exists(pinRoot() + "/links/bpfj_mq_posix_open"));
+  ASSERT(exists(pinRoot() + "/links/bpfj_shm_sysv_attach"));
+  ASSERT(exists(pinRoot() + "/links/bpfj_shm_posix_open"));
 }
 
 TEST(Ctl, AttachNeedsAPolicyPath) {
@@ -212,6 +216,8 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
         "bpfj_kernel_load_data",
         "bpfj_mq_sysv_send",
         "bpfj_mq_posix_open",
+        "bpfj_shm_sysv_attach",
+        "bpfj_shm_posix_open",
         "bpfj_bpf_syscall",
         "bpfj_bpf_map_check"}) {
     ASSERT(exists(pinRoot() + "/links/" + link));
@@ -223,6 +229,8 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
         "bpfj_no_lkm_roles",
         "bpfj_mq_sysv_owners",
         "bpfj_mq_posix_owners",
+        "bpfj_shm_sysv_owners",
+        "bpfj_shm_posix_owners",
         "bpfj_bpf_syscall_roles",
         "bpfj_bpf_map_owners"}) {
     ASSERT(exists(pinRoot() + "/maps/" + map));
@@ -510,6 +518,38 @@ TEST(Ctl, CheckRejectsMessageQueueListAndOutrightDenialTogether) {
 TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
   const std::string policy =
       writePolicy("roles:\n  client:\n    mq-posix:\n      - missing\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("which is not in roles"));
+}
+
+TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
+  const std::string policy = writePolicy(
+      "roles:\n"
+      "  owner:\n"
+      "  client:\n"
+      "    shm-sysv:\n"
+      "      - owner\n"
+      "    shm-posix:\n"
+      "    no-shm-posix: false\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 0);
+}
+
+TEST(Ctl, CheckRejectsSharedMemoryListAndOutrightDenialTogether) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    shm-sysv:\n    no-shm-sysv: true\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict"));
+}
+
+TEST(Ctl, CheckRejectsUnknownSharedMemoryRole) {
+  const std::string policy =
+      writePolicy("roles:\n  client:\n    shm-posix:\n      - missing\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);

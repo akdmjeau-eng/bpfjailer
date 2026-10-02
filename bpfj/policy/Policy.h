@@ -51,6 +51,23 @@ struct RolePolicy {
   /// `mq-posix`.
   bool noMqPosix = false;
 
+  /// @brief Roles whose System V shared-memory segments this role may
+  /// acquire. The three states match `mqSysv`.
+  std::vector<std::string> shmSysv;
+  bool hasShmSysv = false;
+
+  /// @brief Deny System V shared memory outright. Cannot be combined with
+  /// `shm-sysv`.
+  bool noShmSysv = false;
+
+  /// @brief The POSIX-shared-memory counterpart of `shmSysv`.
+  std::vector<std::string> shmPosix;
+  bool hasShmPosix = false;
+
+  /// @brief Deny POSIX shared memory outright. Cannot be combined with
+  /// `shm-posix`.
+  bool noShmPosix = false;
+
   /// @brief Whether what this role creates is left unowned, keeping `bpf`'s
   /// restriction without its ownership. Only meaningful on a role that wrote
   /// `bpf`, and needed on a base role, which would otherwise own every object

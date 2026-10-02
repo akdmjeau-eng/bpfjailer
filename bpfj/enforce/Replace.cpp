@@ -30,6 +30,7 @@
 // in, with the pedantic warning silenced around it.
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
+#include "bpfj/enforce/ShmEnforcer.h"
 #include "bpfj/enforce/UnprivRoles.h"
 #include "bpfj/enforce/VerityEnforcer.h"
 #include "bpfj/enforce/bpf/replace.skel.h"
@@ -56,6 +57,13 @@ constexpr std::string_view kMqSysvOwners = "bpfj_mq_sysv_owners";
 constexpr std::string_view kMqPosixOwners = "bpfj_mq_posix_owners";
 constexpr std::string_view kMqSysvOwnerVersion = "bpfj_mq_sysv_owner_version";
 constexpr std::string_view kMqPosixOwnerVersion = "bpfj_mq_posix_owner_version";
+constexpr std::string_view kShmSysvOwners = "bpfj_shm_sysv_owners";
+constexpr std::string_view kShmPosixOwners = "bpfj_shm_posix_owners";
+constexpr std::string_view kShmSysvOwnerVersion = "bpfj_shm_sysv_owner_version";
+constexpr std::string_view kShmPosixOwnerVersion =
+    "bpfj_shm_posix_owner_version";
+constexpr std::string_view kShmPosixMounts = "bpfj_shm_posix_mounts";
+constexpr std::string_view kShmPosixDevices = "bpfj_shm_posix_devices";
 
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
@@ -458,6 +466,45 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   return unit;
 }
 
+[[nodiscard]] Expected<> checkShmOwnerVersion(
+    const PinConfig& cfg,
+    std::string_view owners,
+    std::string_view versionMap,
+    std::string_view kind) noexcept {
+  if (!hasPinnedMap(cfg, owners)) {
+    return unit;
+  }
+
+  auto map = pins::openPinnedMap(cfg, versionMap);
+  if (!map) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer records ",
+        kind,
+        " shared-memory ownership without a layout version; detach and "
+        "attach to upgrade"));
+  }
+
+  const std::uint32_t slot = 0;
+  std::uint32_t version = 0;
+  if (::bpf_map_lookup_elem(map->get(), &slot, &version) != 0) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read the ", kind, " shared-memory ownership version"));
+  }
+  if (version != BPFJ_SHM_OWNER_VERSION) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer records ",
+        kind,
+        " shared-memory ownership in layout v",
+        std::to_string(version),
+        ", and this build reads v",
+        std::to_string(BPFJ_SHM_OWNER_VERSION),
+        "; detach and attach to upgrade"));
+  }
+  return unit;
+}
+
 /// Copy a map without baking its key shape into replacement. This is used for
 /// both the pointer-keyed System V map and the (device,inode)-keyed POSIX map.
 [[nodiscard]] Expected<std::size_t>
@@ -502,6 +549,32 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     const PinConfig& newCfg) noexcept {
   std::size_t copied = 0;
   for (const auto name : {kMqSysvOwners, kMqPosixOwners}) {
+    if (!hasPinnedMap(oldCfg, name)) {
+      continue;
+    }
+    auto from = pins::openPinnedMap(oldCfg, name);
+    auto to = pins::openPinnedMap(newCfg, name);
+    if (!from) {
+      return makeUnexpected(from.error());
+    }
+    if (!to) {
+      return makeUnexpected(to.error());
+    }
+    auto one = copyRawMap(from->get(), to->get(), name);
+    if (!one) {
+      return makeUnexpected(one.error());
+    }
+    copied += *one;
+  }
+  return copied;
+}
+
+[[nodiscard]] Expected<std::size_t> copyShmState(
+    const PinConfig& oldCfg,
+    const PinConfig& newCfg) noexcept {
+  std::size_t copied = 0;
+  for (const auto name :
+       {kShmSysvOwners, kShmPosixOwners, kShmPosixMounts, kShmPosixDevices}) {
     if (!hasPinnedMap(oldCfg, name)) {
       continue;
     }
@@ -700,6 +773,16 @@ struct BackfillStats {
         !res) {
       return makeUnexpected(res.error());
     }
+    if (auto res = checkShmOwnerVersion(
+            cfg, kShmSysvOwners, kShmSysvOwnerVersion, "System V");
+        !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = checkShmOwnerVersion(
+            cfg, kShmPosixOwners, kShmPosixOwnerVersion, "POSIX");
+        !res) {
+      return makeUnexpected(res.error());
+    }
   }
 
   // Destructive, which clears a tree left by a run that died before its swap,
@@ -726,6 +809,10 @@ struct BackfillStats {
   }
 
   if (auto res = MqEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = ShmEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 
@@ -780,6 +867,12 @@ struct BackfillStats {
       return makeUnexpected(mqOwners.error());
     }
     stats.owners += *mqOwners;
+
+    auto shmState = copyShmState(cfg, newCfg);
+    if (!shmState) {
+      return makeUnexpected(shmState.error());
+    }
+    stats.owners += *shmState;
 
     // Detaches the old programs, with the new ones held by newCfg's pins until
     // the rename below so no window has no jailer attached. Through unload()

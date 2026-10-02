@@ -133,6 +133,8 @@ roles:
     bpf:                       # empty: only BPF objects its role owns
     mq-sysv:                   # empty: only SysV queues from its own pod
     mq-posix:                  # empty: only POSIX queues from its own pod
+    shm-sysv:                  # empty: only SysV SHM from its own pod
+    shm-posix:                 # empty: only POSIX SHM from its own pod
     keyring:                   # empty: only its own role's keyring
   sandbox:
     no-bpf: true               # bpf(2) denied outright
@@ -141,6 +143,8 @@ roles:
     no-lkm: true               # kernel module and kexec loading denied
     no-mq-sysv: true           # System V message queues denied outright
     no-mq-posix: true          # POSIX message queues denied outright
+    no-shm-sysv: true          # System V shared memory denied outright
+    no-shm-posix: true         # POSIX shared memory denied outright
     unpriv-enroll: true        # bpfjsrv may enroll non-root callers
     enroll:                    # empty: bpfjsrv may add no further role
     override-stacked: true     # answers alone, ignoring roles stacked below
@@ -148,12 +152,12 @@ vars:                          # the only variable names a pod may carry
   - vm_uuid
 ```
 
-For `kill`, `ptrace`, `bpf`, `keyring`, `mq-sysv`, and `mq-posix`, leaving a
-key out and writing it empty mean different things. A missing key leaves that
-operation unrestricted, an empty one confines the role to its own pod, and a
-list adds objects owned by the roles named. The two message-queue policies are
-independent. `no-mq-sysv` and `no-mq-posix` are their outright-denial forms and
-cannot be combined with the corresponding list.
+For `kill`, `ptrace`, `bpf`, `keyring`, `mq-sysv`, `mq-posix`, `shm-sysv`, and
+`shm-posix`, leaving a key out and writing it empty mean different things. A
+missing key leaves that operation unrestricted, an empty one confines the
+role to its own pod, and a list adds objects owned by the roles named. The
+System V and POSIX policies are independent. Their `no-` forms deny that IPC
+kind outright and cannot be combined with the corresponding list.
 `no-bpf`, `no-kill`, `no-ptrace` and `no-keyring` are the outright-deny states
 those lists cannot spell, and so each is rejected if written alongside its
 list.
@@ -179,6 +183,15 @@ fork inside a pod, are capabilities and are not revoked. Descriptor transfer
 through kernel paths that invoke `security_file_receive` (including Unix
 socket descriptor passing) is checked, but BpfJailer does not provide dynamic
 revocation of a descriptor after it has been acquired.
+
+Shared memory follows the same owner-pod and role-list model. System V lookup,
+control, and attach are checked. POSIX shared-memory objects are tracked by
+the `/dev/shm` tmpfs device and inode, and open, descriptor receipt, mapping,
+protection changes, truncation, and unlink are checked. Existing mappings are
+capabilities and cannot be revoked; direct loads and stores after enrollment
+do not pass through an LSM hook. `memfd_create` is not POSIX shared memory and
+is intentionally outside `shm-posix`. BpfJailer registers `/dev/shm` for each
+enrolled mount namespace; a replacement preserves those registrations.
 
 A process holding several roles is allowed an operation only if every role
 that configured it agrees; roles that did not configure it abstain. Roles are

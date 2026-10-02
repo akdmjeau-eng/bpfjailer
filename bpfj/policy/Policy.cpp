@@ -30,6 +30,10 @@ constexpr std::string_view kMqSysv = "mq-sysv";
 constexpr std::string_view kNoMqSysv = "no-mq-sysv";
 constexpr std::string_view kMqPosix = "mq-posix";
 constexpr std::string_view kNoMqPosix = "no-mq-posix";
+constexpr std::string_view kShmSysv = "shm-sysv";
+constexpr std::string_view kNoShmSysv = "no-shm-sysv";
+constexpr std::string_view kShmPosix = "shm-posix";
+constexpr std::string_view kNoShmPosix = "no-shm-posix";
 constexpr std::string_view kKill = "kill";
 constexpr std::string_view kNoKill = "no-kill";
 constexpr std::string_view kPtrace = "ptrace";
@@ -425,11 +429,11 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         policy.noLkm = *denied;
       }
 
-      const auto parseMq = [&](std::string_view listKey,
-                               std::string_view denyKey,
-                               std::vector<std::string>& targets,
-                               bool& configured,
-                               bool& denied) -> err::Expected<err::Unit> {
+      const auto parseOwnedIpc = [&](std::string_view listKey,
+                                     std::string_view denyKey,
+                                     std::vector<std::string>& targets,
+                                     bool& configured,
+                                     bool& denied) -> err::Expected<err::Unit> {
         if (Yaml::Node* list = findChild(value, listKey)) {
           auto parsed =
               parseIdList("role '" + id + "': " + std::string(listKey), *list);
@@ -440,8 +444,8 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           configured = true;
         }
 
-        if (Yaml::Node* noMq = findChild(value, denyKey)) {
-          auto parsed = parseRoleFlag(id, denyKey, *noMq);
+        if (Yaml::Node* deny = findChild(value, denyKey)) {
+          auto parsed = parseRoleFlag(id, denyKey, *deny);
           if (parsed.hasError()) {
             return parsed.error();
           }
@@ -457,7 +461,7 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         return err::unit;
       };
 
-      if (auto res = parseMq(
+      if (auto res = parseOwnedIpc(
               kMqSysv,
               kNoMqSysv,
               policy.mqSysv,
@@ -466,12 +470,30 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           res.hasError()) {
         return res.error();
       }
-      if (auto res = parseMq(
+      if (auto res = parseOwnedIpc(
               kMqPosix,
               kNoMqPosix,
               policy.mqPosix,
               policy.hasMqPosix,
               policy.noMqPosix);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseOwnedIpc(
+              kShmSysv,
+              kNoShmSysv,
+              policy.shmSysv,
+              policy.hasShmSysv,
+              policy.noShmSysv);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseOwnedIpc(
+              kShmPosix,
+              kNoShmPosix,
+              policy.shmPosix,
+              policy.hasShmPosix,
+              policy.noShmPosix);
           res.hasError()) {
         return res.error();
       }
@@ -697,6 +719,24 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
             id,
             rolePolicy.mqPosix,
             "allows POSIX message-queue access to");
+        res.hasError()) {
+      return res.error();
+    }
+
+    if (auto res = checkRoleRefs(
+            policy.roles,
+            id,
+            rolePolicy.shmSysv,
+            "allows System V shared-memory access to");
+        res.hasError()) {
+      return res.error();
+    }
+
+    if (auto res = checkRoleRefs(
+            policy.roles,
+            id,
+            rolePolicy.shmPosix,
+            "allows POSIX shared-memory access to");
         res.hasError()) {
       return res.error();
     }
