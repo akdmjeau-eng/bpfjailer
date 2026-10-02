@@ -49,10 +49,10 @@ bpfj_gate_num_pods(const struct bpfj_pid_data* pid_data) {
   return num_pods > BPFJ_MAX_POD_PER_PID ? BPFJ_MAX_POD_PER_PID : num_pods;
 }
 
-/// Whether `pid_data` names the pod `uuid`.
+/// Whether `pid_data` names `pod`.
 static __always_inline bool bpfj_gate_in_pod(
     struct bpfj_pid_data* pid_data,
-    const struct bpfj_uuid* uuid) {
+    struct bpfj_pod __arena* pod) {
   const __u32 num_pods = bpfj_gate_num_pods(pid_data);
 
   for (int i = 0; i < BPFJ_MAX_POD_PER_PID; ++i) {
@@ -60,7 +60,7 @@ static __always_inline bool bpfj_gate_in_pod(
       break;
     }
 
-    if (bpfj_uuid_cmp(&pid_data->pod_uuids[i], uuid) == 0) {
+    if (bpfj_pod_ptr_cmp(pid_data->pods[i], pod) == 0) {
       return true;
     }
   }
@@ -68,11 +68,10 @@ static __always_inline bool bpfj_gate_in_pod(
   return false;
 }
 
-/// Whether `actor_role`'s list names every role the target holds. A pod
-/// missing from the pod map leaves a role this cannot check, so it denies.
-/// Deliberately does not stop on bpfj_is_override(): every role here has to be
-/// covered, and breaking early would let a target escape a gate by holding an
-/// override role.
+/// Whether `actor_role`'s list names every role the target holds. Deliberately
+/// does not stop on bpfj_is_override(): every role here has to be covered, and
+/// breaking early would let a target escape a gate by holding an override
+/// role.
 static __always_inline bool bpfj_gate_covers(
     void* access,
     const struct bpfj_role_id* actor_role,
@@ -87,15 +86,14 @@ static __always_inline bool bpfj_gate_covers(
       break;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &target->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = target->pods[i];
     if (!pod) {
       return false;
     }
 
     struct bpfj_role_pair key = {};
     __builtin_memcpy(&key.actor, actor_role, sizeof(key.actor));
-    __builtin_memcpy(&key.target, &pod->role_id, sizeof(key.target));
+    bpfj_pod_read_role_id(&key.target, pod);
 
     if (!bpf_map_lookup_elem(access, &key)) {
       return false;
@@ -132,21 +130,22 @@ static __always_inline bool bpfj_gate_allowed_owner(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &actor->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = actor->pods[i];
     if (!pod) {
       continue;
     }
 
-    const __u8 mode = bpfj_gate_role_mode(roles, &pod->role_id);
+    struct bpfj_role_id actor_role = {};
+    bpfj_pod_read_role_id(&actor_role, pod);
+    const __u8 mode = bpfj_gate_role_mode(roles, &actor_role);
     if (mode == BPFJ_GATE_DENIED) {
       return false;
     }
 
     if (mode == BPFJ_GATE_RESTRICTED &&
-        bpfj_role_id_cmp(&pod->role_id, owner) != 0) {
+        bpfj_role_id_cmp(&actor_role, owner) != 0) {
       struct bpfj_role_pair key = {};
-      __builtin_memcpy(&key.actor, &pod->role_id, sizeof(key.actor));
+      __builtin_memcpy(&key.actor, &actor_role, sizeof(key.actor));
       __builtin_memcpy(&key.target, owner, sizeof(key.target));
 
       if (!bpf_map_lookup_elem(access, &key)) {
@@ -156,7 +155,7 @@ static __always_inline bool bpfj_gate_allowed_owner(
 
     // Checked for every pod, configured or not: an override role that wrote no
     // list still answers for the task, and the answer is "unrestricted".
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&actor_role)) {
       break;
     }
   }
@@ -176,17 +175,18 @@ static __always_inline bool bpfj_gate_restricted(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &actor->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = actor->pods[i];
     if (!pod) {
       continue;
     }
 
-    if (bpfj_gate_role_mode(roles, &pod->role_id) != 0) {
+    struct bpfj_role_id actor_role = {};
+    bpfj_pod_read_role_id(&actor_role, pod);
+    if (bpfj_gate_role_mode(roles, &actor_role) != 0) {
       return true;
     }
 
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&actor_role)) {
       break;
     }
   }
@@ -221,25 +221,25 @@ static __always_inline bool bpfj_gate_allowed(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &actor->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = actor->pods[i];
     if (!pod) {
       continue;
     }
 
-    const __u8 mode = bpfj_gate_role_mode(roles, &pod->role_id);
+    struct bpfj_role_id actor_role = {};
+    bpfj_pod_read_role_id(&actor_role, pod);
+    const __u8 mode = bpfj_gate_role_mode(roles, &actor_role);
     if (mode == BPFJ_GATE_DENIED) {
       return false;
     }
 
-    if (mode == BPFJ_GATE_RESTRICTED &&
-        !bpfj_gate_in_pod(target, &actor->pod_uuids[i]) &&
-        !bpfj_gate_covers(access, &pod->role_id, target)) {
+    if (mode == BPFJ_GATE_RESTRICTED && !bpfj_gate_in_pod(target, pod) &&
+        !bpfj_gate_covers(access, &actor_role, target)) {
       return false;
     }
 
     // As above: an override role that wrote no list still answers.
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&actor_role)) {
       break;
     }
   }

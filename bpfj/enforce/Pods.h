@@ -65,13 +65,15 @@ struct PodMembers {
 /// @brief Every pod the jailer holds, each with the pids enrolled in it,
 /// oldest first. Membership is stored task -> pods and task storage cannot be
 /// enumerated from userspace, so the reverse is reconstructed by walking
-/// /proc: `pids` can be shorter than the pod's `refs`, and an empty one does
-/// not prove the pod unreferenced.
+/// /proc and deduplicating the pod pointers found there.
 [[nodiscard]] Expected<std::vector<PodMembers>> listAllPods(
     const PinConfig& cfg) noexcept;
 
 /// @brief A pod uuid as the canonical 8-4-4-4-12 hex string.
 [[nodiscard]] std::string uuidToString(const bpfj_uuid& uuid) noexcept;
+
+/// @brief A random version 4 uuid, matching the BPF-side pod stamps.
+[[nodiscard]] Expected<bpfj_uuid> makeUuid4() noexcept;
 
 /// @brief The clock bpfj_pod::creation_time_ns is measured against, the
 /// jailer stamping a pod with bpf_ktime_get_ns().

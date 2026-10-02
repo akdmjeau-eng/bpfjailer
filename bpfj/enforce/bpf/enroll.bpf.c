@@ -27,7 +27,7 @@
 volatile const pid_t bpfj_enroll_tgid = 0;
 volatile const pid_t bpfj_enroll_caller_pid = 0;
 volatile const __u8 bpfj_enroll_all_threads = 0;
-volatile const struct bpfj_uuid bpfj_enroll_uuid;
+struct bpfj_pod __arena* volatile bpfj_enroll_pod = 0;
 
 // How many threads took it. Read back by the loader once the walk is done; it
 // is what separates an enrollment that reached nothing from one that worked.
@@ -58,22 +58,20 @@ int bpfj_enroll_threads(struct bpf_iter__task* ctx) {
     return 0;
   }
 
-  struct bpfj_uuid uuid;
-#pragma clang loop unroll(full)
-  for (int i = 0; i < BPFJ_UUID_BYTES; ++i) {
-    uuid.uuid[i] = bpfj_enroll_uuid.uuid[i];
+  if (bpfj_heap_enabled) {
+    bpfj_heap_use_arena();
   }
 
-  // Looked up before the entry is created, so a pod that went away does not
-  // leave an empty entry behind on a task that is not jailed.
-  struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuid);
+  // Read before the entry is created, so a missing pod leaves no empty entry
+  // behind on a task that is not jailed.
+  struct bpfj_pod __arena* pod = bpfj_enroll_pod;
   if (!pod) {
     BPFJ_LOG_ERR(ENOENT, "Enroll skipped for pid %d: pod missing", task->pid);
     return 0;
   }
 
-  struct bpfj_pid_data* pid_data = bpf_task_storage_get(
-      &bpfj_task_map, task, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  struct bpfj_pid_data* pid_data =
+      bpfj_set_pid_data_in(&bpfj_task_map, task, NULL);
   if (!pid_data) {
     BPFJ_LOG_ERR(
         ENOMEM, "Enroll skipped for pid %d: no task storage", task->pid);
@@ -81,7 +79,7 @@ int bpfj_enroll_threads(struct bpf_iter__task* ctx) {
   }
 
   // Already named, or no room for another. Either way nothing is owed.
-  if (!bpfj_pid_data_add_uuid(pid_data, &uuid)) {
+  if (!bpfj_pid_data_add_pod(pid_data, pod)) {
     return 0;
   }
 

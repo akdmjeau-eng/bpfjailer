@@ -3,11 +3,14 @@
 #include "bpfj/enforce/Replace.h"
 
 #include <bpf/bpf.h>
+#include <dirent.h>
 #include <signal.h>
+#include <sys/syscall.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -39,7 +42,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::string_view kPodMap = "bpfj_pod_map";
 constexpr std::string_view kTaskMap = "bpfj_task_map";
 constexpr std::string_view kOldTaskMap = "bpfj_old_task_map";
 constexpr std::string_view kReplaceFrozenMap = "bpfj_replace_frozen";
@@ -51,10 +53,12 @@ constexpr std::string_view kOwnerVersion = "bpfj_bpf_owner_version";
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
 
-struct UuidLess {
-  bool operator()(const bpfj_uuid& lhs, const bpfj_uuid& rhs) const noexcept {
-    return std::memcmp(lhs.uuid, rhs.uuid, sizeof(lhs.uuid)) < 0;
-  }
+struct ReplacePodValue {
+  struct bpfj_pod* pod = nullptr;
+};
+
+struct ReplacePodKey {
+  struct bpfj_pod* oldPod = nullptr;
 };
 
 /// @brief Both trees' variable names, indexed by id, for translateVars().
@@ -107,21 +111,62 @@ struct VarNames {
   return static_cast<__u32>(found - names.newNames.begin());
 }
 
-/// @brief Copy `src`'s arena-backed vars into `dst`, translating ids by name
-/// so a new policy can renumber the allowlist without changing what a running
-/// pod means.
-[[nodiscard]] Expected<> translateVars(
-    bpfj_pod& dst,
+[[nodiscard]] Expected<Fd> openPidFd(pid_t pid) noexcept {
+  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+  if (fd < 0) {
+    return makeUnexpected(
+        makeErrnoError("failed to open pidfd for pid ", std::to_string(pid)));
+  }
+
+  return Fd(fd);
+}
+
+[[nodiscard]] Expected<bpfj_pid_data>
+readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
+  bpfj_pid_data pidData{};
+  const int key = pidFd.get();
+  if (::bpf_map_lookup_elem(taskMap.get(), &key, &pidData) == 0) {
+    return pidData;
+  }
+
+  if (errno != ENOENT) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read jail membership of pid ", std::to_string(pid)));
+  }
+
+  return bpfj_pid_data{.version = BPFJ_PID_DATA_VERSION};
+}
+
+[[nodiscard]] Expected<std::vector<pid_t>> runningPids() noexcept {
+  DIR* dir = ::opendir("/proc");
+  if (dir == nullptr) {
+    return makeUnexpected(makeErrnoError("failed to open /proc"));
+  }
+
+  std::vector<pid_t> pids;
+  while (const struct dirent* entry = ::readdir(dir)) {
+    char* end = nullptr;
+    const long value = std::strtol(entry->d_name, &end, 10);
+    if (end == entry->d_name || *end != '\0' || value <= 0) {
+      continue;
+    }
+    pids.push_back(static_cast<pid_t>(value));
+  }
+
+  ::closedir(dir);
+  return pids;
+}
+
+/// @brief Copy `src`'s arena-backed vars into a freshly allocated flat pod,
+/// translating ids by name so a new policy can renumber the allowlist without
+/// changing what a running pod means.
+[[nodiscard]] Expected<struct bpfj_pod*> translatePod(
     const bpfj_pod& src,
     PodArena& newArena,
     const VarNames& names) noexcept {
-  bpfj_var_array_init(&dst.var_array);
   const auto count = std::min<std::size_t>(src.var_array.count, BPFJ_VAR_MAX);
-  if (count == 0) {
-    return unit;
-  }
-
-  std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_var) * count);
+  std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
+  blobSize += bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto* var = bpfj_var_array_at(&src.var_array, i);
     if (var == nullptr) {
@@ -139,8 +184,19 @@ struct VarNames {
     return makeUnexpected(blob.error());
   }
 
-  auto* outVars = static_cast<struct bpfj_var*>(*blob);
-  std::uint32_t valueOff = bpfj_var_align_up(sizeof(struct bpfj_var) * count);
+  auto* dst = static_cast<struct bpfj_pod*>(*blob);
+  *dst = src;
+  dst->refs = 0;
+  bpfj_var_array_init(&dst->var_array);
+  if (count == 0) {
+    return dst;
+  }
+
+  auto* outVars = reinterpret_cast<struct bpfj_var*>(
+      static_cast<unsigned char*>(*blob) +
+      bpfj_var_align_up(sizeof(struct bpfj_pod)));
+  std::uint32_t valueOff = bpfj_var_align_up(sizeof(struct bpfj_pod)) +
+      bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto* oldVar = bpfj_var_array_at(&src.var_array, i);
     auto newId = translatedVarId(oldVar, names);
@@ -166,106 +222,98 @@ struct VarNames {
     valueOff += bpfj_var_align_up(payloadSize);
   }
 
-  dst.var_array.vars = outVars;
-  dst.var_array.count = static_cast<__u8>(count);
-  return unit;
+  dst->var_array.vars = outVars;
+  dst->var_array.count = static_cast<__u8>(count);
+  return dst;
 }
 
-/// @brief Copy the old tree's pods into the new one, less its base role, which
-/// Jailer::load has already remade and reseeded. Refs are zeroed on the way
-/// across and counted back up by the backfill iterator, which also treats a
-/// uuid it cannot resolve here as deliberately left behind. Variables cross
-/// by name (see translateVars()).
+/// @brief Copy the old tree's pods into the new arena, less its base role,
+/// which Jailer::load has already remade and reseeded. Refs are zeroed on the
+/// way across and counted back up by the backfill iterator. Variables cross by
+/// name (see translatePod()), and the backfill finds the translated pod again
+/// by the old pod pointer value so it never has to dereference the old arena.
 [[nodiscard]] Expected<std::size_t> copyPods(
     const PinConfig& oldCfg,
-    const PinConfig& newCfg) noexcept {
-  auto oldMap = pins::openPinnedMap(oldCfg, kPodMap);
-  if (!oldMap) {
-    return makeUnexpected(oldMap.error());
+    const PinConfig& newCfg,
+    int replacePodsMapFd) noexcept {
+  auto oldTaskMap = pins::openPinnedMap(oldCfg, kTaskMap);
+  if (!oldTaskMap) {
+    return makeUnexpected(oldTaskMap.error());
   }
-
-  auto newMap = pins::openPinnedMap(newCfg, kPodMap);
-  if (!newMap) {
-    return makeUnexpected(newMap.error());
-  }
-
-  // A uuid arriving twice means the walk restarted rather than advanced, which
-  // it does when the key it resumed from is deleted under it.
-  std::set<bpfj_uuid, UuidLess> seen;
 
   // Read only once a pod carries a variable, so a tree with none replaces
   // without either var map.
   std::optional<VarNames> varNames;
-  std::optional<PodArena> oldArena;
-  std::optional<PodArena> newArena;
-  std::vector<void*> newVarBlobs;
-  auto rollbackVars = makeGuard([&] {
-    if (!newArena) {
-      return;
-    }
-    for (void* const blob : newVarBlobs) {
-      (void)newArena->free(blob);
+  auto oldArena = PodArena::open(oldCfg);
+  if (!oldArena) {
+    return makeUnexpected(oldArena.error());
+  }
+  (void)oldArena;
+  auto newArena = PodArena::open(newCfg);
+  if (!newArena) {
+    return makeUnexpected(newArena.error());
+  }
+  std::vector<void*> newPods;
+  auto rollbackPods = makeGuard([&] {
+    for (void* const pod : newPods) {
+      (void)newArena->free(pod);
     }
   });
 
+  std::set<std::uintptr_t> seen;
+  auto pids = runningPids();
+  if (!pids) {
+    return makeUnexpected(pids.error());
+  }
+
   std::size_t copied = 0;
-  bpfj_uuid curr{};
-  bpfj_uuid next{};
-  const void* from = nullptr;
-  while (::bpf_map_get_next_key(oldMap->get(), from, &next) == 0) {
-    if (!seen.insert(next).second) {
-      break;
+  for (const pid_t pid : *pids) {
+    auto pidFd = openPidFd(pid);
+    if (!pidFd) {
+      continue;
     }
 
-    bpfj_pod pod{};
-    if (::bpf_map_lookup_elem(oldMap->get(), &next, &pod) == 0 &&
-        pod.enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
-      pod.refs = 0;
+    auto pidData = readPidData(*oldTaskMap, *pidFd, pid);
+    if (!pidData) {
+      continue;
+    }
 
-      if (pod.var_array.count != 0) {
-        if (!varNames) {
-          auto read = readBothVarNames(oldCfg, newCfg);
-          if (!read) {
-            return makeUnexpected(read.error());
-          }
-          varNames = std::move(*read);
-        }
-
-        if (!oldArena) {
-          auto opened = PodArena::open(oldCfg);
-          if (!opened) {
-            return makeUnexpected(opened.error());
-          }
-          oldArena = std::move(*opened);
-        }
-        if (!newArena) {
-          auto opened = PodArena::open(newCfg);
-          if (!opened) {
-            return makeUnexpected(opened.error());
-          }
-          newArena = std::move(*opened);
-        }
-
-        bpfj_pod translated = pod;
-        if (auto res = translateVars(translated, pod, *newArena, *varNames);
-            !res) {
-          return makeUnexpected(res.error());
-        }
-        pod = translated;
-        newVarBlobs.push_back(pod.var_array.vars);
+    const std::uint8_t count =
+        std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
+    for (std::uint8_t i = 0; i < count; ++i) {
+      const auto* pod = pidData->pods[i];
+      if (pod == nullptr ||
+          !seen.insert(reinterpret_cast<std::uintptr_t>(pod)).second ||
+          pod->enrollment_source == BPFJ_ENROLL_BASE_ROLE) {
+        continue;
       }
 
-      if (::bpf_map_update_elem(newMap->get(), &next, &pod, BPF_ANY) != 0) {
-        return makeUnexpected(makeErrnoError("failed to copy a pod across"));
+      if (pod->var_array.count != 0 && !varNames) {
+        auto read = readBothVarNames(oldCfg, newCfg);
+        if (!read) {
+          return makeUnexpected(read.error());
+        }
+        varNames = std::move(*read);
+      }
+
+      auto translated =
+          translatePod(*pod, *newArena, varNames ? *varNames : VarNames{});
+      if (!translated) {
+        return makeUnexpected(translated.error());
+      }
+      newPods.push_back(*translated);
+
+      const ReplacePodKey key{.oldPod = const_cast<struct bpfj_pod*>(pod)};
+      const ReplacePodValue entry{.pod = *translated};
+      if (::bpf_map_update_elem(replacePodsMapFd, &key, &entry, BPF_ANY) != 0) {
+        return makeUnexpected(
+            makeErrnoError("failed to record a carried pod for backfill"));
       }
       ++copied;
     }
-
-    curr = next;
-    from = &curr;
   }
 
-  rollbackVars.dismiss();
+  rollbackPods.dismiss();
   return copied;
 }
 
@@ -465,9 +513,14 @@ struct VarNames {
   }
 }
 
+struct BackfillStats {
+  std::size_t pods = 0;
+  std::size_t tasks = 0;
+};
+
 /// @brief Migrate each task's membership into the new tree's task map, through
 /// an iterator loaded, run and dropped rather than pinned.
-[[nodiscard]] Expected<std::size_t> backfillTasks(
+[[nodiscard]] Expected<BackfillStats> backfillTasks(
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
   auto created = bpfj::libbpf::BpfSkel<replace_bpf>::create();
@@ -497,6 +550,12 @@ struct VarNames {
     return makeUnexpected(res.error());
   }
 
+  auto pods =
+      copyPods(oldCfg, newCfg, ::bpf_map__fd(skel.maps().bpfj_replace_pods));
+  if (!pods) {
+    return makeUnexpected(pods.error());
+  }
+
   if (auto res = skel.attach(); !res) {
     return makeUnexpected(res.error());
   }
@@ -522,7 +581,12 @@ struct VarNames {
         " task(s)"));
   }
 
-  return readCounter(skel.maps().bpfj_replace_migrated, "migrated");
+  auto migrated = readCounter(skel.maps().bpfj_replace_migrated, "migrated");
+  if (!migrated) {
+    return makeUnexpected(migrated.error());
+  }
+
+  return BackfillStats{.pods = *pods, .tasks = *migrated};
 }
 
 /// @brief Everything between building the new tree and it becoming the live
@@ -591,20 +655,12 @@ struct VarNames {
       return makeUnexpected(res.error());
     }
 
-    // Pods first, since the backfill reads the new pod map to decide what to
-    // carry, and with the old tree frozen no userspace enrollment can land in
-    // it while these copies are running.
-    auto pods = copyPods(cfg, newCfg);
-    if (!pods) {
-      return makeUnexpected(pods.error());
+    auto backfill = backfillTasks(cfg, newCfg);
+    if (!backfill) {
+      return makeUnexpected(backfill.error());
     }
-    stats.pods = *pods;
-
-    auto tasks = backfillTasks(cfg, newCfg);
-    if (!tasks) {
-      return makeUnexpected(tasks.error());
-    }
-    stats.tasks = *tasks;
+    stats.pods = backfill->pods;
+    stats.tasks = backfill->tasks;
 
     // Before the unload below, so the new tree's free hook prunes the records
     // for the objects that unload is about to free.

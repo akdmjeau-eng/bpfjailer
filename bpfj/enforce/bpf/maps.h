@@ -23,15 +23,6 @@ struct {
   __type(value, struct bpfj_pid_data);
 } bpfj_task_map SEC(".maps");
 
-// The pods themselves, keyed by the uuid held in bpfj_pid_data. Resized by
-// userspace at load time.
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_uuid);
-  __type(value, struct bpfj_pod);
-} bpfj_pod_map SEC(".maps");
-
 // The roles an unprivileged caller is allowed to enroll itself in, from each
 // role's `unpriv-enroll` key; present means allowed, absent means root only.
 // bpfjsrv serves an abstract socket anyone in the network namespace can reach,
@@ -84,43 +75,40 @@ struct {
 
 // bpfj_var_map comes in from bpfj/var/bpf/var.h above, and bpfj_heap_arena /
 // bpfj_heap_ctrl from bpfj/lib/bpf/heap.h. A bpfj_var carries a numeric id and
-// a shared-arena pointer rather than its name and inline value bytes, so the
-// pod variables in bpfj_pod_map only mean anything next to those two objects.
+// a shared-arena pointer rather than its name and inline value bytes, so pod
+// variables only mean anything next to those two objects.
 
 // A pod is owned by the task-map entries that name it, one reference per uuid,
 // so it outlives its enroller for as long as some descendant is still jailed.
 // Nothing else removes a pod, and several CPUs write the counter at once.
 
-static __always_inline void bpfj_pod_refs_inc(struct bpfj_pod* pod) {
+static __always_inline void bpfj_pod_refs_inc(struct bpfj_pod __arena* pod) {
   __sync_fetch_and_add(&pod->refs, 1);
 }
 
-static __always_inline void bpfj_pod_refs_dec(struct bpfj_pod* pod) {
+static __always_inline void bpfj_pod_refs_dec(struct bpfj_pod __arena* pod) {
   // The pre-subtraction value, so 1 is the last reference; re-reading
   // pod->refs would let two concurrent putters both decide they were last.
   if (__sync_fetch_and_sub(&pod->refs, 1) <= 1) {
-    if (pod->var_array.count != 0 && bpfj_heap_enabled) {
+    if (bpfj_heap_enabled) {
       bpfj_heap_use_arena();
       struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
       BPFJ_LOCK_GUARD(heap_lock, &ctrl->lock);
       if (BPFJ_LOCK_IS_ACQUIRED(heap_lock)) {
-        BPFJ_HEAP_FREE(pod->var_array.vars);
+        BPFJ_HEAP_FREE(pod);
       } else {
         BPFJ_LOG_ERR(
             EBUSY, "Leaking pod variables after arena lock contention");
       }
     }
-    bpf_map_delete_elem(&bpfj_pod_map, &pod->uuid);
   }
 }
 
-/// Whether two pod uuids name the same pod. Zero when they do, as memcmp.
-static __always_inline int bpfj_uuid_cmp(
-    const struct bpfj_uuid* a,
-    const struct bpfj_uuid* b) {
-  const __u64* a_i = (const __u64*)a->uuid;
-  const __u64* b_i = (const __u64*)b->uuid;
-  return !(a_i[0] == b_i[0] && a_i[1] == b_i[1]);
+/// Whether two pod pointers name the same pod. Zero when they do, as memcmp.
+static __always_inline int bpfj_pod_ptr_cmp(
+    const struct bpfj_pod __arena* a,
+    const struct bpfj_pod __arena* b) {
+  return a != b;
 }
 
 /// Whether two role ids name the same role. Zero when they do, as memcmp.
@@ -134,11 +122,23 @@ static __always_inline int bpfj_role_id_cmp(
   return !(a_i[0] == b_i[0] && a_i[1] == b_i[1]);
 }
 
+static __always_inline void bpfj_pod_read_role_id(
+    struct bpfj_role_id* out,
+    const struct bpfj_pod __arena* pod) {
+  __builtin_memcpy(out, &pod->role_id, sizeof(*out));
+}
+
+static __always_inline void bpfj_pod_read_uuid(
+    struct bpfj_uuid* out,
+    const struct bpfj_pod __arena* pod) {
+  __builtin_memcpy(out, &pod->uuid, sizeof(*out));
+}
+
 /// @brief Whether `role_id` terminates a pod-stack walk, so the roles stacked
-/// under it get no say. bpfj_pid_data::pod_uuids runs oldest first with the
-/// base role at slot 0, so actor walks run *backwards* and break on the first
-/// override role; the walk over a *target's* roles, bpfj_gate_covers(),
-/// ignores the flag, or a target could shed a restriction by holding one.
+/// under it get no say. bpfj_pid_data::pods runs oldest first with the base
+/// role at slot 0, so actor walks run backwards and break on the first
+/// override role; the walk over a target's roles, bpfj_gate_covers(), ignores
+/// the flag, or a target could shed a restriction by holding one.
 static __always_inline bool bpfj_is_override(
     const struct bpfj_role_id* role_id) {
   const __u8* flag = bpf_map_lookup_elem(&bpfj_pod_override_map, role_id);
@@ -153,16 +153,19 @@ static __always_inline struct bpfj_pid_data* bpfj_get_task_pid_data(
     return NULL;
   }
 
+  if (bpfj_heap_enabled) {
+    bpfj_heap_use_arena();
+  }
   return bpf_task_storage_get(&bpfj_task_map, task, NULL, 0);
 }
 
-/// Name `uuid` in `pid_data`, if it does not already and there is room.
-/// Returns whether the entry changed, which is exactly when the caller owes
-/// the pod a reference -- taken *after* this call, since one taken first and
-/// handed back on a refusal would free the pod under its creator.
-static __always_inline bool bpfj_pid_data_add_uuid(
+/// Name `pod` in `pid_data`, if it does not already and there is room. Returns
+/// whether the entry changed, which is exactly when the caller owes the pod a
+/// reference -- taken after this call, since one taken first and handed back
+/// on a refusal would free the pod under its creator.
+static __always_inline bool bpfj_pid_data_add_pod(
     struct bpfj_pid_data* pid_data,
-    const struct bpfj_uuid* uuid) {
+    struct bpfj_pod __arena* pod) {
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
     num_pods = BPFJ_MAX_POD_PER_PID;
@@ -173,7 +176,7 @@ static __always_inline bool bpfj_pid_data_add_uuid(
     if (i >= num_pods) {
       break;
     }
-    if (bpfj_uuid_cmp(&pid_data->pod_uuids[i], uuid) == 0) {
+    if (bpfj_pod_ptr_cmp(pid_data->pods[i], pod) == 0) {
       return false;
     }
   }
@@ -192,7 +195,7 @@ static __always_inline bool bpfj_pid_data_add_uuid(
   }
 
   pid_data->version = BPFJ_PID_DATA_VERSION;
-  pid_data->pod_uuids[slot] = *uuid;
+  pid_data->pods[slot] = pod;
   pid_data->num_pods = num_pods + 1;
   return true;
 }
@@ -204,7 +207,7 @@ static __always_inline struct bpfj_pid_data* bpfj_get_current_pid_data(void) {
 
 /// @brief The newest pod named by `pid_data`, or NULL when it names none or
 /// the pod itself has already disappeared.
-static __always_inline struct bpfj_pod* bpfj_get_primary_pod(
+static __always_inline struct bpfj_pod __arena* bpfj_get_primary_pod(
     struct bpfj_pid_data* pid_data) {
   if (!pid_data || pid_data->num_pods == 0) {
     return NULL;
@@ -215,14 +218,14 @@ static __always_inline struct bpfj_pod* bpfj_get_primary_pod(
     index = BPFJ_MAX_POD_PER_PID - 1;
   }
 
-  return bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[index]);
+  return pid_data->pods[index];
 }
 
 /// @brief Reserve one structured event in the shared ring buffer and seed its
 /// common fields. Returns NULL if the ring buffer is full or no pod is known.
 static __always_inline struct bpfj_event* bpfj_event_reserve(
     enum bpfj_event_type type,
-    struct bpfj_pod* pod,
+    struct bpfj_pod __arena* pod,
     struct task_struct* task) {
   if (!pod || !task) {
     return NULL;
@@ -269,8 +272,7 @@ static __always_inline void bpfj_put_pid_data_refs(
       break;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = pid_data->pods[i];
     if (pod) {
       bpfj_pod_refs_dec(pod);
     }
@@ -284,6 +286,9 @@ static __always_inline void bpfj_put_pid_data_refs(
 static __always_inline struct bpfj_pid_data* bpfj_get_pid_data_from(
     void* task_map,
     struct task_struct* task) {
+  if (bpfj_heap_enabled) {
+    bpfj_heap_use_arena();
+  }
   return bpf_task_storage_get(task_map, task, NULL, 0);
 }
 
@@ -294,6 +299,9 @@ static __always_inline struct bpfj_pid_data* bpfj_set_pid_data_in(
     void* task_map,
     struct task_struct* task,
     struct bpfj_pid_data* init) {
+  if (bpfj_heap_enabled) {
+    bpfj_heap_use_arena();
+  }
   return bpf_task_storage_get(
       task_map, task, init, BPF_LOCAL_STORAGE_GET_F_CREATE);
 }

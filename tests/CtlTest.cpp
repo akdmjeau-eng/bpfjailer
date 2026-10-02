@@ -82,8 +82,8 @@ TEST(Ctl, NoCommandAtAllIsNotDispatched) {
 TEST(Ctl, AttachPinsTheMapsAndLinks) {
   attach();
 
-  ASSERT(exists(pinRoot() + "/maps/bpfj_pod_map"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_task_map"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_event_map"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_log_map"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
@@ -112,7 +112,7 @@ TEST(Ctl, AttachCompiledUsesThePolicyCompiledIn) {
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("2 role(s) from the compiled-in policy"));
   ASSERT(res.outHas("base role floor"));
-  ASSERT(exists(pinRoot() + "/maps/bpfj_pod_map"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
 }
 
 TEST(Ctl, AttachCompiledTakesNoPath) {
@@ -165,7 +165,7 @@ TEST(Ctl, ReplaceWithNothingAttachedActsLikeAttach) {
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("Jailer replaced"));
 
-  ASSERT(exists(pinRoot() + "/maps/bpfj_pod_map"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
   ASSERT(!exists(pinRoot() + "-new"));
 }
@@ -673,11 +673,11 @@ TEST(Ctl, WrapRunsTheCommandInsideAPod) {
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("hello"));
 
-  // The wrapped process has exited but its pod outlives it: there is no pod GC
-  // in this tree yet, which is why `pids` and `refs` are both worth printing.
+  // With pods now held only through task entries, the wrapped process dropping
+  // out of the task map releases the pod too.
   const CommandResult listed = ctl({"list"});
-  ASSERT(listed.outHas("wrapped"));
-  ASSERT(listed.outHas("svc@meta"));
+  ASSERT_EQ(listed.status, 0);
+  ASSERT(listed.outHas("no pods"));
 }
 
 TEST(Ctl, WrapKeepsCapabilitiesWithoutDropCap) {

@@ -43,14 +43,15 @@
 #define BPFJ_SCRATCH_SMALL_SLOTS 2048
 
 // 16456 for the fs-verity pair, rounded up for legibility. Only claimed for a
-// role that names a certificate, so shallower than the small class and still
-// six times what it was.
+// role that names a certificate, so shallower than the small class, but still
+// deep enough for two trees briefly checking the same exec across replace on a
+// busy host.
 #define BPFJ_SCRATCH_LARGE_SIZE 16640
-#define BPFJ_SCRATCH_LARGE_SLOTS 256
+#define BPFJ_SCRATCH_LARGE_SLOTS 512
 
-// 2048 * 1024 + 256 * 16640 = 6356992, about 6MB against the 1MB this was --
-// the price of denying on exhaustion, which needs a pool a busy host does not
-// reach the end of.
+// 2048 * 1024 + 512 * 16640 = 10618880, about 10MB against the 1MB this was
+// -- the price of denying on exhaustion, which needs a pool a busy host does
+// not reach the end of.
 #define BPFJ_SCRATCH_BYTES                              \
   (BPFJ_SCRATCH_SMALL_SIZE * BPFJ_SCRATCH_SMALL_SLOTS + \
    BPFJ_SCRATCH_LARGE_SIZE * BPFJ_SCRATCH_LARGE_SLOTS)

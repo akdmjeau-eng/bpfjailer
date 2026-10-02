@@ -82,13 +82,6 @@ SIGN_XATTR ?= user.bpfj.sig
 # what gets signed. The test enables verity with SHA-256.
 SIGN_HASH_ALG ?= sha256
 
-# Read off an ordinary dynamic binary rather than hard coded, since where the
-# loader lives differs by distribution and architecture.
-SYS_LOADER ?= $(shell readelf -l /bin/true 2>/dev/null | \
-	sed -n 's/.*interpreter: \(.*\)\]/\1/p')
-SYS_LIBC ?= $(shell ldd /bin/true 2>/dev/null | \
-	sed -n 's/.*libc\.so\.6 => \([^ ]*\).*/\1/p')
-
 # Resolved from this makefile's own location, so the caller's working
 # directory does not have to be the tree root.
 HERE := $(dir $(lastword $(MAKEFILE_LIST)))
@@ -118,20 +111,24 @@ fixture: $(OUT)/hello $(OUT)/linked \
 
 $(OUT)/ld.so:
 	@mkdir -p $(OUT)
-	@if [ -z "$(SYS_LOADER)" ]; then \
+	@loader=$$(readelf -l /bin/true 2>/dev/null | \
+		sed -n 's/.*interpreter: \(.*\)\]/\1/p'); \
+	if [ -z "$$loader" ]; then \
 		echo "$@: could not work out the dynamic loader from /bin/true" >&2; \
 		exit 1; \
-	fi
-	cp $(SYS_LOADER) $@
+	fi; \
+	cp "$$loader" $@
 	chmod u+w $@
 
 $(OUT)/libc.so.6:
 	@mkdir -p $(OUT)
-	@if [ -z "$(SYS_LIBC)" ]; then \
+	@libc=$$(ldd /bin/true 2>/dev/null | \
+		sed -n 's/.*libc\.so\.6 => \([^ ]*\).*/\1/p'); \
+	if [ -z "$$libc" ]; then \
 		echo "$@: could not work out libc from /bin/true" >&2; \
 		exit 1; \
-	fi
-	cp $(SYS_LIBC) $@
+	fi; \
+	cp "$$libc" $@
 	chmod u+w $@
 
 # The readelf check is the point of building it static, so it is worth

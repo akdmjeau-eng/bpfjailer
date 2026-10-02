@@ -41,8 +41,7 @@
 static int bpfj_verity_check(struct file* file, bool is_exec) {
   struct task_struct* task = bpf_get_current_task_btf();
 
-  struct bpfj_pid_data* pid_data =
-      bpf_task_storage_get(&bpfj_task_map, task, NULL, 0);
+  struct bpfj_pid_data* pid_data = bpfj_get_task_pid_data(task);
   if (!pid_data) {
     // Not jailed, so there is no role to demand a signature.
     return 0;
@@ -54,23 +53,21 @@ static int bpfj_verity_check(struct file* file, bool is_exec) {
       continue;
     }
 
-    // Read in place, a bpfj_pod filling the 512 byte stack on its own.
-    struct bpfj_uuid uuid = pid_data->pod_uuids[i];
-    struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuid);
+    struct bpfj_pod __arena* pod = pid_data->pods[i];
     if (!pod) {
-      // The pod was removed, so nothing names a key and no policy applies.
       continue;
     }
 
+    struct bpfj_role_id role = {};
+    bpfj_pod_read_role_id(&role, pod);
     enum bpfj_fsverity_reason reason = BPFJ_FSVERITY_REASON_NONE;
-    if (bpfj_check_fsverity_pkcs7(file, pod->role_id.id, is_exec, &reason) <
-        0) {
+    if (bpfj_check_fsverity_pkcs7(file, role.id, is_exec, &reason) < 0) {
       struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_VERITY, pod, task);
       bpfj_event_submit(ev);
       return -EPERM;
     }
 
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&role)) {
       break;
     }
   }

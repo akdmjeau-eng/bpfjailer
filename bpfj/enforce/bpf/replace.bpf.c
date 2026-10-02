@@ -26,6 +26,21 @@ struct {
   __type(value, struct bpfj_pid_data);
 } bpfj_old_task_map SEC(".maps");
 
+struct bpfj_replace_pod {
+  struct bpfj_pod __arena* pod;
+};
+
+struct bpfj_replace_pod_key {
+  struct bpfj_pod __arena* old_pod;
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 4096);
+  __type(key, struct bpfj_replace_pod_key);
+  __type(value, struct bpfj_replace_pod);
+} bpfj_replace_pods SEC(".maps");
+
 // Tasks that came across with their whole membership intact.
 struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -51,10 +66,10 @@ static __always_inline void bpfj_replace_count(void* counter) {
   }
 }
 
-/// Whether `pid_data` already names `uuid`.
+/// Whether `pid_data` already names `pod`.
 static __always_inline bool bpfj_replace_holds(
     struct bpfj_pid_data* pid_data,
-    const struct bpfj_uuid* uuid) {
+    struct bpfj_pod __arena* pod) {
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
     num_pods = BPFJ_MAX_POD_PER_PID;
@@ -66,7 +81,7 @@ static __always_inline bool bpfj_replace_holds(
       break;
     }
 
-    if (bpfj_uuid_cmp(&pid_data->pod_uuids[i], uuid) == 0) {
+    if (bpfj_pod_ptr_cmp(pid_data->pods[i], pod) == 0) {
       return true;
     }
   }
@@ -74,22 +89,18 @@ static __always_inline bool bpfj_replace_holds(
   return false;
 }
 
-/// Add `uuid` to `pid_data` and take a reference on the pod it names.
+/// Add `pod` to `pid_data` and take a reference on it.
 /// @return false if there was no room, the caller's cue to fail the replace
 ///         rather than let the task through with a narrower jail.
 static __always_inline bool bpfj_replace_add(
     struct bpfj_pid_data* pid_data,
-    const struct bpfj_uuid* uuid,
-    struct bpfj_pod* pod) {
+    struct bpfj_pod __arena* pod) {
   __u32 slot = pid_data->num_pods;
   if (slot >= BPFJ_MAX_POD_PER_PID) {
     return false;
   }
   barrier_var(slot);
-
-  for (int i = 0; i < BPFJ_UUID_BYTES; ++i) {
-    pid_data->pod_uuids[slot].uuid[i] = uuid->uuid[i];
-  }
+  pid_data->pods[slot] = pod;
   pid_data->num_pods = slot + 1;
 
   // After the write, so the reference is only taken once the entry naming
@@ -135,19 +146,23 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
       break;
     }
 
-    // An unresolvable uuid is one userspace deliberately left behind, the
-    // old base role; carrying it would give the task two.
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &old->pod_uuids[i]);
-    if (!pod) {
+    struct bpfj_pod __arena* old_pod = old->pods[i];
+    if (!old_pod) {
       continue;
     }
 
-    if (bpfj_replace_holds(new_data, &old->pod_uuids[i])) {
+    struct bpfj_replace_pod_key key = {.old_pod = old_pod};
+    struct bpfj_replace_pod* translated =
+        bpf_map_lookup_elem(&bpfj_replace_pods, &key);
+    if (!translated || !translated->pod) {
       continue;
     }
 
-    if (!bpfj_replace_add(new_data, &old->pod_uuids[i], pod)) {
+    if (bpfj_replace_holds(new_data, translated->pod)) {
+      continue;
+    }
+
+    if (!bpfj_replace_add(new_data, translated->pod)) {
       lost = true;
     }
   }

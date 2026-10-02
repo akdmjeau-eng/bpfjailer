@@ -49,10 +49,10 @@ echo "3. Opening a map the $ROLE role owns, from a process that is not in it"
 echo "   This shell is in $BASE_ROLE, which reaches only what $BASE_ROLE owns"
 echo "   -- and untracked-bpf means that is nothing."
 set +e
-out=$(sudo bpftool map dump pinned "$PINS/maps/bpfj_pod_map" 2>&1)
+out=$(sudo bpftool map dump pinned "$PINS/maps/bpfj_task_map" 2>&1)
 rc=$?
 set -e
-echo "   \$ sudo bpftool map dump pinned $PINS/maps/bpfj_pod_map"
+echo "   \$ sudo bpftool map dump pinned $PINS/maps/bpfj_task_map"
 echo "     rc=$rc  $(echo "$out" | head -1)"
 check "$((rc != 0))" 1 "refused by the BPF object enforcer"
 

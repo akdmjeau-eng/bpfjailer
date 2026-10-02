@@ -2,14 +2,13 @@
 
 #include "bpfj/enforce/Jailer.h"
 
-#include <time.h>
-
 #include <cstdint>
 #include <filesystem>
-#include <random>
+#include <optional>
 
 // Ahead of the skeleton, in its own block so the formatter keeps it there: the
 // generated rodata struct only forward-declares `struct bpfj_uuid`.
+#include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/RoleId.h"
 
 #include "bpfj/enforce/RoleGate.h"
@@ -20,6 +19,7 @@
 
 #include "bpfj/enforce/bpf/jailer.skel.h"
 #include "bpfj/lib/Heap.h"
+#include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -39,58 +39,52 @@ constexpr RoleGate kEnrollGate{
     .targets = &RolePolicy::enroll,
 };
 
-/// @brief A random version 4 uuid, which only has to be unique rather than
-/// unguessable, naming a pod in a map the jailer owns.
-[[nodiscard]] struct bpfj_uuid makeUuid4() noexcept {
-  std::random_device rd;
-  std::uniform_int_distribution<unsigned int> byte(0, 255);
-
-  struct bpfj_uuid uuid{};
-  for (auto& b : uuid.uuid) {
-    b = static_cast<unsigned char>(byte(rd));
-  }
-
-  // Version 4, variant 1, matching bpfj_make_uuid4 on the BPF side.
-  uuid.uuid[6] = static_cast<unsigned char>((uuid.uuid[6] & 0x0f) | 0x40);
-  uuid.uuid[8] = static_cast<unsigned char>((uuid.uuid[8] & 0x3f) | 0x80);
-  return uuid;
-}
-
-/// @brief Put the base role's pod in bpfj_pod_map, here rather than in BPF so
-/// it exists before the seeding iterator runs. Its one reference belongs to
-/// the load and is never given back, the pod being the floor for the jailer's
-/// lifetime; unload takes the whole map with it.
-[[nodiscard]] Expected<> createBasePod(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const std::string& role,
-    const struct bpfj_uuid& uuid) noexcept {
+/// @brief The encoded base role id, validated in userspace before load so BPF
+/// can copy it straight into a prebuilt or fallback-allocated base-role pod.
+[[nodiscard]] Expected<struct bpfj_role_id> makeBaseRoleId(
+    const std::string& role) noexcept {
   auto roleId = makeRoleId(role);
   if (!roleId) {
     return makeUnexpected(makeError(
         roleId.error().code(), "base-role: ", roleId.error().message()));
   }
+  return *roleId;
+}
 
-  auto map = skel.getMap("bpfj_pod_map");
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory, "no map named bpfj_pod_map"));
+/// @brief Build the one pod the base-role seeding walk names on every task.
+[[nodiscard]] Expected<std::pair<PodArena, struct bpfj_pod*>> makeBaseRolePod(
+    const PinConfig& cfg,
+    const struct bpfj_role_id& roleId) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
 
-  struct bpfj_pod pod{};
-  pod.role_id = *roleId;
-  pod.uuid = uuid;
-  pod.refs = 1;
-  pod.enrollment_source = BPFJ_ENROLL_BASE_ROLE;
-  bpfj_var_array_init(&pod.var_array);
-
-  // CLOCK_MONOTONIC, matching the bpf_ktime_get_ns() BPF stamps with.
-  struct timespec ts{};
-  if (::clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-    pod.creation_time_ns =
-        static_cast<std::int64_t>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+  auto blob = arena->alloc(sizeof(struct bpfj_pod));
+  if (!blob) {
+    return makeUnexpected(blob.error());
   }
 
-  return map->updateElem(uuid, pod, BPF_NOEXIST);
+  auto* pod = static_cast<struct bpfj_pod*>(*blob);
+  *pod = {};
+  pod->role_id = roleId;
+  auto uuid = makeUuid4();
+  if (!uuid) {
+    (void)arena->free(pod);
+    return makeUnexpected(uuid.error());
+  }
+  pod->uuid = *uuid;
+  pod->enrollment_source = BPFJ_ENROLL_BASE_ROLE;
+  bpfj_var_array_init(&pod->var_array);
+
+  auto nowNs = monotonicNs();
+  if (!nowNs) {
+    (void)arena->free(pod);
+    return makeUnexpected(nowNs.error());
+  }
+  pod->creation_time_ns = *nowNs;
+
+  return std::pair{std::move(*arena), pod};
 }
 
 /// @brief Publish the roles that terminate a pod-stack walk, from here rather
@@ -147,12 +141,17 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
   // One path from the binary's own xattr, plus optionally the base role.
   skel.rodata().bpfj_enroll_from_xattr = 1;
 
-  // Before load(), since the uuid travels through rodata, frozen at load.
+  // Before load(), since rodata is frozen there.
   const bool hasBaseRole = !policy.baseRole.empty();
-  const struct bpfj_uuid baseUuid = makeUuid4();
+  std::optional<struct bpfj_role_id> baseRoleId;
   if (hasBaseRole) {
+    auto parsedBaseRoleId = makeBaseRoleId(policy.baseRole);
+    if (!parsedBaseRoleId) {
+      return makeUnexpected(parsedBaseRoleId.error());
+    }
+    baseRoleId = *parsedBaseRoleId;
     skel.rodata().bpfj_base_role_enabled = 1;
-    skel.rodata().bpfj_base_role_uuid = baseUuid;
+    skel.rodata().bpfj_base_role_id = *baseRoleId;
   }
 
   if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
@@ -175,6 +174,23 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
     return res;
   }
 
+  std::optional<PodArena> baseRoleArena;
+  struct bpfj_pod* baseRolePod = nullptr;
+  auto freeBaseRolePod = makeGuard([&] {
+    if (baseRoleArena && baseRolePod) {
+      (void)baseRoleArena->free(baseRolePod);
+    }
+  });
+  if (baseRoleId) {
+    auto pod = makeBaseRolePod(cfg, *baseRoleId);
+    if (!pod) {
+      return makeUnexpected(pod.error());
+    }
+    baseRoleArena = std::move(pod->first);
+    baseRolePod = pod->second;
+    skel.bss().bpfj_base_role_pod = baseRolePod;
+  }
+
   // Before attach, so no hook can run against a half-written map and read an
   // overriding role as an ordinary one.
   if (auto res = writeOverrideRoles(skel, policy); !res) {
@@ -183,13 +199,6 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
 
   if (auto res = gate::writePolicy(skel, kEnrollGate, policy); !res) {
     return res;
-  }
-
-  // Before attach, so the seeding walk and a fork racing it both find it.
-  if (hasBaseRole) {
-    if (auto res = createBasePod(skel, policy.baseRole, baseUuid); !res) {
-      return res;
-    }
   }
 
   if (auto res = skel.attach(); !res) {
@@ -204,6 +213,7 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
     if (auto res = seed.iter(); !res) {
       return makeUnexpected(res.error());
     }
+    freeBaseRolePod.dismiss();
   }
 
   // An attached link that is not pinned dies with this process, and for

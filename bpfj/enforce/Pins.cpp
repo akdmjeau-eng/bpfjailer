@@ -19,12 +19,11 @@ namespace {
 namespace fs = std::filesystem;
 
 // The jail membership every BPF object declares: the per-task membership, the
-// pods it names, the arena their variable payloads live in, the variable names
-// those payloads are identified by, the roles policy opens to unprivileged
-// callers, and the shared event/log ring buffers.
-constexpr std::array<std::string_view, 10> kSharedMapNames = {
+// arena their pod payloads live in, the variable names those payloads are
+// identified by, the roles policy opens to unprivileged callers, and the
+// shared event/log ring buffers.
+constexpr std::array<std::string_view, 9> kSharedMapNames = {
     "bpfj_task_map",
-    "bpfj_pod_map",
     "bpfj_heap_arena",
     "bpfj_var_map",
     "bpfj_unpriv_enroll_map",
@@ -45,11 +44,6 @@ constexpr std::array<std::string_view, 4> kScratchMapNames = {
     "bpfj_scratch_small_claimed",
     "bpfj_scratch_large_claimed",
 };
-
-// bpfj_pod_map is declared with a single entry and sized at load time, so
-// until the internal jailer's policy-driven sizing is ported this is a flat
-// ceiling on concurrently jailed pods.
-constexpr std::uint32_t kMaxPods = 4096;
 
 // logging_bpf.h measures the ring buffer in 4 KiB pages and the closed source
 // jailer uses 64 of them for bpfj_log_map.
@@ -181,9 +175,7 @@ Expected<> pinSharedMaps(
   }
 
   for (const auto& name : kSharedMapNames) {
-    const auto maxEntries = name == "bpfj_pod_map"
-        ? std::optional<std::uint32_t>(kMaxPods)
-        : name == "bpfj_event_map"
+    const auto maxEntries = name == "bpfj_event_map"
         ? std::optional<std::uint32_t>(kBpfEventMapEntries)
         : name == "bpfj_log_map"
         ? std::optional<std::uint32_t>(kBpfLogMapEntries)

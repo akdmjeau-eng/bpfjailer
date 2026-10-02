@@ -23,7 +23,7 @@
 #define BPFJ_MAX_UNPRIV_ROLES 1024
 
 // Versioning
-#define BPFJ_PID_DATA_VERSION 1
+#define BPFJ_PID_DATA_VERSION 2
 
 // The layout of the bpfj_bpf_owner records below, which a replace reads
 // through the running tree's pin to decide whether it can carry them across;
@@ -104,26 +104,27 @@ struct bpfj_bpf_owner {
   __u32 id;
 };
 
-struct __attribute__((packed)) bpfj_pid_data {
+struct bpfj_pid_data {
   __s8 version;
   __u8 num_pods;
   __u32 flags; // currently unused
   __u64 reserved; // currently unused
-  struct bpfj_uuid pod_uuids[BPFJ_MAX_POD_PER_PID];
+  struct bpfj_pod __arena* pods[BPFJ_MAX_POD_PER_PID];
 };
 
 // Pinned so widening a member is a compile error rather than a silent change
-// to bpfj_pod_map, which outlives the process that created it.
+// to the task-storage records shared by every BPF object in the jail.
 #ifdef __cplusplus
 #define BPFJ_POD_STATIC_ASSERT(condition) static_assert(condition)
 #else
 #define BPFJ_POD_STATIC_ASSERT(condition) \
-  _Static_assert(condition, "pod layout is shared through bpfj_pod_map")
+  _Static_assert(condition, "pod layout is shared through pinned jail maps")
 #endif
 
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 328);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 48);
 
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.

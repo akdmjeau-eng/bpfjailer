@@ -101,18 +101,19 @@ static __always_inline bool bpfj_bpf_syscall_allowed(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = pid_data->pods[i];
     if (!pod) {
       continue;
     }
 
-    __u8* mode = bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &pod->role_id);
+    struct bpfj_role_id role = {};
+    bpfj_pod_read_role_id(&role, pod);
+    __u8* mode = bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &role);
     if (mode && *mode == BPFJ_BPF_DENY) {
       return false;
     }
 
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&role)) {
       break;
     }
   }
@@ -123,10 +124,11 @@ static __always_inline bool bpfj_bpf_syscall_allowed(
 /// The role that owns what this caller creates, or NULL if nothing should be
 /// recorded. ALLOW_UNTRACKED is skipped rather than returned, so the walk
 /// carries on to the roles under it.
-static __always_inline struct bpfj_role_id* bpfj_bpf_owning_role(
-    struct bpfj_pid_data* pid_data) {
+static __always_inline bool bpfj_bpf_owning_role(
+    struct bpfj_pid_data* pid_data,
+    struct bpfj_role_id* out) {
   if (!pid_data) {
-    return NULL;
+    return false;
   }
 
   __u32 num_pods = pid_data->num_pods;
@@ -141,23 +143,25 @@ static __always_inline struct bpfj_role_id* bpfj_bpf_owning_role(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = pid_data->pods[i];
     if (!pod) {
       continue;
     }
 
-    __u8* mode = bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &pod->role_id);
+    struct bpfj_role_id role = {};
+    bpfj_pod_read_role_id(&role, pod);
+    __u8* mode = bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &role);
     if (mode && *mode == BPFJ_BPF_ALLOW) {
-      return &pod->role_id;
+      __builtin_memcpy(out, &role, sizeof(*out));
+      return true;
     }
 
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&role)) {
       break;
     }
   }
 
-  return NULL;
+  return false;
 }
 
 /// Whether the caller may open an object owned by `owner`. Every configured
@@ -183,15 +187,16 @@ static __always_inline bool bpfj_bpf_access_allowed(
       continue;
     }
 
-    struct bpfj_pod* pod =
-        bpf_map_lookup_elem(&bpfj_pod_map, &pid_data->pod_uuids[i]);
+    struct bpfj_pod __arena* pod = pid_data->pods[i];
     if (!pod) {
       continue;
     }
 
-    if (bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &pod->role_id)) {
+    struct bpfj_role_id role = {};
+    bpfj_pod_read_role_id(&role, pod);
+    if (bpf_map_lookup_elem(&bpfj_bpf_syscall_roles, &role)) {
       struct bpfj_bpf_access_key key = {};
-      __builtin_memcpy(&key.opener, &pod->role_id, sizeof(key.opener));
+      __builtin_memcpy(&key.opener, &role, sizeof(key.opener));
       __builtin_memcpy(&key.owner, owner, sizeof(key.owner));
 
       // A `no-bpf` role holds no pairs, so it lands here as a denial too.
@@ -201,7 +206,7 @@ static __always_inline bool bpfj_bpf_access_allowed(
       granted = true;
     }
 
-    if (bpfj_is_override(&pod->role_id)) {
+    if (bpfj_is_override(&role)) {
       break;
     }
   }
@@ -214,14 +219,14 @@ static __always_inline bool bpfj_bpf_access_allowed(
 /// and an open of a pin; the id is unassigned here, so the first fd fills it
 /// in.
 static __always_inline void bpfj_bpf_take_ownership(void* owners, __u64 addr) {
-  struct bpfj_role_id* role = bpfj_bpf_owning_role(bpfj_get_current_pid_data());
-  if (!role) {
+  struct bpfj_role_id role = {};
+  if (!bpfj_bpf_owning_role(bpfj_get_current_pid_data(), &role)) {
     // Unjailed, or a role that did not configure itself. Nothing to track.
     return;
   }
 
   struct bpfj_bpf_owner record = {};
-  __builtin_memcpy(&record.role, role, sizeof(record.role));
+  __builtin_memcpy(&record.role, &role, sizeof(record.role));
 
   if (bpf_map_update_elem(owners, &addr, &record, BPF_NOEXIST) < 0) {
     // Loud, because the object stays unowned and so openable by anyone.
@@ -385,15 +390,14 @@ int bpfj_bpf_seed_owners(struct bpf_iter__task_file* ctx) {
     return 0;
   }
 
-  struct bpfj_pid_data* pid_data =
-      bpf_task_storage_get(&bpfj_task_map, task, NULL, 0);
-  struct bpfj_role_id* role = bpfj_bpf_owning_role(pid_data);
-  if (!role) {
+  struct bpfj_pid_data* pid_data = bpfj_get_task_pid_data(task);
+  struct bpfj_role_id role = {};
+  if (!bpfj_bpf_owning_role(pid_data, &role)) {
     return 0;
   }
 
   struct bpfj_bpf_owner record = {};
-  __builtin_memcpy(&record.role, role, sizeof(record.role));
+  __builtin_memcpy(&record.role, &role, sizeof(record.role));
 
   if (file->f_op == &bpf_map_fops) {
     struct bpf_map* map = bpf_core_cast(file->private_data, struct bpf_map);

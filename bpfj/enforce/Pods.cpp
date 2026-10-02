@@ -27,7 +27,6 @@ namespace bpfjailer {
 
 namespace {
 
-constexpr std::string_view kPodMap = "bpfj_pod_map";
 constexpr std::string_view kTaskMap = "bpfj_task_map";
 constexpr std::string_view kReplaceFrozenMap = "bpfj_replace_frozen";
 constexpr std::string_view kActiveEnrollsMap = "bpfj_active_enrolls";
@@ -56,7 +55,7 @@ struct ResolvedPodVar {
   return Fd(fd);
 }
 
-[[nodiscard]] Expected<bpfj_uuid> makeUuid4() noexcept {
+[[nodiscard]] Expected<bpfj_uuid> makeUuid4Impl() noexcept {
   bpfj_uuid uuid{};
   if (::getrandom(uuid.uuid, sizeof(uuid.uuid), 0) !=
       static_cast<ssize_t>(sizeof(uuid.uuid))) {
@@ -146,7 +145,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 [[nodiscard]] Expected<std::uint32_t> enrollTasks(
     const PinConfig& cfg,
     pid_t pid,
-    const bpfj_uuid& uuid,
+    struct bpfj_pod* pod,
     Threads threads,
     std::uint32_t callerPid) noexcept {
   auto created = bpfj::libbpf::BpfSkel<enroll_bpf>::create();
@@ -159,7 +158,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   skel.rodata().bpfj_enroll_tgid = pid;
   skel.rodata().bpfj_enroll_caller_pid = static_cast<pid_t>(callerPid);
   skel.rodata().bpfj_enroll_all_threads = threads == Threads::All ? 1 : 0;
-  skel.rodata().bpfj_enroll_uuid = uuid;
+  skel.bss().bpfj_enroll_pod = pod;
 
   // Adopted from the jailer's pins, so this writes the running jailer's state
   // rather than a private copy.
@@ -254,31 +253,63 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   return resolved;
 }
 
-[[nodiscard]] std::uint32_t podVarBlobSize(
+[[nodiscard]] std::uint32_t podAllocSize(
     std::span<const ResolvedPodVar> vars) noexcept {
-  std::uint32_t size = bpfj_var_align_up(sizeof(struct bpfj_var) * vars.size());
+  std::uint32_t size = bpfj_var_align_up(sizeof(struct bpfj_pod));
+  size += bpfj_var_align_up(sizeof(struct bpfj_var) * vars.size());
   for (const auto& var : vars) {
     size += bpfj_var_align_up(static_cast<__u32>(var.value.size()) + 1);
   }
   return size;
 }
 
-[[nodiscard]] Expected<> setVars(
-    bpfj_var_array& dst,
+[[nodiscard]] Expected<struct bpfj_pod*> makePod(
+    PodArena& arena,
+    std::string_view roleId,
+    std::string_view userId,
     std::span<const ResolvedPodVar> vars,
-    PodArena& arena) noexcept {
-  bpfj_var_array_init(&dst);
-  if (vars.empty()) {
-    return unit;
-  }
-
-  auto blob = arena.alloc(podVarBlobSize(vars));
+    unsigned char source) noexcept {
+  auto blob = arena.alloc(podAllocSize(vars));
   if (!blob) {
     return makeUnexpected(blob.error());
   }
 
-  auto* staged = static_cast<struct bpfj_var*>(*blob);
-  std::uint32_t valueOff =
+  auto* pod = static_cast<struct bpfj_pod*>(*blob);
+  *pod = {};
+  if (auto res = setId(pod->role_id.id, roleId, "role"); !res) {
+    (void)arena.free(*blob);
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = setId(pod->user_id.id, userId, "user id"); !res) {
+    (void)arena.free(*blob);
+    return makeUnexpected(res.error());
+  }
+
+  auto uuid = makeUuid4Impl();
+  if (!uuid) {
+    (void)arena.free(*blob);
+    return makeUnexpected(uuid.error());
+  }
+  pod->uuid = *uuid;
+
+  auto now = monotonicNs();
+  if (!now) {
+    (void)arena.free(*blob);
+    return makeUnexpected(now.error());
+  }
+  pod->creation_time_ns = *now;
+  pod->enrollment_source = source;
+  bpfj_var_array_init(&pod->var_array);
+
+  if (vars.empty()) {
+    return pod;
+  }
+
+  auto* staged = reinterpret_cast<struct bpfj_var*>(
+      static_cast<unsigned char*>(*blob) +
+      bpfj_var_align_up(sizeof(struct bpfj_pod)));
+  std::uint32_t valueOff = bpfj_var_align_up(sizeof(struct bpfj_pod)) +
       bpfj_var_align_up(sizeof(struct bpfj_var) * vars.size());
   for (std::size_t i = 0; i < vars.size(); ++i) {
     const auto& var = vars[i];
@@ -296,39 +327,8 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
     valueOff += bpfj_var_align_up(static_cast<__u32>(var.value.size()) + 1);
   }
 
-  dst.vars = staged;
-  dst.count = static_cast<__u8>(vars.size());
-  return unit;
-}
-
-[[nodiscard]] Expected<bpfj_pod> makePod(
-    std::string_view roleId,
-    std::string_view userId) noexcept {
-  bpfj_pod pod{};
-
-  if (auto res = setId(pod.role_id.id, roleId, "role"); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  if (auto res = setId(pod.user_id.id, userId, "user id"); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  auto uuid = makeUuid4();
-  if (!uuid) {
-    return makeUnexpected(uuid.error());
-  }
-  pod.uuid = *uuid;
-
-  auto now = monotonicNs();
-  if (!now) {
-    return makeUnexpected(now.error());
-  }
-  pod.creation_time_ns = *now;
-
-  pod.enrollment_source = BPFJ_ENROLL_CLIENT;
-  bpfj_var_array_init(&pod.var_array);
-
+  pod->var_array.vars = staged;
+  pod->var_array.count = static_cast<__u8>(vars.size());
   return pod;
 }
 
@@ -349,16 +349,6 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 
   return bpfj_pid_data{.version = BPFJ_PID_DATA_VERSION};
 }
-
-struct UuidLess {
-  bool operator()(const bpfj_uuid& lhs, const bpfj_uuid& rhs) const noexcept {
-    return std::memcmp(lhs.uuid, rhs.uuid, sizeof(lhs.uuid)) < 0;
-  }
-};
-
-// A uuid get_next_key handed back that bpfj_pod_map no longer held by lookup
-// time. It stays in the index so the wrap check below sees the key.
-constexpr std::size_t kDropped = static_cast<std::size_t>(-1);
 
 /// @brief The thread group ids /proc currently lists.
 [[nodiscard]] Expected<std::vector<pid_t>> runningPids() noexcept {
@@ -387,6 +377,10 @@ constexpr std::size_t kDropped = static_cast<std::size_t>(-1);
 
 } // namespace
 
+Expected<bpfj_uuid> makeUuid4() noexcept {
+  return makeUuid4Impl();
+}
+
 Expected<bpfj_uuid> enrollPod(
     const PinConfig& cfg,
     std::string_view roleId,
@@ -403,11 +397,6 @@ Expected<bpfj_uuid> enrollPod(
 
   if (auto res = checkNotFrozen(cfg); !res) {
     return makeUnexpected(res.error());
-  }
-
-  auto podMap = openPinnedMap(cfg, kPodMap);
-  if (!podMap) {
-    return makeUnexpected(podMap.error());
   }
 
   auto taskMap = openPinnedMap(cfg, kTaskMap);
@@ -437,66 +426,49 @@ Expected<bpfj_uuid> enrollPod(
         " pods"));
   }
 
-  auto pod = makePod(roleId, userId);
-  if (!pod) {
-    return makeUnexpected(pod.error());
+  auto openedArena = PodArena::open(cfg);
+  if (!openedArena) {
+    return makeUnexpected(openedArena.error());
   }
+  auto arena = std::move(*openedArena);
 
-  // The iterator takes one reference per task it enrolls and leaves the pod
-  // owned by nobody if it reaches none.
-  pod->refs = 0;
-
-  std::optional<PodArena> arena;
+  std::vector<ResolvedPodVar> resolved;
   if (!vars.empty()) {
     auto varMap = openVarMap(cfg);
     if (!varMap) {
       return makeUnexpected(varMap.error());
     }
 
-    auto resolved = resolveVars(vars, *varMap);
-    if (!resolved) {
-      return makeUnexpected(resolved.error());
+    auto read = resolveVars(vars, *varMap);
+    if (!read) {
+      return makeUnexpected(read.error());
     }
-
-    arena.emplace();
-    auto openedArena = PodArena::open(cfg);
-    if (!openedArena) {
-      return makeUnexpected(openedArena.error());
-    }
-    *arena = std::move(*openedArena);
-
-    if (auto res = setVars(pod->var_array, *resolved, *arena); !res) {
-      return makeUnexpected(res.error());
-    }
+    resolved = std::move(*read);
   }
 
-  const bpfj_uuid uuid = pod->uuid;
-  const bpfj_pod& podValue = *pod;
-  if (::bpf_map_update_elem(podMap->get(), &uuid, &podValue, BPF_NOEXIST) !=
-      0) {
-    if (arena && pod->var_array.count != 0) {
-      (void)arena->free(pod->var_array.vars);
-    }
-    return makeUnexpected(makeErrnoError("failed to create pod"));
+  auto pod = makePod(
+      arena,
+      roleId,
+      userId,
+      resolved,
+      static_cast<unsigned char>(BPFJ_ENROLL_CLIENT));
+  if (!pod) {
+    return makeUnexpected(pod.error());
   }
 
-  // So a failed enrollment does not hold a bpfj_pod_map slot forever.
-  const auto dropPod = [&] {
-    if (arena && pod->var_array.count != 0) {
-      (void)arena->free(pod->var_array.vars);
-    }
-    (void)::bpf_map_delete_elem(podMap->get(), &uuid);
-  };
+  // The iterator takes one reference per task it enrolls and leaves the pod
+  // owned by nobody if it reaches none.
+  (*pod)->refs = 0;
 
   auto enrolled = enrollTasks(
-      cfg, pid, uuid, threads, static_cast<std::uint32_t>(::getpid()));
+      cfg, pid, *pod, threads, static_cast<std::uint32_t>(::getpid()));
   if (!enrolled) {
-    dropPod();
+    (void)arena.free(*pod);
     return makeUnexpected(enrolled.error());
   }
 
   if (*enrolled == 0) {
-    dropPod();
+    (void)arena.free(*pod);
     return makeUnexpected(makeError(
         std::errc::no_such_process,
         "no task of pid ",
@@ -505,7 +477,7 @@ Expected<bpfj_uuid> enrollPod(
   }
 
   release.dismiss();
-  return uuid;
+  return (*pod)->uuid;
 }
 
 Expected<std::vector<bpfj_pod>> listPods(
@@ -526,67 +498,42 @@ Expected<std::vector<bpfj_pod>> listPods(
     return makeUnexpected(pidData.error());
   }
 
-  auto podMap = openPinnedMap(cfg, kPodMap);
-  if (!podMap) {
-    return makeUnexpected(podMap.error());
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
 
   // Clamped, since num_pods comes from a map BPF writes concurrently and
-  // nothing else bounds the read of pod_uuids.
+  // nothing else bounds the read of the pod pointer array.
   const std::uint8_t count =
       std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
 
   std::vector<bpfj_pod> pods;
   pods.reserve(count);
   for (std::uint8_t i = 0; i < count; ++i) {
-    const bpfj_uuid uuid = pidData->pod_uuids[i];
-    bpfj_pod pod{};
-    if (::bpf_map_lookup_elem(podMap->get(), &uuid, &pod) != 0) {
-      // Two maps read one after the other, so a pod can be released between
-      // them; report the ones still there.
+    const auto* pod = pidData->pods[i];
+    if (pod == nullptr) {
       continue;
     }
-
-    pods.push_back(pod);
+    pods.push_back(*pod);
   }
 
   return pods;
 }
 
 Expected<std::vector<PodMembers>> listAllPods(const PinConfig& cfg) noexcept {
-  auto podMap = openPinnedMap(cfg, kPodMap);
-  if (!podMap) {
-    return makeUnexpected(podMap.error());
-  }
-
   auto taskMap = openPinnedMap(cfg, kTaskMap);
   if (!taskMap) {
     return makeUnexpected(taskMap.error());
   }
 
-  std::vector<PodMembers> members;
-  std::map<bpfj_uuid, std::size_t, UuidLess> index;
-
-  bpfj_uuid curr{};
-  bpfj_uuid next{};
-  const void* from = nullptr;
-  while (::bpf_map_get_next_key(podMap->get(), from, &next) == 0) {
-    // Deleting the key the walk resumes from restarts it at the first key, so
-    // a uuid arriving twice means the walk wrapped rather than advanced.
-    auto [entry, inserted] = index.emplace(next, kDropped);
-    if (!inserted) {
-      break;
-    }
-
-    bpfj_pod pod{};
-    if (::bpf_map_lookup_elem(podMap->get(), &next, &pod) == 0) {
-      entry->second = members.size();
-      members.push_back(PodMembers{.pod = pod, .pids = {}});
-    }
-
-    curr = next;
-    from = &curr;
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
+
+  std::vector<PodMembers> members;
+  std::map<std::uintptr_t, std::size_t> index;
 
   auto pids = runningPids();
   if (!pids) {
@@ -608,21 +555,30 @@ Expected<std::vector<PodMembers>> listAllPods(const PinConfig& cfg) noexcept {
     const std::uint8_t count =
         std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
     for (std::uint8_t i = 0; i < count; ++i) {
-      const auto entry = index.find(pidData->pod_uuids[i]);
-      if (entry != index.end() && entry->second != kDropped) {
-        members[entry->second].pids.push_back(pid);
+      const auto* pod = pidData->pods[i];
+      if (pod == nullptr) {
+        continue;
       }
+
+      const auto key = reinterpret_cast<std::uintptr_t>(pod);
+      auto [entry, inserted] = index.emplace(key, members.size());
+      if (inserted) {
+        members.push_back(PodMembers{.pod = *pod, .pids = {}});
+      }
+      members[entry->second].pids.push_back(pid);
     }
   }
 
-  // bpfj_pod_map is a hash, so the walk arrives in an order that means nothing
-  // and changes between runs. Oldest first is stable.
+  // /proc order means nothing and changes between runs. Oldest first is stable.
   std::sort(
       members.begin(), members.end(), [](const auto& lhs, const auto& rhs) {
         if (lhs.pod.creation_time_ns != rhs.pod.creation_time_ns) {
           return lhs.pod.creation_time_ns < rhs.pod.creation_time_ns;
         }
-        return UuidLess{}(lhs.pod.uuid, rhs.pod.uuid);
+        return std::memcmp(
+                   lhs.pod.uuid.uuid,
+                   rhs.pod.uuid.uuid,
+                   sizeof(lhs.pod.uuid.uuid)) < 0;
       });
 
   return members;

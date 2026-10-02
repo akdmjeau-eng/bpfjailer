@@ -28,10 +28,11 @@ extern int bpf_get_file_xattr(struct file*, const char*, struct bpf_dynptr*)
 
 volatile const unsigned char bpfj_enroll_from_xattr = 0;
 
-// The base role's pod, built by userspace before load so it is in
-// bpfj_pod_map before the seeding iterator below points every task at it.
+// The base role's id, published through rodata, and an optional userspace-made
+// pod the seeding iterator can point every task at.
 volatile const unsigned char bpfj_base_role_enabled = 0;
-volatile const struct bpfj_uuid bpfj_base_role_uuid;
+volatile const struct bpfj_role_id bpfj_base_role_id;
+struct bpfj_pod __arena* bpfj_base_role_pod;
 
 _Static_assert(
     BPFJ_MAX_POD_PER_PID <= 8,
@@ -73,8 +74,7 @@ int BPF_PROG(
 
   struct task_struct* parent = bpf_get_current_task_btf();
 
-  struct bpfj_pid_data* pid_data =
-      bpf_task_storage_get(&bpfj_task_map, parent, NULL, 0);
+  struct bpfj_pid_data* pid_data = bpfj_get_task_pid_data(parent);
   if (!pid_data) {
     // Parent isn't jailed, so the child isn't either.
     return 0;
@@ -87,8 +87,8 @@ int BPF_PROG(
 
   // Taken now because creating the child's entry can invalidate the parent's
   // map value pointer, which the rollback below still needs.
-  struct bpfj_uuid uuids[BPFJ_MAX_POD_PER_PID];
-  __builtin_memcpy(uuids, pid_data->pod_uuids, sizeof(uuids));
+  struct bpfj_pod __arena* pods[BPFJ_MAX_POD_PER_PID];
+  __builtin_memcpy(pods, pid_data->pods, sizeof(pods));
 
   // Before the child's entry exists, or the parent could exit in between and
   // free a pod the child names.
@@ -98,7 +98,7 @@ int BPF_PROG(
       break;
     }
 
-    struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuids[i]);
+    struct bpfj_pod __arena* pod = pods[i];
     if (!pod) {
       BPFJ_LOG_ERR(
           ENOENT, "Pod %d named by pid %d is missing on fork", i, parent->tgid);
@@ -110,8 +110,8 @@ int BPF_PROG(
   }
 
   // Seeding with the parent's value is the clone.
-  struct bpfj_pid_data* child_pid_data = bpf_task_storage_get(
-      &bpfj_task_map, child, pid_data, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  struct bpfj_pid_data* child_pid_data =
+      bpfj_set_pid_data_in(&bpfj_task_map, child, pid_data);
   if (!child_pid_data) {
     // Release only what this call took, so a failed clone is reference
     // neutral; a leak here pins the pod for the life of the host.
@@ -120,7 +120,7 @@ int BPF_PROG(
         continue;
       }
 
-      struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuids[i]);
+      struct bpfj_pod __arena* pod = pods[i];
       if (pod) {
         bpfj_pod_refs_dec(pod);
       }
@@ -153,9 +153,21 @@ int BPF_PROG(
     return 0;
   }
 
-  // Assembled in scratch rather than on the stack: a pod outgrows the 512 byte
-  // BPF stack, and bpf_dynptr_from_mem rejects a stack pointer.
-  BPFJ_SCRATCH_GUARD(struct bpfj_pod, pod);
+  BPFJ_SCRATCH_GUARD(struct bpfj_role_id, role_id);
+  if (!role_id) {
+    BPFJ_LOG_ERR(ENOMEM, "No scratch slot to read an xattr role id");
+    return -ENOMEM;
+  }
+
+  struct bpf_dynptr role_id_ptr;
+  bpf_dynptr_from_mem(role_id, sizeof(*role_id), 0, &role_id_ptr);
+  if (bpf_get_file_xattr(file, BPFJ_EXEC_POLICY_XATTR, &role_id_ptr) < 0) {
+    // No policy xattr, so this binary does not enroll.
+    return 0;
+  }
+
+  // Only binaries that actually carry the xattr need a pod allocation.
+  BPFJ_HEAP_ALLOC_GUARD(struct bpfj_pod, pod);
   if (!pod) {
     // Denied, not allowed through. Every check after this reads the roles on
     // the task, so a binary that failed to pick up the role its xattr names
@@ -168,46 +180,35 @@ int BPF_PROG(
   }
 
   __builtin_memset(pod, 0, sizeof(*pod));
-  bpfj_var_array_init(&pod->var_array);
+  pod->var_array.count = 0;
+  pod->var_array.vars = NULL;
+  __builtin_memcpy(&pod->role_id, role_id, sizeof(pod->role_id));
 
-  struct bpf_dynptr role_id_ptr;
-  bpf_dynptr_from_mem(&pod->role_id, sizeof(pod->role_id), 0, &role_id_ptr);
-  if (bpf_get_file_xattr(file, BPFJ_EXEC_POLICY_XATTR, &role_id_ptr) < 0) {
-    // No policy xattr, so this binary does not enroll.
-    return 0;
-  }
-
-  bpfj_make_uuid4(&pod->uuid);
+  struct bpfj_uuid uuid = {};
+  bpfj_make_uuid4(&uuid);
+  __builtin_memcpy(&pod->uuid, &uuid, sizeof(pod->uuid));
   pod->enrollment_source = BPFJ_ENROLL_XATTR;
   pod->refs = 1;
   pod->creation_time_ns = bpf_ktime_get_ns();
 
-  const struct bpfj_uuid uuid = pod->uuid;
-
-  if (bpf_map_update_elem(&bpfj_pod_map, &uuid, pod, BPF_NOEXIST) < 0) {
-    BPFJ_LOG_ERR(ENOMEM, "Failed to create pod from xattr, denying exec");
-    return -ENOMEM;
-  }
-
   // Only the calling thread, de_thread being about to kill the others.
   struct task_struct* task = bpf_get_current_task_btf();
-  struct bpfj_pid_data* pid_data = bpf_task_storage_get(
-      &bpfj_task_map, task, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  struct bpfj_pid_data* pid_data =
+      bpfj_set_pid_data_in(&bpfj_task_map, task, NULL);
   if (!pid_data) {
-    bpf_map_delete_elem(&bpfj_pod_map, &uuid);
     BPFJ_LOG_ERR(
         ENOMEM, "Failed to get pid data to enroll from xattr, denying exec");
     return -ENOMEM;
   }
 
   // The pod holds one reference for this entry, so a refusal takes it too.
-  if (!bpfj_pid_data_add_uuid(pid_data, &uuid)) {
-    bpf_map_delete_elem(&bpfj_pod_map, &uuid);
+  if (!bpfj_pid_data_add_pod(pid_data, pod)) {
     BPFJ_LOG_ERR(E2BIG, "Too many pods to enroll from xattr, denying exec");
     return -E2BIG;
   }
+  pod_heap_guard = NULL;
 
-  BPFJ_LOG("Enrolled role id %s from xattr", pod->role_id.id);
+  BPFJ_LOG("Enrolled role id %s from xattr", role_id->id);
   struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_JAILER, pod, task);
   bpfj_event_submit(ev);
 
@@ -239,23 +240,46 @@ int bpfj_jailer_seed_base_role(struct bpf_iter__task* ctx) {
     return 0;
   }
 
-  struct bpfj_uuid uuid;
-#pragma clang loop unroll(full)
-  for (int i = 0; i < BPFJ_UUID_BYTES; ++i) {
-    uuid.uuid[i] = bpfj_base_role_uuid.uuid[i];
+  if (bpfj_heap_enabled) {
+    bpfj_heap_use_arena();
   }
 
   // Before the task entry is created, so a missing pod leaves no empty entry
   // behind on an unjailed task.
-  struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuid);
+  struct bpfj_pod __arena* pod = bpfj_base_role_pod;
+  if (!pod) {
+    BPFJ_HEAP_ALLOC_GUARD(struct bpfj_pod, new_pod);
+    if (!new_pod) {
+      BPFJ_LOG_ERR(
+          ENOMEM, "Base role skipped for pid %d: no pod memory", task->tgid);
+      return 0;
+    }
+
+    __builtin_memset(new_pod, 0, sizeof(*new_pod));
+    struct bpfj_role_id role_id = {};
+    __builtin_memcpy(
+        &role_id, (const void*)&bpfj_base_role_id, sizeof(role_id));
+    __builtin_memcpy(&new_pod->role_id, &role_id, sizeof(new_pod->role_id));
+    struct bpfj_uuid uuid = {};
+    bpfj_make_uuid4(&uuid);
+    __builtin_memcpy(&new_pod->uuid, &uuid, sizeof(new_pod->uuid));
+    new_pod->enrollment_source = BPFJ_ENROLL_BASE_ROLE;
+    new_pod->creation_time_ns = bpf_ktime_get_ns();
+    new_pod->var_array.count = 0;
+    new_pod->var_array.vars = NULL;
+
+    bpfj_base_role_pod = new_pod;
+    new_pod_heap_guard = NULL;
+    pod = new_pod;
+  }
   if (!pod) {
     BPFJ_LOG_ERR(
         ENOENT, "Base role skipped for pid %d: pod missing", task->tgid);
     return 0;
   }
 
-  struct bpfj_pid_data* pid_data = bpf_task_storage_get(
-      &bpfj_task_map, task, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  struct bpfj_pid_data* pid_data =
+      bpfj_set_pid_data_in(&bpfj_task_map, task, NULL);
   if (!pid_data) {
     BPFJ_LOG_ERR(
         ENOMEM, "Base role skipped for pid %d: no task storage", task->tgid);
@@ -263,7 +287,7 @@ int bpfj_jailer_seed_base_role(struct bpf_iter__task* ctx) {
   }
 
   // Already named, or no room for another. Either way nothing is owed.
-  if (!bpfj_pid_data_add_uuid(pid_data, &uuid)) {
+  if (!bpfj_pid_data_add_pod(pid_data, pod)) {
     return 0;
   }
 
@@ -278,8 +302,7 @@ int bpfj_jailer_seed_base_role(struct bpf_iter__task* ctx) {
 // a read, an atomic and a delete rather than a task-storage allocation.
 SEC("lsm/task_free")
 int BPF_PROG(bpfj_jailer_free, struct task_struct* task) {
-  struct bpfj_pid_data* pid_data =
-      bpf_task_storage_get(&bpfj_task_map, task, NULL, 0);
+  struct bpfj_pid_data* pid_data = bpfj_get_task_pid_data(task);
   if (!pid_data) {
     // Not jailed, so it owns nothing.
     return 0;
@@ -290,8 +313,8 @@ int BPF_PROG(bpfj_jailer_free, struct task_struct* task) {
     num_pods = BPFJ_MAX_POD_PER_PID;
   }
 
-  struct bpfj_uuid uuids[BPFJ_MAX_POD_PER_PID];
-  __builtin_memcpy(uuids, pid_data->pod_uuids, sizeof(uuids));
+  struct bpfj_pod __arena* pods[BPFJ_MAX_POD_PER_PID];
+  __builtin_memcpy(pods, pid_data->pods, sizeof(pods));
 
   // The entry goes first, so nothing observes a task still naming pods whose
   // references are already dropped.
@@ -302,7 +325,7 @@ int BPF_PROG(bpfj_jailer_free, struct task_struct* task) {
       break;
     }
 
-    struct bpfj_pod* pod = bpf_map_lookup_elem(&bpfj_pod_map, &uuids[i]);
+    struct bpfj_pod __arena* pod = pods[i];
     if (!pod) {
       BPFJ_LOG_ERR(
           ENOENT, "Pod %d named by pid %d is missing on exit", i, task->tgid);
