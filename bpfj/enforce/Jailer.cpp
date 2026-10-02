@@ -2,16 +2,17 @@
 
 #include "bpfj/enforce/Jailer.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <optional>
 
 // Ahead of the skeleton, in its own block so the formatter keeps it there: the
 // generated rodata struct only forward-declares `struct bpfj_uuid`.
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/RoleId.h"
-
-#include "bpfj/enforce/RoleGate.h"
 
 // For unload(), which disarms the fs-verity keyrings before removing the map
 // that names them; the one enforcer with state the pin tree does not own.
@@ -29,15 +30,6 @@ namespace bpfjailer {
 namespace {
 
 namespace fs = std::filesystem;
-
-// Held by the jailer rather than an enforcer because nothing in BPF reads it;
-// bpfjsrv opens the pins and checks a caller's roles before enrolling it.
-constexpr RoleGate kEnrollGate{
-    .rolesMap = "bpfj_enroll_roles",
-    .accessMap = "bpfj_enroll_access",
-    .configured = &RolePolicy::hasEnroll,
-    .targets = &RolePolicy::enroll,
-};
 
 /// @brief The encoded base role id, validated in userspace before load so BPF
 /// can copy it straight into a prebuilt or fallback-allocated base-role pod.
@@ -68,6 +60,21 @@ constexpr RoleGate kEnrollGate{
   auto* pod = static_cast<struct bpfj_pod*>(*blob);
   *pod = {};
   pod->role_id = roleId;
+  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    (void)arena->free(pod);
+    return makeUnexpected(rolePolicies.error());
+  }
+  auto rolePolicy = lookupRolePolicy(*rolePolicies, roleId);
+  if (!rolePolicy || !*rolePolicy) {
+    (void)arena->free(pod);
+    if (!rolePolicy) {
+      return makeUnexpected(rolePolicy.error());
+    }
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument, "base role is missing from policy"));
+  }
+  pod->policy = *rolePolicy;
   auto uuid = makeUuid4();
   if (!uuid) {
     (void)arena->free(pod);
@@ -87,42 +94,21 @@ constexpr RoleGate kEnrollGate{
   return std::pair{std::move(*arena), pod};
 }
 
-/// @brief Publish the roles that terminate a pod-stack walk, from here rather
-/// than each enforcer since the map is shared and the walk order is a property
-/// of the jail. A role absent from the map reads as not overriding.
-[[nodiscard]] Expected<> writeOverrideRoles(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const Policy& policy) noexcept {
-  auto map = skel.getMap("bpfj_pod_override_map");
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory,
-        "no map named bpfj_pod_override_map"));
-  }
-
-  for (const auto& [name, rolePolicy] : policy.roles) {
-    if (!rolePolicy.overrideStacked) {
-      continue;
-    }
-
-    auto roleId = makeRoleId(name);
-    if (!roleId) {
-      return makeUnexpected(roleId.error());
-    }
-
-    if (auto res = map->updateElem(*roleId, std::uint8_t{1}); !res) {
-      return res;
-    }
-  }
-
-  return unit;
-}
-
 } // namespace
 
 Expected<ScratchMapFds> Jailer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
+  constexpr std::size_t kMaxCatalogRoles =
+      (std::numeric_limits<std::uint32_t>::max() -
+       offsetof(struct bpfj_policy_catalog, policies)) /
+      sizeof(struct bpfj_role_policy);
+  if (policy.roles.size() > kMaxCatalogRoles) {
+    return makeUnexpected(makeError(
+        std::errc::value_too_large,
+        "the role policy catalog exceeds one arena allocation"));
+  }
+
   // Before makeTree rather than inside it: the links going is what detaches
   // whatever was running, so removing only the map pins would leave those
   // programs attached to unreachable maps.
@@ -156,11 +142,19 @@ Expected<ScratchMapFds> Jailer::load(
     skel.rodata().bpfj_base_role_id = *baseRoleId;
   }
 
-  if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
+  auto rolePolicies = skel.getMap("bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(makeError(
+        std::errc::no_such_file_or_directory,
+        "the role policy index map is missing"));
+  }
+  if (auto res = rolePolicies->setMaxEntries(
+          std::max<std::size_t>(1, policy.roles.size()));
+      !res) {
     return makeUnexpected(res.error());
   }
 
-  if (auto res = gate::pinMaps(skel, kEnrollGate, cfg.mapDir()); !res) {
+  if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
     return makeUnexpected(res.error());
   }
 
@@ -174,6 +168,10 @@ Expected<ScratchMapFds> Jailer::load(
   }
 
   if (auto res = heap::init(created.value()); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = publishPolicyCatalog(cfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 
@@ -192,16 +190,6 @@ Expected<ScratchMapFds> Jailer::load(
     baseRoleArena = std::move(pod->first);
     baseRolePod = pod->second;
     skel.bss().bpfj_base_role_pod = baseRolePod;
-  }
-
-  // Before attach, so no hook can run against a half-written map and read an
-  // overriding role as an ordinary one.
-  if (auto res = writeOverrideRoles(skel, policy); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  if (auto res = gate::writePolicy(skel, kEnrollGate, policy); !res) {
-    return makeUnexpected(res.error());
   }
 
   if (auto res = skel.attach(); !res) {

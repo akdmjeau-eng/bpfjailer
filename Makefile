@@ -215,7 +215,6 @@ COMMON_SRCS := \
 	bpfj/enforce/Replace.cpp \
 	bpfj/enforce/VerityEnforcer.cpp \
 	bpfj/enforce/BpfEnforcer.cpp \
-	bpfj/enforce/RoleGate.cpp \
 	bpfj/enforce/KillEnforcer.cpp \
 	bpfj/enforce/PtraceEnforcer.cpp \
 	bpfj/enforce/LkmEnforcer.cpp \

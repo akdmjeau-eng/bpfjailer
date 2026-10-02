@@ -29,7 +29,14 @@ constexpr int kUsageError = 64;
 
 /// @brief A policy of the kind `make cmd CMD_POLICY=...` compiles in.
 constexpr std::string_view kCompiledPolicy =
-    "base-role: floor\nroles:\n  floor:\n  webserver:\n";
+    "base-role: floor\nroles:\n  floor:\n  webserver:\n  carried:\n";
+
+constexpr std::string_view kDefaultPolicy =
+    "roles:\n"
+    "  dropped:\n  carried:\n  testrole:\n  role:\n"
+    "  role0:\n  role1:\n  role2:\n  role3:\n"
+    "  role4:\n  role5:\n  role6:\n  role7:\n"
+    "  listed:\n  wrapped:\n  keeps:\n  drops:\n  missing:\n";
 
 /// @brief Run a command against this test's own bpffs, as a binary carrying
 /// `policy` compiled in.
@@ -62,7 +69,7 @@ constexpr std::string_view kCompiledPolicy =
 /// @brief Bring up a jailer in this test's bpffs, failing the test if it does
 /// not come up.
 void attach() {
-  const CommandResult res = ctl({"attach", "/dev/null"});
+  const CommandResult res = ctl({"attach", writePolicy(kDefaultPolicy)});
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("Jailer attached"));
 }
@@ -118,7 +125,7 @@ TEST(Ctl, AttachIgnoresACompiledInPolicy) {
 TEST(Ctl, AttachCompiledUsesThePolicyCompiledIn) {
   const CommandResult res = ctlCompiled({"attach-compiled"});
   ASSERT_EQ(res.status, 0);
-  ASSERT(res.outHas("2 role(s) from the compiled-in policy"));
+  ASSERT(res.outHas("3 role(s) from the compiled-in policy"));
   ASSERT(res.outHas("base role floor"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
 }
@@ -185,7 +192,7 @@ TEST(Ctl, ReplaceKeepsAnEnrolledPod) {
   // The pod count and not the task count beside it: bpfj_jailer_free runs on
   // task *free*, which lags runCtl's waitpid, so a helper from an earlier
   // ctl() can still be in the task map. The show below proves the rest.
-  const CommandResult replaced = ctl({"replace", "/dev/null"});
+  const CommandResult replaced = ctl({"replace", writePolicy(kDefaultPolicy)});
   ASSERT_EQ(replaced.status, 0);
   ASSERT(replaced.outHas("carried 1 pod(s)"));
 
@@ -203,7 +210,7 @@ TEST(Ctl, ReplaceKeepsAnEnrolledPod) {
 
 TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   attach();
-  ASSERT_EQ(ctl({"replace", "/dev/null"}).status, 0);
+  ASSERT_EQ(ctl({"replace", writePolicy(kDefaultPolicy)}).status, 0);
 
   // A replace bringing up only the jailer and the verity enforcer would leave
   // bpf(2), signals, ptrace, kernel loading and message queues ungated while
@@ -224,14 +231,11 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   }
 
   for (const auto* map :
-       {"bpfj_kill_roles",
-        "bpfj_ptrace_roles",
-        "bpfj_no_lkm_roles",
+       {"bpfj_role_policies",
         "bpfj_mq_sysv_owners",
         "bpfj_mq_posix_owners",
         "bpfj_shm_sysv_owners",
         "bpfj_shm_posix_owners",
-        "bpfj_bpf_syscall_roles",
         "bpfj_bpf_map_owners"}) {
     ASSERT(exists(pinRoot() + "/maps/" + map));
   }
@@ -240,7 +244,7 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
 TEST(Ctl, ReplaceLeavesNoNewTree) {
   attach();
 
-  ASSERT_EQ(ctl({"replace", "/dev/null"}).status, 0);
+  ASSERT_EQ(ctl({"replace", writePolicy(kDefaultPolicy)}).status, 0);
   ASSERT(exists(pinRoot()));
   ASSERT(!exists(pinRoot() + "-new"));
 }
@@ -256,7 +260,7 @@ TEST(Ctl, ReplaceClearsATreeLeftBehindByAFailedRun) {
   ASSERT(exists(pinRoot() + "-new"));
 
   // Pod count only, for the reason ReplaceKeepsAnEnrolledPod gives.
-  const CommandResult res = ctl({"replace", "/dev/null"});
+  const CommandResult res = ctl({"replace", writePolicy(kDefaultPolicy)});
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("carried 1 pod(s)"));
   ASSERT(!exists(pinRoot() + "-new"));
@@ -264,7 +268,7 @@ TEST(Ctl, ReplaceClearsATreeLeftBehindByAFailedRun) {
 
 TEST(Ctl, ReplaceMergesCarriedPodsOntoTheNewBaseRole) {
   const std::string policy =
-      writePolicy("base-role: floor\nroles:\n  floor:\n");
+      writePolicy("base-role: floor\nroles:\n  floor:\n  carried:\n");
 
   const CommandResult attached = ctl({"attach", policy});
   ASSERT_EQ(attached.status, 0);
@@ -306,12 +310,14 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
 // Ids are positions in the policy's vars, so dropping `first` moves `second`
 // from id 2 to id 1. A pod copied across by id would come out with no name.
 TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
-  const std::string before = writePolicy("vars:\n  - first\n  - second\n");
+  const std::string before =
+      writePolicy("vars:\n  - first\n  - second\nroles:\n  carried:\n");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(
       ctl({"enroll", "carried", "user", selfPid(), "second=kept"}).status, 0);
 
-  const std::string after = writePolicy("vars:\n  - second\n");
+  const std::string after =
+      writePolicy("vars:\n  - second\nroles:\n  carried:\n");
   ASSERT_EQ(ctl({"replace", after}).status, 0);
 
   const CommandResult shown = ctl({"show", selfPid()});
@@ -320,11 +326,13 @@ TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
 }
 
 TEST(Ctl, ReplaceRefusesToDropAVarAPodCarries) {
-  const std::string before = writePolicy("vars:\n  - kept\n");
+  const std::string before =
+      writePolicy("vars:\n  - kept\nroles:\n  carried:\n");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(ctl({"enroll", "carried", "user", selfPid(), "kept=x"}).status, 0);
 
-  const CommandResult replaced = ctl({"replace", "/dev/null"});
+  const CommandResult replaced =
+      ctl({"replace", writePolicy("roles:\n  carried:\n")});
   ASSERT_EQ(replaced.status, 1);
   ASSERT(replaced.errHas("carries variable 'kept'"));
 
@@ -345,7 +353,7 @@ TEST(Ctl, ReplaceCompiledUsesThePolicyCompiledIn) {
 
   const CommandResult res = ctlCompiled({"replace-compiled"});
   ASSERT_EQ(res.status, 0);
-  ASSERT(res.outHas("2 role(s) from the compiled-in policy"));
+  ASSERT(res.outHas("3 role(s) from the compiled-in policy"));
 
   // Not the pod and task counts: the compiled-in policy names a base role, so
   // both move with whatever else is running on the host.
@@ -597,7 +605,7 @@ TEST(Ctl, CheckCompiledReadsThePolicyCompiledIn) {
   const CommandResult res = runCtl({"check-compiled"}, kCompiledPolicy);
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas(
-      "the compiled-in policy: 2 role(s), 0 cert(s), base role floor"));
+      "the compiled-in policy: 3 role(s), 0 cert(s), base role floor"));
 }
 
 TEST(Ctl, CheckCompiledWithNothingCompiledInSaysSo) {
@@ -705,7 +713,8 @@ TEST(Ctl, EnrollRejectsAVarThePolicyDoesNotDeclare) {
 }
 
 TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
-  const std::string policy = writePolicy("vars:\n  - vm_uuid\n");
+  const std::string policy =
+      writePolicy("vars:\n  - vm_uuid\nroles:\n  role:\n");
   ASSERT_EQ(ctl({"attach", policy}).status, 0);
 
   ASSERT_EQ(
@@ -725,6 +734,7 @@ TEST(Ctl, EnrollAcceptsSixteenDeclaredVars) {
     policy.append("  - ").append(name).append("\n");
     args.push_back(name + "=" + value);
   }
+  policy.append("roles:\n  role:\n");
 
   ASSERT_EQ(ctl({"attach", writePolicy(policy)}).status, 0);
   ASSERT_EQ(ctl(std::move(args)).status, 0);

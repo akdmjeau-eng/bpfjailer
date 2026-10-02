@@ -6,9 +6,6 @@
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
 
-#define BPFJ_MQ_ROLE_ALLOW 1
-#define BPFJ_MQ_ROLE_DENY 2
-
 static __always_inline bool bpfj_mq_uuid_equal(
     const struct bpfj_uuid* a,
     const struct bpfj_uuid* b) {
@@ -40,6 +37,10 @@ static __always_inline bool bpfj_mq_current_owner(struct bpfj_mq_owner* owner) {
 
   bpfj_pod_read_role_id(&owner->role, pod);
   bpfj_pod_read_uuid(&owner->pod, pod);
+  owner->policy = bpfj_pod_policy(pod);
+  if (!owner->policy) {
+    return false;
+  }
   return true;
 }
 
@@ -49,8 +50,7 @@ static __always_inline bool bpfj_mq_current_owner(struct bpfj_mq_owner* owner) {
 /// role ends the walk. Missing ownership is denied whenever any applicable
 /// role is configured, and allowed when none is.
 static __always_inline bool bpfj_mq_allowed(
-    void* roles,
-    void* access,
+    enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
     const struct bpfj_mq_owner* owner) {
   if (!actor) {
@@ -68,27 +68,26 @@ static __always_inline bool bpfj_mq_allowed(
       continue;
     }
 
-    struct bpfj_role_id actor_role = {};
     struct bpfj_uuid actor_pod = {};
-    bpfj_pod_read_role_id(&actor_role, pod);
     bpfj_pod_read_uuid(&actor_pod, pod);
-    const __u8* mode = bpf_map_lookup_elem(roles, &actor_role);
-    if (mode) {
-      if (*mode == BPFJ_MQ_ROLE_DENY || !owner) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy) {
+      return false;
+    }
+    const __u8 mode = gate == BPFJ_POLICY_GATE_MQ_SYSV ? policy->mq_sysv_mode
+                                                       : policy->mq_posix_mode;
+    if (mode != BPFJ_POLICY_UNCONFIGURED) {
+      if (mode == BPFJ_POLICY_DENY || !owner) {
         return false;
       }
 
-      if (!bpfj_mq_uuid_equal(&actor_pod, &owner->pod)) {
-        struct bpfj_role_pair key = {};
-        __builtin_memcpy(&key.actor, &actor_role, sizeof(key.actor));
-        __builtin_memcpy(&key.target, &owner->role, sizeof(key.target));
-        if (!bpf_map_lookup_elem(access, &key)) {
-          return false;
-        }
+      if (!bpfj_mq_uuid_equal(&actor_pod, &owner->pod) &&
+          !bpfj_role_set_contains(policy->gates[gate], owner->policy)) {
+        return false;
       }
     }
 
-    if (bpfj_is_override(&actor_role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }

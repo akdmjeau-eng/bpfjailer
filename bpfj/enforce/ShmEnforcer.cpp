@@ -19,22 +19,17 @@
 #include <utility>
 #include <vector>
 
-#include "bpfj/enforce/RoleGate.h"
-#include "bpfj/enforce/RoleId.h"
 #include "bpfj/enforce/bpf/shm_enforce.skel.h"
 #include "bpfj/enforce/bpf/types.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 
 namespace bpfjailer {
 
 namespace {
 
-constexpr std::uint32_t kMaxRoles = 1024;
-constexpr std::uint32_t kMaxAccessPairs = 4096;
 constexpr std::uint32_t kMaxOwners = 16384;
 constexpr std::uint32_t kMaxMounts = 4096;
-constexpr std::uint8_t kAllow = 1;
-constexpr std::uint8_t kDeny = 2;
 constexpr long kTmpfsMagic = 0x01021994;
 constexpr std::string_view kMountMap = "bpfj_shm_posix_mounts";
 constexpr std::string_view kDeviceMap = "bpfj_shm_posix_devices";
@@ -43,85 +38,10 @@ constexpr std::string_view kDeviceMap = "bpfj_shm_posix_devices";
   return (static_cast<std::uint64_t>(major(dev)) << 20) |
       static_cast<std::uint64_t>(minor(dev));
 }
-
-struct ShmGate {
-  std::string_view roles;
-  std::string_view access;
-  bool RolePolicy::* configured;
-  bool RolePolicy::* denied;
-  std::vector<std::string> RolePolicy::* targets;
-};
-
-constexpr ShmGate kSysv{
-    .roles = "bpfj_shm_sysv_roles",
-    .access = "bpfj_shm_sysv_access",
-    .configured = &RolePolicy::hasShmSysv,
-    .denied = &RolePolicy::noShmSysv,
-    .targets = &RolePolicy::shmSysv,
-};
-
-constexpr ShmGate kPosix{
-    .roles = "bpfj_shm_posix_roles",
-    .access = "bpfj_shm_posix_access",
-    .configured = &RolePolicy::hasShmPosix,
-    .denied = &RolePolicy::noShmPosix,
-    .targets = &RolePolicy::shmPosix,
-};
-
 struct MountRegistration {
   bpfj_shm_mount_key key{};
   std::uint64_t dev = 0;
 };
-
-Expected<> pinGate(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const ShmGate& gate,
-    const std::filesystem::path& mapDir) noexcept {
-  if (auto res = pins::pinMap(skel, gate.roles, mapDir, kMaxRoles); !res) {
-    return res;
-  }
-  return pins::pinMap(skel, gate.access, mapDir, kMaxAccessPairs);
-}
-
-Expected<> writeGate(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const ShmGate& gate,
-    const Policy& policy) noexcept {
-  auto roles = skel.getMap(gate.roles.data());
-  auto access = skel.getMap(gate.access.data());
-  if (!roles || !access) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory,
-        "shared-memory policy maps are missing"));
-  }
-
-  for (const auto& [name, rolePolicy] : policy.roles) {
-    if (!(rolePolicy.*gate.configured) && !(rolePolicy.*gate.denied)) {
-      continue;
-    }
-
-    auto actor = makeRoleId(name);
-    if (!actor) {
-      return makeUnexpected(actor.error());
-    }
-    const std::uint8_t mode = (rolePolicy.*gate.denied) ? kDeny : kAllow;
-    if (auto res = roles->updateElem(*actor, mode); !res) {
-      return res;
-    }
-
-    for (const auto& targetName : rolePolicy.*gate.targets) {
-      auto target = makeRoleId(targetName);
-      if (!target) {
-        return makeUnexpected(target.error());
-      }
-      RolePair pair{.actor = *actor, .target = *target};
-      if (auto res = access->updateElem(pair, std::uint8_t{1}); !res) {
-        return res;
-      }
-    }
-  }
-  return unit;
-}
 
 Expected<> writeVersion(
     bpfj::libbpf::BpfSkelBase& skel,
@@ -256,6 +176,7 @@ Expected<> registerPosixShmMount(const PinConfig& cfg, pid_t pid) noexcept {
 Expected<> ShmEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
+  (void)policy;
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }
@@ -269,13 +190,6 @@ Expected<> ShmEnforcer::load(
   if (auto res = pins::pinSharedMaps(skel, mapDir); !res) {
     return res;
   }
-  if (auto res = pinGate(skel, kSysv, mapDir); !res) {
-    return res;
-  }
-  if (auto res = pinGate(skel, kPosix, mapDir); !res) {
-    return res;
-  }
-
   for (const auto name : {"bpfj_shm_sysv_owners", "bpfj_shm_posix_owners"}) {
     if (auto res = pins::pinMap(skel, name, mapDir, kMaxOwners); !res) {
       return res;
@@ -297,10 +211,7 @@ Expected<> ShmEnforcer::load(
   if (auto res = skel.load(); !res) {
     return res;
   }
-  if (auto res = writeGate(skel, kSysv, policy); !res) {
-    return res;
-  }
-  if (auto res = writeGate(skel, kPosix, policy); !res) {
+  if (auto res = heap::init(created.value()); !res) {
     return res;
   }
   if (auto res = writeVersion(skel, "bpfj_shm_sysv_owner_version"); !res) {

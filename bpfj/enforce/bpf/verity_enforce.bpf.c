@@ -2,7 +2,7 @@
 
 // fs-verity signature enforcement: a jailed task may only bring in code whose
 // fs-verity digest carries a PKCS#7 signature from a key its role trusts, and
-// a role with no key in bpfj_key_map is not checked at all. A file is checked
+// a role whose arena policy has no key is not checked at all. A file is checked
 // against every pod the task belongs to, and a failed check is a silent denial
 // until the event pipeline is ported.
 //
@@ -29,6 +29,7 @@
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
+#define BPFJ_FSVERITY_POLICY_ARENA 1
 #include "bpfj/fsverity/bpf/fsverity.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 
@@ -58,16 +59,24 @@ static int bpfj_verity_check(struct file* file, bool is_exec) {
       continue;
     }
 
-    struct bpfj_role_id role = {};
-    bpfj_pod_read_role_id(&role, pod);
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy) {
+      return -EPERM;
+    }
     enum bpfj_fsverity_reason reason = BPFJ_FSVERITY_REASON_NONE;
-    if (bpfj_check_fsverity_pkcs7(file, role.id, is_exec, &reason) < 0) {
+    if (bpfj_check_fsverity_pkcs7_policy(
+            file,
+            policy->key_serial,
+            policy->flags & BPFJ_POLICY_HAS_MIN_SEQ,
+            policy->min_seq,
+            is_exec,
+            &reason) < 0) {
       struct bpfj_event* ev = bpfj_event_reserve(BPFJ_EVENT_VERITY, pod, task);
       bpfj_event_submit(ev);
       return -EPERM;
     }
 
-    if (bpfj_is_override(&role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }
@@ -136,22 +145,8 @@ struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
   __type(key, __u32);
-  __type(value, struct bpfj_role_id);
+  __type(value, struct bpfj_role_policy_ref);
 } bpfj_keyring_owner SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_keyring_roles SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_pair);
-  __type(value, __u8);
-} bpfj_keyring_access SEC(".maps");
 
 // From enum key_need_perm, spelled out because that enum is internal and only
 // in vmlinux.h for as long as some built-in LSM keeps referencing it.
@@ -192,17 +187,16 @@ int bpfj_keyring_check(__u64* ctx) {
   }
 
   __u32 serial = key->serial;
-  struct bpfj_role_id* owner =
+  struct bpfj_role_policy_ref* owner =
       bpf_map_lookup_elem(&bpfj_keyring_owner, &serial);
   if (!owner) {
     return 0;
   }
 
   if (bpfj_gate_allowed_owner(
-          &bpfj_keyring_roles,
-          &bpfj_keyring_access,
+          BPFJ_POLICY_GATE_KEYRING,
           bpfj_get_current_pid_data(),
-          owner)) {
+          owner->policy)) {
     return 0;
   }
 

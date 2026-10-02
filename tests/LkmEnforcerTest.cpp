@@ -45,13 +45,14 @@ TEST(LkmEnforcer, LoadPinsItsLinksAndMap) {
   ASSERT(linkPinned("bpfj_kernel_module_request"));
   ASSERT(linkPinned("bpfj_kernel_load_data"));
   ASSERT(linkPinned("bpfj_kernel_read_file"));
-  ASSERT(mapPinned("bpfj_no_lkm_roles"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_no_lkm_roles"));
 }
 
 TEST(LkmEnforcer, APolicyConfiguringNothingLeavesTheRoleMapEmpty) {
   attach("roles:\n  svc:\n");
 
-  ASSERT(pinnedMapIsEmpty("bpfj_no_lkm_roles"));
+  ASSERT(!pinnedMapIsEmpty("bpfj_role_policies"));
 }
 
 TEST(LkmEnforcer, ANoLkmRoleMayNotLoadAKernelModule) {

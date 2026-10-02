@@ -26,6 +26,8 @@
 #include <bpf/bpf.h>
 
 #include "bpfj/enforce/Jailer.h"
+#include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/Replace.h"
 #include "bpfj/enforce/RoleId.h"
 #include "bpfj/enforce/VerityEnforcer.h"
@@ -43,7 +45,6 @@ using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailerWithScratchMaps;
 using bpfjailer::test::mapPinned;
-using bpfjailer::test::pinnedMapIsEmpty;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 
@@ -312,16 +313,14 @@ class Fixture {
 [[nodiscard]] bpfjailer::keyctl::Serial keyringOf(const std::string& role) {
   const auto id = bpfjailer::makeRoleId(role);
   ASSERT_OK(id);
-
-  const int fd = ::bpf_obj_get(testPins().mapPath("bpfj_key_map").c_str());
-  ASSERT(fd >= 0);
-
-  std::uint32_t serial = 0;
-  const int rc = ::bpf_map_lookup_elem(fd, &*id, &serial);
-  ::close(fd);
-  ASSERT_EQ(rc, 0);
-
-  return static_cast<bpfjailer::keyctl::Serial>(serial);
+  auto arena = bpfjailer::PodArena::open(testPins());
+  ASSERT(arena);
+  auto roles = bpfjailer::pins::openPinnedMap(testPins(), "bpfj_role_policies");
+  ASSERT(roles);
+  auto policy = bpfjailer::lookupRolePolicy(*roles, *id);
+  ASSERT_OK(policy);
+  ASSERT(*policy != nullptr);
+  return static_cast<bpfjailer::keyctl::Serial>((*policy)->key_serial);
 }
 
 /// @brief Run `body` the way bpfjctl runs a load, in a process with its own
@@ -387,7 +386,7 @@ TEST(VerityEnforcer, LoadPinsBothLinksAndItsKeyMap) {
 
   ASSERT(linkPinned("bpfj_verity_mmap_file"));
   ASSERT(linkPinned("bpfj_verity_bprm_check"));
-  ASSERT(mapPinned("bpfj_key_map"));
+  ASSERT(mapPinned("bpfj_role_policies"));
 }
 
 TEST(VerityEnforcer, LoadAgainstAPolicyNamingNoCertificateSucceeds) {
@@ -399,7 +398,8 @@ TEST(VerityEnforcer, LoadAgainstAPolicyNamingNoCertificateSucceeds) {
 TEST(VerityEnforcer, ARoleNamingNoCertificateGetsNoKeyMapEntry) {
   attach("roles:\n  svc:\n  worker:\n");
 
-  ASSERT(pinnedMapIsEmpty("bpfj_key_map"));
+  ASSERT_EQ(keyringOf("svc"), 0);
+  ASSERT_EQ(keyringOf("worker"), 0);
 }
 
 TEST(VerityEnforcer, AJailedRoleNamingNoCertificateMayStillExec) {
@@ -423,7 +423,7 @@ TEST(VerityEnforcer, ARoleNamingACertificateGetsAKeyMapEntry) {
   Fixture fixture;
   attach(signedPolicy(fixture));
 
-  ASSERT(!pinnedMapIsEmpty("bpfj_key_map"));
+  ASSERT(keyringOf("svc") > 0);
 }
 
 TEST(VerityEnforcer, ASignedBinaryOnAVerityFileIsAllowed) {
@@ -594,7 +594,7 @@ TEST(VerityEnforcer, DisarmKeepsTheKeyringsLinkedUntilRelease) {
   const auto serials = VerityEnforcer::disarm(testPins());
   ASSERT_OK(serials);
   ASSERT(*serials == std::vector<bpfjailer::keyctl::Serial>{serial});
-  ASSERT(pinnedMapIsEmpty("bpfj_key_map"));
+  ASSERT_EQ(keyringOf("svc"), 0);
   ASSERT(persistKeyringHolds(serial));
 
   VerityEnforcer::release(*serials);
@@ -613,11 +613,15 @@ TEST(VerityEnforcer, AKeyringSerialThatNoLongerResolvesIsDenied) {
   const auto id = bpfjailer::makeRoleId("svc");
   ASSERT_OK(id);
 
-  const int fd = ::bpf_obj_get(testPins().mapPath("bpfj_key_map").c_str());
-  ASSERT(fd >= 0);
+  auto arena = bpfjailer::PodArena::open(testPins());
+  ASSERT(arena);
+  auto roles = bpfjailer::pins::openPinnedMap(testPins(), "bpfj_role_policies");
+  ASSERT(roles);
+  auto policy = bpfjailer::lookupRolePolicy(*roles, *id);
+  ASSERT_OK(policy);
+  ASSERT(*policy != nullptr);
   const std::uint32_t unresolvable = 0x7ffffffe;
-  ASSERT_EQ(::bpf_map_update_elem(fd, &*id, &unresolvable, BPF_ANY), 0);
-  ::close(fd);
+  const_cast<struct bpfj_role_policy*>(*policy)->key_serial = unresolvable;
 
   Child actor([path = fixture.path("hello")] { return runProgram(path); });
   enroll("svc", actor.pid());
@@ -689,8 +693,9 @@ TEST(VerityEnforcer, LoadPinsTheKeyringGate) {
 
   ASSERT(linkPinned("bpfj_keyring_check"));
   ASSERT(mapPinned("bpfj_keyring_owner"));
-  ASSERT(mapPinned("bpfj_keyring_roles"));
-  ASSERT(mapPinned("bpfj_keyring_access"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_keyring_roles"));
+  ASSERT(!mapPinned("bpfj_keyring_access"));
 }
 
 TEST(VerityEnforcer, ARoleNamingNoKeyringListMayWriteAKeyring) {

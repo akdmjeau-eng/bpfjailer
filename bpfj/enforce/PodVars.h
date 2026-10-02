@@ -10,8 +10,10 @@
 #include <string_view>
 
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/bpf/types.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/lib/Fd.h"
+#include "bpfj/policy/Policy.h"
 #include "bpfj/var/bpf/types_var.h"
 
 namespace bpfjailer {
@@ -30,12 +32,21 @@ struct ResolvedPolicyVar {
   const struct bpfj_var_name* name = nullptr;
 };
 
-/// @brief Publish the policy's `vars` as one arena-backed allowlist blob. A
-/// name's id is its 1-based policy position, so an enrollment naming anything
-/// else fails.
-[[nodiscard]] Expected<> publishVarNames(
+/// @brief Publish every role and variable as one immutable arena policy graph.
+[[nodiscard]] Expected<> publishPolicyCatalog(
     const PinConfig& cfg,
-    std::span<const std::string> names) noexcept;
+    const Policy& policy) noexcept;
+
+[[nodiscard]] Expected<const struct bpfj_policy_catalog*> readPolicyCatalog(
+    const PodArena& arena) noexcept;
+
+[[nodiscard]] Expected<const struct bpfj_role_policy*> lookupRolePolicy(
+    const Fd& rolePolicies,
+    std::string_view role) noexcept;
+
+[[nodiscard]] Expected<const struct bpfj_role_policy*> lookupRolePolicy(
+    const Fd& rolePolicies,
+    const struct bpfj_role_id& role) noexcept;
 
 /// @brief The running jail's shared variable allowlist, or null when the
 /// policy published no variables.

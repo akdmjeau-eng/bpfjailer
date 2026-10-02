@@ -2,29 +2,16 @@
 
 #include "bpfj/enforce/KillEnforcer.h"
 
-#include "bpfj/enforce/RoleGate.h"
-
 #include "bpfj/enforce/bpf/kill_enforce.skel.h"
 #include "bpfj/lib/Heap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 
 namespace bpfjailer {
 
-namespace {
-
-constexpr RoleGate kGate{
-    .rolesMap = "bpfj_kill_roles",
-    .accessMap = "bpfj_kill_access",
-    .configured = &RolePolicy::hasKill,
-    .denied = &RolePolicy::noKill,
-    .targets = &RolePolicy::kill,
-};
-
-} // namespace
-
 Expected<> KillEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
+  (void)policy;
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }
@@ -40,19 +27,11 @@ Expected<> KillEnforcer::load(
     return res;
   }
 
-  if (auto res = gate::pinMaps(skel, kGate, mapDir); !res) {
-    return res;
-  }
-
   if (auto res = skel.load(); !res) {
     return res;
   }
 
   if (auto res = heap::init(created.value()); !res) {
-    return res;
-  }
-
-  if (auto res = gate::writePolicy(skel, kGate, policy); !res) {
     return res;
   }
 

@@ -31,8 +31,9 @@ namespace {
 TEST(EnrollGate, LoadPinsItsMaps) {
   loadJailer(policyOf("roles:\n  svc:\n"));
 
-  ASSERT(mapPinned("bpfj_enroll_roles"));
-  ASSERT(mapPinned("bpfj_enroll_access"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_enroll_roles"));
+  ASSERT(!mapPinned("bpfj_enroll_access"));
 }
 
 TEST(EnrollGate, AnUnjailedCallerIsUnrestricted) {

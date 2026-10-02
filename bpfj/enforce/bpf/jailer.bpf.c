@@ -38,22 +38,6 @@ _Static_assert(
     BPFJ_MAX_POD_PER_PID <= 8,
     "the rollback masks below are a single byte");
 
-// The `enroll` gate, shaped like role_gate.h's so RoleGate can pin and fill
-// it; only bpfjsrv reads it, through the pins.
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_enroll_roles SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_pair);
-  __type(value, __u8);
-} bpfj_enroll_access SEC(".maps");
-
 // The trailing `lsm_ret` is the verdict the hook has collected so far;
 // ignoring it would turn another module's denial into an allow. It only is the
 // return value at the hook's real arity, so every argument ahead of it has to
@@ -166,6 +150,12 @@ int BPF_PROG(
     return 0;
   }
 
+  const struct bpfj_role_policy __arena* policy = bpfj_policy_lookup(role_id);
+  if (!policy) {
+    BPFJ_LOG_ERR(EINVAL, "Role id %s from xattr is not in policy", role_id->id);
+    return -EINVAL;
+  }
+
   // Only binaries that actually carry the xattr need a pod allocation.
   BPFJ_HEAP_ALLOC_GUARD(struct bpfj_pod, pod);
   if (!pod) {
@@ -183,6 +173,7 @@ int BPF_PROG(
   pod->var_array.count = 0;
   pod->var_array.vars = NULL;
   __builtin_memcpy(&pod->role_id, role_id, sizeof(pod->role_id));
+  pod->policy = policy;
 
   struct bpfj_uuid uuid = {};
   bpfj_make_uuid4(&uuid);
@@ -260,6 +251,10 @@ int bpfj_jailer_seed_base_role(struct bpf_iter__task* ctx) {
     __builtin_memcpy(
         &role_id, (const void*)&bpfj_base_role_id, sizeof(role_id));
     __builtin_memcpy(&new_pod->role_id, &role_id, sizeof(new_pod->role_id));
+    new_pod->policy = bpfj_policy_lookup(&role_id);
+    if (!new_pod->policy) {
+      return 0;
+    }
     struct bpfj_uuid uuid = {};
     bpfj_make_uuid4(&uuid);
     __builtin_memcpy(&new_pod->uuid, &uuid, sizeof(new_pod->uuid));

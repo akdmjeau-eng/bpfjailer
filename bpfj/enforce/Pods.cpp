@@ -273,6 +273,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 
 [[nodiscard]] Expected<struct bpfj_pod*> makePod(
     PodArena& arena,
+    const struct bpfj_role_policy* rolePolicy,
     std::string_view roleId,
     std::string_view userId,
     std::span<const ResolvedPodVar> vars,
@@ -288,6 +289,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
     (void)arena.free(*blob);
     return makeUnexpected(res.error());
   }
+  pod->policy = rolePolicy;
 
   if (auto res = setId(pod->user_id.id, userId, "user id"); !res) {
     (void)arena.free(*blob);
@@ -455,8 +457,25 @@ Expected<bpfj_uuid> enrollPod(
     resolved = std::move(*read);
   }
 
+  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
+  auto rolePolicy = lookupRolePolicy(*rolePolicies, roleId);
+  if (!rolePolicy) {
+    return makeUnexpected(rolePolicy.error());
+  }
+  if (!*rolePolicy) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "role ",
+        roleId,
+        " is not in the running policy"));
+  }
+
   auto pod = makePod(
       arena,
+      *rolePolicy,
       roleId,
       userId,
       resolved,

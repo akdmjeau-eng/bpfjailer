@@ -22,20 +22,6 @@
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_kill_roles SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_pair);
-  __type(value, __u8);
-} bpfj_kill_access SEC(".maps");
-
 // The trailing `lsm_ret` is the verdict the hook has collected so far;
 // ignoring it would turn another module's denial into an allow. It only is the
 // return value at the hook's real arity, so every argument ahead of it has to
@@ -57,8 +43,7 @@ int BPF_PROG(
   }
 
   if (bpfj_gate_allowed(
-          &bpfj_kill_roles,
-          &bpfj_kill_access,
+          BPFJ_POLICY_GATE_KILL,
           bpfj_get_current_pid_data(),
           bpfj_get_task_pid_data(p))) {
     return 0;

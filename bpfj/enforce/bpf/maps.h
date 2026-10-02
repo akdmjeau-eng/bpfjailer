@@ -23,28 +23,15 @@ struct {
   __type(value, struct bpfj_pid_data);
 } bpfj_task_map SEC(".maps");
 
-// The roles an unprivileged caller is allowed to enroll itself in, from each
-// role's `unpriv-enroll` key; present means allowed, absent means root only.
-// bpfjsrv serves an abstract socket anyone in the network namespace can reach,
-// so this map and not the socket's permissions is what decides. Sized outright
-// rather than resized at load, because both skeletons have to agree on
-// max_entries for pin adoption.
+// The single role-name index. Userspace sizes and populates it from policy;
+// values point into the arena graph shared by every enforcer.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, BPFJ_MAX_UNPRIV_ROLES);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __uint(max_entries, 1);
   __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_unpriv_enroll_map SEC(".maps");
-
-// The roles that terminate a pod-stack walk, from each role's
-// `override-stacked` key. Keyed on the role rather than the pod, since the
-// flag is a property of the policy, and sized outright like the map above.
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, BPFJ_MAX_UNPRIV_ROLES);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_pod_override_map SEC(".maps");
+  __type(value, struct bpfj_role_policy_ref);
+} bpfj_role_policies SEC(".maps");
 
 // A userspace-only flag raised while `replace` is copying membership out of
 // this tree, so bpfjctl enroll, wrap and bpfjsrv refuse to add pods the new
@@ -73,9 +60,9 @@ struct {
   __uint(max_entries, 1);
 } bpfj_event_map SEC(".maps");
 
-// bpfj_heap_arena / bpfj_heap_ctrl come from bpfj/lib/bpf/heap.h. The var
-// allowlist itself lives as one arena-backed blob, named by the catalog pointer
-// in bpfj_heap_control once userspace mmaps the arena.
+// bpfj_heap_arena / bpfj_heap_ctrl come from bpfj/lib/bpf/heap.h. The policy
+// catalog is named by bpfj_heap_control::var_catalog; the legacy field name is
+// kept because the heap control layout is shared outside this implementation.
 
 // A pod is owned by the task-map entries that name it, one reference per pod
 // pointer, so it outlives its enroller for as long as some descendant is still
@@ -111,15 +98,48 @@ static __always_inline int bpfj_pod_ptr_cmp(
   return a != b;
 }
 
-/// Whether two role ids name the same role. Zero when they do, as memcmp.
-/// Word-wise because __builtin_memcmp over 16 bytes lowers to a memcmp call,
-/// which BPF has no symbol for.
-static __always_inline int bpfj_role_id_cmp(
-    const struct bpfj_role_id* a,
-    const struct bpfj_role_id* b) {
-  const __u64* a_i = (const __u64*)a->id;
-  const __u64* b_i = (const __u64*)b->id;
-  return !(a_i[0] == b_i[0] && a_i[1] == b_i[1]);
+static __always_inline const struct bpfj_role_policy __arena*
+bpfj_policy_lookup(const struct bpfj_role_id* role_id) {
+  if (!role_id) {
+    return NULL;
+  }
+  const struct bpfj_role_policy_ref* ref =
+      bpf_map_lookup_elem(&bpfj_role_policies, role_id);
+  return ref ? ref->policy : NULL;
+}
+
+struct bpfj_role_set_search {
+  const struct bpfj_role_set __arena* set;
+  const struct bpfj_role_policy __arena* policy;
+  __u8 found;
+};
+
+static long bpfj_role_set_search_cb(__u32 index, void* data) {
+  struct bpfj_role_set_search* search = data;
+  if (search->set->policies[index] == search->policy) {
+    search->found = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static __always_inline bool bpfj_role_set_contains(
+    const struct bpfj_role_set __arena* set,
+    const struct bpfj_role_policy __arena* policy) {
+  if (!set || !policy) {
+    return false;
+  }
+  struct bpfj_role_set_search search = {
+      .set = set,
+      .policy = policy,
+  };
+  bpf_loop(set->count, bpfj_role_set_search_cb, &search, 0);
+  return search.found;
+}
+
+static __always_inline const struct bpfj_role_policy __arena* bpfj_pod_policy(
+    const struct bpfj_pod __arena* pod) {
+  return pod ? pod->policy : NULL;
 }
 
 static __always_inline void bpfj_pod_read_role_id(
@@ -140,9 +160,9 @@ static __always_inline void bpfj_pod_read_uuid(
 /// override role; the walk over a target's roles, bpfj_gate_covers(), ignores
 /// the flag, or a target could shed a restriction by holding one.
 static __always_inline bool bpfj_is_override(
-    const struct bpfj_role_id* role_id) {
-  const __u8* flag = bpf_map_lookup_elem(&bpfj_pod_override_map, role_id);
-  return flag && *flag;
+    const struct bpfj_pod __arena* pod) {
+  const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+  return policy && (policy->flags & BPFJ_POLICY_OVERRIDE_STACKED);
 }
 
 /// @brief `task`'s jail membership, or NULL if it is not jailed; `task` must be

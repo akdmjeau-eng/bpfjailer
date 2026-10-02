@@ -31,22 +31,25 @@
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/types.h"
 
-// The access map's key, flat rather than a map of maps keyed on the actor so
-// userspace fills it with the update call it already has.
-struct bpfj_role_pair {
-  struct bpfj_role_id actor;
-  struct bpfj_role_id target;
-};
-
-enum {
-  BPFJ_GATE_RESTRICTED = 1,
-  BPFJ_GATE_DENIED = 2,
-};
-
 static __always_inline __u32
 bpfj_gate_num_pods(const struct bpfj_pid_data* pid_data) {
   const __u32 num_pods = pid_data->num_pods;
   return num_pods > BPFJ_MAX_POD_PER_PID ? BPFJ_MAX_POD_PER_PID : num_pods;
+}
+
+static __always_inline __u8 bpfj_gate_mode(
+    const struct bpfj_role_policy __arena* policy,
+    enum bpfj_policy_gate gate) {
+  if (gate == BPFJ_POLICY_GATE_KILL) {
+    return policy->kill_mode;
+  }
+  if (gate == BPFJ_POLICY_GATE_PTRACE) {
+    return policy->ptrace_mode;
+  }
+  if (gate == BPFJ_POLICY_GATE_KEYRING) {
+    return policy->keyring_mode;
+  }
+  return policy->gates[gate] ? BPFJ_POLICY_ALLOW : BPFJ_POLICY_UNCONFIGURED;
 }
 
 /// Whether `pid_data` names `pod`.
@@ -73,8 +76,8 @@ static __always_inline bool bpfj_gate_in_pod(
 /// breaking early would let a target escape a gate by holding an override
 /// role.
 static __always_inline bool bpfj_gate_covers(
-    void* access,
-    const struct bpfj_role_id* actor_role,
+    enum bpfj_policy_gate gate,
+    const struct bpfj_role_policy __arena* actor_policy,
     struct bpfj_pid_data* target) {
   const __u32 num_pods = bpfj_gate_num_pods(target);
   if (num_pods == 0) {
@@ -91,11 +94,8 @@ static __always_inline bool bpfj_gate_covers(
       return false;
     }
 
-    struct bpfj_role_pair key = {};
-    __builtin_memcpy(&key.actor, actor_role, sizeof(key.actor));
-    bpfj_pod_read_role_id(&key.target, pod);
-
-    if (!bpf_map_lookup_elem(access, &key)) {
+    if (!bpfj_role_set_contains(
+            actor_policy->gates[gate], bpfj_pod_policy(pod))) {
       return false;
     }
   }
@@ -103,22 +103,14 @@ static __always_inline bool bpfj_gate_covers(
   return true;
 }
 
-/// The mode recorded for `role`, or 0 when it is unconfigured.
-static __always_inline __u8
-bpfj_gate_role_mode(void* roles, const struct bpfj_role_id* role) {
-  const __u8* mode = bpf_map_lookup_elem(roles, role);
-  return mode ? *mode : 0;
-}
-
 /// Whether the actor may act on something `owner` owns, under the gate
 /// `roles`/`access`. The object form of bpfj_gate_allowed(): the target
 /// belongs to exactly one role, so naming that role is the whole test and the
 /// own-pod exemption becomes an own-role one.
 static __always_inline bool bpfj_gate_allowed_owner(
-    void* roles,
-    void* access,
+    enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
-    const struct bpfj_role_id* owner) {
+    const struct bpfj_role_policy __arena* owner) {
   if (!actor) {
     return true;
   }
@@ -135,27 +127,23 @@ static __always_inline bool bpfj_gate_allowed_owner(
       continue;
     }
 
-    struct bpfj_role_id actor_role = {};
-    bpfj_pod_read_role_id(&actor_role, pod);
-    const __u8 mode = bpfj_gate_role_mode(roles, &actor_role);
-    if (mode == BPFJ_GATE_DENIED) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy) {
       return false;
     }
-
-    if (mode == BPFJ_GATE_RESTRICTED &&
-        bpfj_role_id_cmp(&actor_role, owner) != 0) {
-      struct bpfj_role_pair key = {};
-      __builtin_memcpy(&key.actor, &actor_role, sizeof(key.actor));
-      __builtin_memcpy(&key.target, owner, sizeof(key.target));
-
-      if (!bpf_map_lookup_elem(access, &key)) {
-        return false;
-      }
+    const __u8 mode = bpfj_gate_mode(policy, gate);
+    if (mode == BPFJ_POLICY_DENY) {
+      return false;
+    }
+    const struct bpfj_role_set __arena* set = policy->gates[gate];
+    if (mode == BPFJ_POLICY_ALLOW && policy != owner &&
+        !bpfj_role_set_contains(set, owner)) {
+      return false;
     }
 
     // Checked for every pod, configured or not: an override role that wrote no
     // list still answers for the task, and the answer is "unrestricted".
-    if (bpfj_is_override(&actor_role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }
@@ -165,7 +153,7 @@ static __always_inline bool bpfj_gate_allowed_owner(
 
 /// Whether any role the actor holds wrote a list.
 static __always_inline bool bpfj_gate_restricted(
-    void* roles,
+    enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor) {
   const __u32 num_pods = bpfj_gate_num_pods(actor);
 
@@ -180,13 +168,15 @@ static __always_inline bool bpfj_gate_restricted(
       continue;
     }
 
-    struct bpfj_role_id actor_role = {};
-    bpfj_pod_read_role_id(&actor_role, pod);
-    if (bpfj_gate_role_mode(roles, &actor_role) != 0) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy) {
+      return true;
+    }
+    if (bpfj_gate_mode(policy, gate) != BPFJ_POLICY_UNCONFIGURED) {
       return true;
     }
 
-    if (bpfj_is_override(&actor_role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }
@@ -199,8 +189,7 @@ static __always_inline bool bpfj_gate_restricted(
 /// no policy applies to such an actor, and such a target is reachable only by
 /// an unrestricted one.
 static __always_inline bool bpfj_gate_allowed(
-    void* roles,
-    void* access,
+    enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
     struct bpfj_pid_data* target) {
   if (!actor) {
@@ -211,7 +200,7 @@ static __always_inline bool bpfj_gate_allowed(
   // of the target's uuids out of that loop, above a nested null test, and the
   // verifier rejects arithmetic on an unchecked pointer.
   if (!target) {
-    return !bpfj_gate_restricted(roles, actor);
+    return !bpfj_gate_restricted(gate, actor);
   }
 
   const __u32 num_pods = bpfj_gate_num_pods(actor);
@@ -226,20 +215,21 @@ static __always_inline bool bpfj_gate_allowed(
       continue;
     }
 
-    struct bpfj_role_id actor_role = {};
-    bpfj_pod_read_role_id(&actor_role, pod);
-    const __u8 mode = bpfj_gate_role_mode(roles, &actor_role);
-    if (mode == BPFJ_GATE_DENIED) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy) {
       return false;
     }
-
-    if (mode == BPFJ_GATE_RESTRICTED && !bpfj_gate_in_pod(target, pod) &&
-        !bpfj_gate_covers(access, &actor_role, target)) {
+    const __u8 mode = bpfj_gate_mode(policy, gate);
+    if (mode == BPFJ_POLICY_DENY) {
+      return false;
+    }
+    if (mode == BPFJ_POLICY_ALLOW && !bpfj_gate_in_pod(target, pod) &&
+        !bpfj_gate_covers(gate, policy, target)) {
       return false;
     }
 
     // As above: an override role that wrote no list still answers.
-    if (bpfj_is_override(&actor_role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }

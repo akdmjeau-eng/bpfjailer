@@ -142,8 +142,9 @@ TEST(BpfEnforcer, LoadPinsItsLinksAndMaps) {
   ASSERT(linkPinned("bpfj_bpf_map_free"));
   ASSERT(linkPinned("bpfj_bpf_prog_free"));
 
-  ASSERT(mapPinned("bpfj_bpf_syscall_roles"));
-  ASSERT(mapPinned("bpfj_bpf_access"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_bpf_syscall_roles"));
+  ASSERT(!mapPinned("bpfj_bpf_access"));
   ASSERT(mapPinned("bpfj_bpf_map_owners"));
   ASSERT(mapPinned("bpfj_bpf_prog_owners"));
   ASSERT(mapPinned("bpfj_heap_arena"));

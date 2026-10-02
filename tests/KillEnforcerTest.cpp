@@ -44,8 +44,9 @@ TEST(KillEnforcer, LoadPinsItsLinkAndMaps) {
   attach("roles:\n  svc:\n");
 
   ASSERT(linkPinned("bpfj_kill_check"));
-  ASSERT(mapPinned("bpfj_kill_roles"));
-  ASSERT(mapPinned("bpfj_kill_access"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_kill_roles"));
+  ASSERT(!mapPinned("bpfj_kill_access"));
 }
 
 TEST(KillEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {

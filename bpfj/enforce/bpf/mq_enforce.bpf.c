@@ -21,23 +21,6 @@
 
 #define BPFJ_MQUEUE_MAGIC 0x19800202
 
-#define BPFJ_MQ_GATE_MAPS(prefix)       \
-  struct {                              \
-    __uint(type, BPF_MAP_TYPE_HASH);    \
-    __uint(max_entries, 1);             \
-    __type(key, struct bpfj_role_id);   \
-    __type(value, __u8);                \
-  } prefix##_roles SEC(".maps");        \
-  struct {                              \
-    __uint(type, BPF_MAP_TYPE_HASH);    \
-    __uint(max_entries, 1);             \
-    __type(key, struct bpfj_role_pair); \
-    __type(value, __u8);                \
-  } prefix##_access SEC(".maps")
-
-BPFJ_MQ_GATE_MAPS(bpfj_mq_sysv);
-BPFJ_MQ_GATE_MAPS(bpfj_mq_posix);
-
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
@@ -97,8 +80,7 @@ static __always_inline int bpfj_mq_sysv_check(
       bpf_map_lookup_elem(&bpfj_mq_sysv_owners, &key);
   struct bpfj_pid_data* pid_data =
       actor ? bpfj_get_task_pid_data(actor) : bpfj_get_current_pid_data();
-  return bpfj_mq_allowed(
-             &bpfj_mq_sysv_roles, &bpfj_mq_sysv_access, pid_data, owner)
+  return bpfj_mq_allowed(BPFJ_POLICY_GATE_MQ_SYSV, pid_data, owner)
       ? 0
       : bpfj_mq_deny("System V");
 }
@@ -112,8 +94,7 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
   struct bpfj_mq_owner owner = {};
   const bool owned = bpfj_mq_current_owner(&owner);
   if (!bpfj_mq_allowed(
-          &bpfj_mq_sysv_roles,
-          &bpfj_mq_sysv_access,
+          BPFJ_POLICY_GATE_MQ_SYSV,
           bpfj_get_current_pid_data(),
           owned ? &owner : NULL)) {
     return bpfj_mq_deny("System V");
@@ -206,8 +187,7 @@ int BPF_PROG(bpfj_mq_posix_alloc, struct inode* inode, int lsm_ret) {
   struct bpfj_mq_pending_owner pending = {};
   pending.owned = bpfj_mq_current_owner(&pending.owner);
   if (!bpfj_mq_allowed(
-          &bpfj_mq_posix_roles,
-          &bpfj_mq_posix_access,
+          BPFJ_POLICY_GATE_MQ_POSIX,
           bpfj_get_current_pid_data(),
           pending.owned ? &pending.owner : NULL)) {
     return bpfj_mq_deny("POSIX");
@@ -229,10 +209,7 @@ static __always_inline int bpfj_mq_posix_check(struct file* file) {
   const struct bpfj_mq_owner* owner =
       bpf_map_lookup_elem(&bpfj_mq_posix_owners, &key);
   return bpfj_mq_allowed(
-             &bpfj_mq_posix_roles,
-             &bpfj_mq_posix_access,
-             bpfj_get_current_pid_data(),
-             owner)
+             BPFJ_POLICY_GATE_MQ_POSIX, bpfj_get_current_pid_data(), owner)
       ? 0
       : bpfj_mq_deny("POSIX");
 }
@@ -257,8 +234,7 @@ int BPF_PROG(bpfj_mq_posix_open, struct file* file, int lsm_ret) {
   }
 
   if (!bpfj_mq_allowed(
-          &bpfj_mq_posix_roles,
-          &bpfj_mq_posix_access,
+          BPFJ_POLICY_GATE_MQ_POSIX,
           bpfj_get_current_pid_data(),
           pending->owned ? &pending->owner : NULL)) {
     return bpfj_mq_deny("POSIX");

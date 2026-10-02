@@ -14,7 +14,7 @@ namespace bpfjailer {
 
 /// @brief Loads, attaches and pins the fs-verity signature enforcer, giving
 /// each role that lists `enforceBinaryCerts` a keyring of exactly those
-/// certificates for `bpfj_key_map` to point at. As with Jailer the pins own
+/// certificates for its arena policy to point at. As with Jailer the pins own
 /// the programs, but the keyrings live in the kernel's keyring subsystem
 /// rather than under the pin tree, which is why disarm() and release() exist
 /// and why Jailer::unload() calls both.
@@ -28,8 +28,8 @@ class VerityEnforcer {
       const Policy& policy,
       const ScratchMapFds& scratchMaps) noexcept;
 
-  /// @brief Empty this tree's `bpfj_key_map` and return the keyring serials
-  /// it held, for release() once the tree's programs are gone. Unlinking the
+  /// @brief Clear this tree's arena keyring serials and return what they held,
+  /// for release() once the tree's programs are gone. Unlinking the
   /// keyrings while the programs are still attached would refuse every signed
   /// binary, since a serial that no longer resolves denies; an empty map reads
   /// as unchecked instead. Driven off the map rather than off the names, so it

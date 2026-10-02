@@ -5,11 +5,14 @@
 #include <bpf/bpf.h>
 #include <sys/mman.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include "bpfj/enforce/ArenaMap.h"
+#include "bpfj/enforce/RoleId.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/Heap.h"
 #include "bpfj/var/bpf/types_var.h"
@@ -50,28 +53,19 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
   return size;
 }
 
-[[nodiscard]] const struct bpfj_var_catalog* readVarCatalogPointer(
+[[nodiscard]] const struct bpfj_policy_catalog* readPolicyCatalogPointer(
     const PodArena& arena) noexcept {
   const auto* ctrl = arena.ctrl();
   return ctrl == nullptr
       ? nullptr
-      : static_cast<const struct bpfj_var_catalog*>(ctrl->var_catalog);
+      : static_cast<const struct bpfj_policy_catalog*>(ctrl->var_catalog);
 }
 
-Expected<> publishVarNames(
-    const PinConfig& cfg,
+[[nodiscard]] Expected<struct bpfj_var_catalog*> publishVarNames(
+    PodArena& arena,
     std::span<const std::string> names) noexcept {
-  auto arena = PodArena::open(cfg);
-  if (!arena) {
-    return makeUnexpected(arena.error());
-  }
-
-  auto* oldCatalog =
-      const_cast<struct bpfj_var_catalog*>(readVarCatalogPointer(*arena));
-
-  struct bpfj_var_catalog* published = nullptr;
   if (!names.empty()) {
-    auto blob = arena->alloc(varCatalogAllocSize(names));
+    auto blob = arena.alloc(varCatalogAllocSize(names));
     if (!blob) {
       return makeUnexpected(blob.error());
     }
@@ -97,16 +91,185 @@ Expected<> publishVarNames(
           offsetof(struct bpfj_var_name, str) + stored->len + 1);
     }
 
-    published = catalog;
+    return catalog;
+  }
+  return nullptr;
+}
+
+[[nodiscard]] Expected<const struct bpfj_role_set*> publishRoleSet(
+    PodArena& arena,
+    const Fd& rolePolicies,
+    const std::vector<std::string>& roles) noexcept {
+  const std::uint32_t size = static_cast<std::uint32_t>(
+      offsetof(struct bpfj_role_set, policies) +
+      roles.size() * sizeof(struct bpfj_role_policy*));
+  auto blob = arena.alloc(size);
+  if (!blob) {
+    return makeUnexpected(blob.error());
   }
 
-  arena->ctrl()->var_catalog = published;
+  auto* set = static_cast<struct bpfj_role_set*>(*blob);
+  set->count = static_cast<__u32>(roles.size());
+  for (std::size_t i = 0; i < roles.size(); ++i) {
+    auto policy = lookupRolePolicy(rolePolicies, roles[i]);
+    if (!policy || !*policy) {
+      (void)arena.free(set);
+      return !policy ? makeUnexpected(policy.error())
+                     : makeUnexpected(makeError(
+                           std::errc::invalid_argument,
+                           "role list names unknown role ",
+                           roles[i]));
+    }
+    set->policies[i] = *policy;
+  }
+  return set;
+}
 
-  if (oldCatalog != nullptr) {
-    (void)arena->free(oldCatalog);
+Expected<> publishPolicyCatalog(
+    const PinConfig& cfg,
+    const Policy& policy) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  if (readPolicyCatalogPointer(*arena) != nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::file_exists, "the arena policy catalog is already set"));
   }
 
+  const std::uint32_t catalogSize = static_cast<std::uint32_t>(
+      offsetof(struct bpfj_policy_catalog, policies) +
+      policy.roles.size() * sizeof(struct bpfj_role_policy));
+  auto rootBlob = arena->alloc(catalogSize);
+  if (!rootBlob) {
+    return makeUnexpected(rootBlob.error());
+  }
+  auto* catalog = static_cast<struct bpfj_policy_catalog*>(*rootBlob);
+  std::memset(catalog, 0, catalogSize);
+  catalog->count = static_cast<__u32>(policy.roles.size());
+
+  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
+
+  std::size_t index = 0;
+  for (const auto& [name, source] : policy.roles) {
+    auto id = makeRoleId(name);
+    if (!id) {
+      return makeUnexpected(id.error());
+    }
+    auto& out = catalog->policies[index++];
+    out.role_id = *id;
+    out.min_seq = source.minSeq;
+    out.flags = (source.overrideStacked ? BPFJ_POLICY_OVERRIDE_STACKED : 0) |
+        (source.unprivEnroll ? BPFJ_POLICY_UNPRIV_ENROLL : 0) |
+        (source.noLkm ? BPFJ_POLICY_NO_LKM : 0) |
+        (source.hasMinSeq ? BPFJ_POLICY_HAS_MIN_SEQ : 0);
+    out.bpf_mode = source.noBpf ? BPFJ_POLICY_DENY
+        : source.hasBpf ? (source.untrackedBpf ? BPFJ_POLICY_ALLOW_UNTRACKED
+                                               : BPFJ_POLICY_ALLOW)
+                        : BPFJ_POLICY_UNCONFIGURED;
+    out.mq_sysv_mode = source.noMqSysv ? BPFJ_POLICY_DENY
+        : source.hasMqSysv             ? BPFJ_POLICY_ALLOW
+                                       : BPFJ_POLICY_UNCONFIGURED;
+    out.mq_posix_mode = source.noMqPosix ? BPFJ_POLICY_DENY
+        : source.hasMqPosix              ? BPFJ_POLICY_ALLOW
+                                         : BPFJ_POLICY_UNCONFIGURED;
+    out.shm_sysv_mode = source.noShmSysv ? BPFJ_POLICY_DENY
+        : source.hasShmSysv              ? BPFJ_POLICY_ALLOW
+                                         : BPFJ_POLICY_UNCONFIGURED;
+    out.shm_posix_mode = source.noShmPosix ? BPFJ_POLICY_DENY
+        : source.hasShmPosix               ? BPFJ_POLICY_ALLOW
+                                           : BPFJ_POLICY_UNCONFIGURED;
+    out.kill_mode = source.noKill ? BPFJ_POLICY_DENY
+        : source.hasKill          ? BPFJ_POLICY_ALLOW
+                                  : BPFJ_POLICY_UNCONFIGURED;
+    out.ptrace_mode = source.noPtrace ? BPFJ_POLICY_DENY
+        : source.hasPtrace            ? BPFJ_POLICY_ALLOW
+                                      : BPFJ_POLICY_UNCONFIGURED;
+    out.keyring_mode = source.noKeyring ? BPFJ_POLICY_DENY
+        : source.hasKeyring             ? BPFJ_POLICY_ALLOW
+                                        : BPFJ_POLICY_UNCONFIGURED;
+
+    const struct bpfj_role_policy_ref ref{.policy = &out};
+    if (::bpf_map_update_elem(
+            rolePolicies->get(), &out.role_id, &ref, BPF_NOEXIST) != 0) {
+      return makeUnexpected(
+          makeErrnoError("failed to publish arena policy for role ", name));
+    }
+  }
+
+  index = 0;
+  for (const auto& [name, source] : policy.roles) {
+    (void)name;
+    auto& out = catalog->policies[index++];
+    const struct {
+      enum bpfj_policy_gate gate;
+      bool configured;
+      const std::vector<std::string>* roles;
+    } sets[] = {
+        {BPFJ_POLICY_GATE_BPF, source.hasBpf, &source.bpf},
+        {BPFJ_POLICY_GATE_KILL, source.hasKill, &source.kill},
+        {BPFJ_POLICY_GATE_PTRACE, source.hasPtrace, &source.ptrace},
+        {BPFJ_POLICY_GATE_KEYRING, source.hasKeyring, &source.keyring},
+        {BPFJ_POLICY_GATE_ENROLL, source.hasEnroll, &source.enroll},
+        {BPFJ_POLICY_GATE_MQ_SYSV, source.hasMqSysv, &source.mqSysv},
+        {BPFJ_POLICY_GATE_MQ_POSIX, source.hasMqPosix, &source.mqPosix},
+        {BPFJ_POLICY_GATE_SHM_SYSV, source.hasShmSysv, &source.shmSysv},
+        {BPFJ_POLICY_GATE_SHM_POSIX, source.hasShmPosix, &source.shmPosix},
+    };
+    for (const auto& set : sets) {
+      if (!set.configured) {
+        continue;
+      }
+      auto published = publishRoleSet(*arena, *rolePolicies, *set.roles);
+      if (!published) {
+        return makeUnexpected(published.error());
+      }
+      out.gates[set.gate] = *published;
+    }
+  }
+
+  auto vars = publishVarNames(*arena, policy.vars);
+  if (!vars) {
+    return makeUnexpected(vars.error());
+  }
+  catalog->vars = *vars;
+  arena->ctrl()->var_catalog = catalog;
   return unit;
+}
+
+Expected<const struct bpfj_policy_catalog*> readPolicyCatalog(
+    const PodArena& arena) noexcept {
+  if (!arena.valid()) {
+    return makeUnexpected(makeError(
+        std::errc::bad_address, "policy catalog read needs an open arena"));
+  }
+  return readPolicyCatalogPointer(arena);
+}
+
+Expected<const struct bpfj_role_policy*> lookupRolePolicy(
+    const Fd& rolePolicies,
+    const struct bpfj_role_id& role) noexcept {
+  struct bpfj_role_policy_ref ref{};
+  if (::bpf_map_lookup_elem(rolePolicies.get(), &role, &ref) == 0) {
+    return ref.policy;
+  }
+  if (errno == ENOENT) {
+    return nullptr;
+  }
+  return makeUnexpected(makeErrnoError("failed to look up arena role policy"));
+}
+
+Expected<const struct bpfj_role_policy*> lookupRolePolicy(
+    const Fd& rolePolicies,
+    std::string_view role) noexcept {
+  auto id = makeRoleId(std::string(role));
+  if (!id) {
+    return makeUnexpected(id.error());
+  }
+  return lookupRolePolicy(rolePolicies, *id);
 }
 
 Expected<const struct bpfj_var_catalog*> readVarCatalog(
@@ -116,7 +279,8 @@ Expected<const struct bpfj_var_catalog*> readVarCatalog(
         std::errc::bad_address, "variable catalog read needs an open arena"));
   }
 
-  return readVarCatalogPointer(arena);
+  const auto* catalog = readPolicyCatalogPointer(arena);
+  return catalog == nullptr ? nullptr : catalog->vars;
 }
 
 Expected<ResolvedPolicyVar> lookupVar(

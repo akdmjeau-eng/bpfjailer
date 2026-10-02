@@ -19,13 +19,12 @@ namespace {
 namespace fs = std::filesystem;
 
 // The jail membership every BPF object declares: the per-task membership, the
-// arena their pod payloads and variable catalog live in, the roles policy
-// opens to unprivileged callers, and the shared event/log ring buffers.
-constexpr std::array<std::string_view, 8> kSharedMapNames = {
+// arena their pod payloads and policy catalog live in, and the shared
+// event/log ring buffers.
+constexpr std::array<std::string_view, 7> kSharedMapNames = {
     "bpfj_task_map",
+    "bpfj_role_policies",
     "bpfj_heap_arena",
-    "bpfj_unpriv_enroll_map",
-    "bpfj_pod_override_map",
     "bpfj_replace_frozen",
     "bpfj_active_enrolls",
     "bpfj_event_map",
@@ -162,6 +161,31 @@ Expected<> pinSharedMaps(
   }
 
   for (const auto& name : kSharedMapNames) {
+    if (name == "bpfj_role_policies") {
+      const fs::path path = mapDir / name;
+      const int fd = ::bpf_obj_get(path.c_str());
+      if (fd >= 0) {
+        Fd pinned(fd);
+        struct bpf_map_info info{};
+        __u32 infoLen = sizeof(info);
+        if (::bpf_obj_get_info_by_fd(pinned.get(), &info, &infoLen) != 0) {
+          return makeUnexpected(makeErrnoError(
+              "failed to inspect pinned role policy map ", path.string()));
+        }
+        auto map = skel.getMap(name.data());
+        if (!map) {
+          return makeUnexpected(makeError(
+              std::errc::no_such_file_or_directory, "no map named ", name));
+        }
+        if (auto res = map->setMaxEntries(info.max_entries); !res) {
+          return res;
+        }
+      } else if (errno != ENOENT) {
+        return makeUnexpected(makeErrnoError(
+            "failed to open pinned role policy map ", path.string()));
+      }
+    }
+
     const auto maxEntries = name == "bpfj_event_map"
         ? std::optional<std::uint32_t>(kBpfEventMapEntries)
         : name == "bpfj_log_map"

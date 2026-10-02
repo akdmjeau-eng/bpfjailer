@@ -28,20 +28,6 @@
 // PTRACE_MODE_ATTACH_REALCREDS, so this bit covers it.
 #define PTRACE_MODE_ATTACH 0x02
 
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_ptrace_roles SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_pair);
-  __type(value, __u8);
-} bpfj_ptrace_access SEC(".maps");
-
 // Both programs take a trailing `lsm_ret`, the verdict the hook has collected
 // so far, and return early when it is set; ignoring it would turn another
 // module's denial into an allow. It only is the return value at the hook's
@@ -61,8 +47,7 @@ int BPF_PROG(
   }
 
   if (bpfj_gate_allowed(
-          &bpfj_ptrace_roles,
-          &bpfj_ptrace_access,
+          BPFJ_POLICY_GATE_PTRACE,
           bpfj_get_current_pid_data(),
           bpfj_get_task_pid_data(child))) {
     return 0;
@@ -87,8 +72,7 @@ int BPF_PROG(bpfj_ptrace_traceme, struct task_struct* parent, int lsm_ret) {
   // Inverted against the hook above: the caller is the tracee, so the parent is
   // the actor the gate is asked about.
   if (bpfj_gate_allowed(
-          &bpfj_ptrace_roles,
-          &bpfj_ptrace_access,
+          BPFJ_POLICY_GATE_PTRACE,
           bpfj_get_task_pid_data(parent),
           bpfj_get_current_pid_data())) {
     return 0;

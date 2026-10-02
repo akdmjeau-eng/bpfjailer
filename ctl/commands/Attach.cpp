@@ -109,23 +109,6 @@ int attachPolicy(
     return 1;
   }
 
-  // Before anything can be enrolled, since an enrollment naming a variable
-  // resolves it against this allowlist and fails if the name is not in it yet.
-  if (auto res = publishVarNames(pin, policy.vars); !res) {
-    std::cerr << "publishing variable names failed: " << res.error()
-              << std::endl;
-    return 1;
-  }
-
-  // Also before anything can be enrolled: bpfjsrv reads this map to decide
-  // whether a caller that is not root may take a role, and a role missing from
-  // it is one it will refuse.
-  if (auto res = publishUnprivRoles(pin, policy); !res) {
-    std::cerr << "publishing unprivileged enrollment policy failed: "
-              << res.error() << std::endl;
-    return 1;
-  }
-
   std::cout << "Jailer attached, pinned under " << pin.root() << ", "
             << policy.roles.size() << " role(s) from " << source;
   if (!policy.baseRole.empty()) {

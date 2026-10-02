@@ -14,13 +14,6 @@
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_no_lkm_roles SEC(".maps");
-
 static __always_inline bool bpfj_lkm_allowed(void) {
   struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
   if (!pid_data) {
@@ -42,13 +35,12 @@ static __always_inline bool bpfj_lkm_allowed(void) {
       continue;
     }
 
-    struct bpfj_role_id role = {};
-    bpfj_pod_read_role_id(&role, pod);
-    if (bpf_map_lookup_elem(&bpfj_no_lkm_roles, &role)) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (!policy || (policy->flags & BPFJ_POLICY_NO_LKM)) {
       return false;
     }
 
-    if (bpfj_is_override(&role)) {
+    if (bpfj_is_override(pod)) {
       break;
     }
   }

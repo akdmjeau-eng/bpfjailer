@@ -149,7 +149,8 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 [[nodiscard]] Expected<struct bpfj_pod*> translatePod(
     const bpfj_pod& src,
     PodArena& newArena,
-    const struct bpfj_var_catalog* catalog) noexcept {
+    const Fd& rolePolicies,
+    const struct bpfj_policy_catalog* catalog) noexcept {
   const auto count =
       std::min<std::size_t>(src.var_array.count, BPFJ_OSS_VAR_MAX);
   std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
@@ -172,7 +173,26 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   }
 
   auto* dst = static_cast<struct bpfj_pod*>(*blob);
-  *dst = src;
+  *dst = {};
+  dst->role_id = src.role_id;
+  dst->user_id = src.user_id;
+  dst->uuid = src.uuid;
+  dst->creation_time_ns = src.creation_time_ns;
+  dst->gc_removal_attempts = src.gc_removal_attempts;
+  dst->enrollment_source = src.enrollment_source;
+  auto rolePolicy = lookupRolePolicy(rolePolicies, src.role_id);
+  if (!rolePolicy || !*rolePolicy) {
+    (void)newArena.free(*blob);
+    if (!rolePolicy) {
+      return makeUnexpected(rolePolicy.error());
+    }
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "pod ",
+        uuidToString(src.uuid),
+        " has role missing from the new policy"));
+  }
+  dst->policy = *rolePolicy;
   dst->refs = 0;
   bpfj_var_array_init(&dst->var_array);
   if (count == 0) {
@@ -186,7 +206,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto* oldVar = bpfj_var_array_at(&src.var_array, i);
-    auto translated = translatedVar(oldVar, catalog);
+    auto translated = translatedVar(oldVar, catalog ? catalog->vars : nullptr);
     if (!translated) {
       (void)newArena.free(*blob);
       return makeUnexpected(makeError(
@@ -244,7 +264,18 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       (void)newArena->free(pod);
     }
   });
-  std::optional<const struct bpfj_var_catalog*> newCatalog;
+  auto newCatalog = readPolicyCatalog(*newArena);
+  if (!newCatalog) {
+    return makeUnexpected(newCatalog.error());
+  }
+  if (!*newCatalog) {
+    return makeUnexpected(makeError(
+        std::errc::bad_address, "the new arena has no policy catalog"));
+  }
+  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
 
   std::set<std::uintptr_t> seen;
   auto pids = runningPids();
@@ -274,16 +305,8 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
         continue;
       }
 
-      if (pod->var_array.count != 0 && !newCatalog) {
-        auto read = readVarCatalog(*newArena);
-        if (!read) {
-          return makeUnexpected(read.error());
-        }
-        newCatalog = *read;
-      }
-
       auto translated =
-          translatePod(*pod, *newArena, newCatalog ? *newCatalog : nullptr);
+          translatePod(*pod, *newArena, *rolePolicies, *newCatalog);
       if (!translated) {
         return makeUnexpected(translated.error());
       }
@@ -358,7 +381,8 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 }
 
 /// @brief Carry one owner map's records into the new tree's copy.
-[[nodiscard]] Expected<std::size_t> copyOwnerMap(int from, int to) noexcept {
+[[nodiscard]] Expected<std::size_t>
+copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
   // Same guard as copyPods(), and the free hook deletes from this map, so a
   // restarted walk is not hypothetical here.
   std::set<std::uint64_t> seen;
@@ -374,6 +398,16 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 
     struct bpfj_bpf_owner owner{};
     if (::bpf_map_lookup_elem(from, &next, &owner) == 0) {
+      auto policy = lookupRolePolicy(rolePolicies, owner.role);
+      if (!policy) {
+        return makeUnexpected(policy.error());
+      }
+      if (!*policy) {
+        return makeUnexpected(makeError(
+            std::errc::invalid_argument,
+            "BPF owner has a role missing from the new policy"));
+      }
+      owner.policy = *policy;
       if (::bpf_map_update_elem(to, &next, &owner, BPF_ANY) != 0) {
         return makeUnexpected(
             makeErrnoError("failed to copy a BPF ownership record across"));
@@ -400,6 +434,10 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   }
 
   std::size_t copied = 0;
+  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
   for (const auto& name : {kMapOwners, kProgOwners}) {
     auto from = pins::openPinnedMap(oldCfg, name);
     if (!from) {
@@ -411,7 +449,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       return makeUnexpected(to.error());
     }
 
-    auto one = copyOwnerMap(from->get(), to->get());
+    auto one = copyOwnerMap(from->get(), to->get(), *rolePolicies);
     if (!one) {
       return makeUnexpected(one.error());
     }
@@ -508,8 +546,14 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 
 /// Copy a map without baking its key shape into replacement. This is used for
 /// both the pointer-keyed System V map and the (device,inode)-keyed POSIX map.
-[[nodiscard]] Expected<std::size_t>
-copyRawMap(int from, int to, std::string_view what) noexcept {
+[[nodiscard]] Expected<std::size_t> copyRawMap(
+    int from,
+    int to,
+    std::string_view what,
+    const Fd* rolePolicies = nullptr,
+    std::size_t policyOffset = 0) noexcept {
+  static_assert(offsetof(struct bpfj_mq_owner, role) == 0);
+  static_assert(offsetof(struct bpfj_shm_owner, role) == 0);
   struct bpf_map_info info{};
   std::uint32_t infoSize = sizeof(info);
   if (::bpf_obj_get_info_by_fd(from, &info, &infoSize) != 0) {
@@ -531,6 +575,27 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     const bool firstVisit = seen.insert(next).second;
     if (firstVisit &&
         ::bpf_map_lookup_elem(from, next.data(), value.data()) == 0) {
+      if (rolePolicies != nullptr) {
+        struct bpfj_role_id role{};
+        std::memcpy(&role, value.data(), sizeof(role));
+        auto policy = lookupRolePolicy(*rolePolicies, role);
+        if (!policy) {
+          return makeUnexpected(policy.error());
+        }
+        if (!*policy) {
+          return makeUnexpected(makeError(
+              std::errc::invalid_argument,
+              what,
+              " has an owner role missing from the new policy"));
+        }
+        if (value.size() < policyOffset + sizeof(*policy)) {
+          return makeUnexpected(makeError(
+              std::errc::invalid_argument,
+              what,
+              " has an unexpected owner value size"));
+        }
+        std::memcpy(value.data() + policyOffset, &*policy, sizeof(*policy));
+      }
       if (::bpf_map_update_elem(to, next.data(), value.data(), BPF_ANY) != 0) {
         return makeUnexpected(makeErrnoError("failed to copy ", what));
       }
@@ -549,6 +614,10 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
   std::size_t copied = 0;
+  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
   for (const auto name : {kMqSysvOwners, kMqPosixOwners}) {
     if (!hasPinnedMap(oldCfg, name)) {
       continue;
@@ -561,7 +630,12 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     if (!to) {
       return makeUnexpected(to.error());
     }
-    auto one = copyRawMap(from->get(), to->get(), name);
+    auto one = copyRawMap(
+        from->get(),
+        to->get(),
+        name,
+        &*rolePolicies,
+        offsetof(struct bpfj_mq_owner, policy));
     if (!one) {
       return makeUnexpected(one.error());
     }
@@ -574,6 +648,10 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
   std::size_t copied = 0;
+  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
   for (const auto name :
        {kShmSysvOwners, kShmPosixOwners, kShmPosixMounts, kShmPosixDevices}) {
     if (!hasPinnedMap(oldCfg, name)) {
@@ -587,7 +665,13 @@ copyRawMap(int from, int to, std::string_view what) noexcept {
     if (!to) {
       return makeUnexpected(to.error());
     }
-    auto one = copyRawMap(from->get(), to->get(), name);
+    const bool hasOwner = name == kShmSysvOwners || name == kShmPosixOwners;
+    auto one = copyRawMap(
+        from->get(),
+        to->get(),
+        name,
+        hasOwner ? &*rolePolicies : nullptr,
+        offsetof(struct bpfj_shm_owner, policy));
     if (!one) {
       return makeUnexpected(one.error());
     }
@@ -821,17 +905,6 @@ struct BackfillStats {
   // Last, as in `attach`: this one can deny bpf(2), and everything above still
   // needs the syscall to pin its links.
   if (auto res = BpfEnforcer::load(newCfg, policy); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  // Filled before anything reads them: an enrollment naming a variable
-  // resolves it against this allowlist catalog, and bpfjsrv refuses a role
-  // missing from the other.
-  if (auto res = publishVarNames(newCfg, policy.vars); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  if (auto res = publishUnprivRoles(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 

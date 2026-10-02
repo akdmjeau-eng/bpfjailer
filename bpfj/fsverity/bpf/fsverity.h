@@ -40,6 +40,7 @@ struct bpfj_verity_key {
   char id[ROLE_ID_LEN];
 };
 
+#ifndef BPFJ_FSVERITY_POLICY_ARENA
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
@@ -57,6 +58,7 @@ struct {
   __type(key, struct bpfj_verity_key);
   __type(value, __u64);
 } bpfj_verity_seq_map SEC(".maps");
+#endif
 
 // Both buffers a check needs, in one slot, since they are held over the same
 // span and claiming them together removes a failure path.
@@ -101,9 +103,10 @@ static __u64 bpfj_get_seq_be(const __u8* src) {
 // mapping would demand one of every shared object too.
 static int bpfj_verify_fsverity_pkcs7(
     struct file* file,
-    const char role_id[ROLE_ID_LEN],
     struct bpf_key* key,
     struct bpfj_fsverity_scratch* scratch,
+    bool has_floor,
+    __u64 floor,
     bool is_exec,
     enum bpfj_fsverity_reason* reason) {
   struct fsverity_digest* digest = (struct fsverity_digest*)&scratch->digest;
@@ -133,14 +136,10 @@ static int bpfj_verify_fsverity_pkcs7(
       ? BPFJ_FSVERITY_SHA256_DIGEST_SIZE
       : BPFJ_FSVERITY_SHA512_DIGEST_SIZE;
 
-  // No entry means the role is not sequence-checked and the payload stays the
-  // bare digest.
-  __u64* floor = bpf_map_lookup_elem(&bpfj_verity_seq_map, role_id);
-
   __u32 payload_size = digest_size;
   __u64 seq = 0;
   bool have_seq = false;
-  if (floor) {
+  if (has_floor) {
     // Straight into the digest's own buffer, just past the digest, so the
     // pair the signature covers is assembled without a copy. Two constant
     // offsets rather than one variable one, bpf_dynptr_from_mem needing a
@@ -210,7 +209,7 @@ static int bpfj_verify_fsverity_pkcs7(
   // per role and a role's libraries are signed on their own schedule.
   // `floor` is redundant beside `have_seq`, but the verifier tracks the null
   // check rather than the implication.
-  if (floor && have_seq && is_exec && seq < *floor) {
+  if (has_floor && have_seq && is_exec && seq < floor) {
     *reason = BPFJ_FSVERITY_REASON_SEQ_ROLLBACK;
     return -EPERM;
   }
@@ -218,6 +217,7 @@ static int bpfj_verify_fsverity_pkcs7(
   return 0;
 }
 
+#ifndef BPFJ_FSVERITY_POLICY_ARENA
 static int bpfj_check_fsverity_pkcs7(
     struct file* file,
     const char role_id[ROLE_ID_LEN],
@@ -248,8 +248,40 @@ static int bpfj_check_fsverity_pkcs7(
     return -ENOMEM;
   }
 
-  const int ret =
-      bpfj_verify_fsverity_pkcs7(file, role_id, key, scratch, is_exec, reason);
+  __u64* floor = bpf_map_lookup_elem(&bpfj_verity_seq_map, role_id);
+  const int ret = bpfj_verify_fsverity_pkcs7(
+      file, key, scratch, floor != NULL, floor ? *floor : 0, is_exec, reason);
+  bpf_key_put(key);
+  return ret;
+}
+#endif
+
+static int bpfj_check_fsverity_pkcs7_policy(
+    struct file* file,
+    __u32 key_serial,
+    bool has_floor,
+    __u64 floor,
+    bool is_exec,
+    enum bpfj_fsverity_reason* reason) {
+  if (!key_serial) {
+    return 0;
+  }
+
+  struct bpf_key* key = bpf_lookup_user_key(key_serial, 0);
+  if (!key) {
+    *reason = BPFJ_FSVERITY_REASON_NO_KEY;
+    return -ENOKEY;
+  }
+
+  BPFJ_SCRATCH_GUARD(struct bpfj_fsverity_scratch, scratch);
+  if (!scratch) {
+    *reason = BPFJ_FSVERITY_REASON_NONE_NOMEM;
+    bpf_key_put(key);
+    return -ENOMEM;
+  }
+
+  const int ret = bpfj_verify_fsverity_pkcs7(
+      file, key, scratch, has_floor, floor, is_exec, reason);
   bpf_key_put(key);
   return ret;
 }

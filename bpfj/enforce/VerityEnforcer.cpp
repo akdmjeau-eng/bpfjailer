@@ -4,6 +4,7 @@
 
 #include <bpf/bpf.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <filesystem>
@@ -13,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "bpfj/enforce/RoleGate.h"
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/RoleId.h"
 #include "bpfj/enforce/bpf/verity_enforce.skel.h"
 #include "bpfj/fsverity/Keyctl.h"
@@ -26,30 +27,9 @@ namespace bpfjailer {
 
 namespace {
 
-// role -> keyring serial. Pinned because `bpfjctl load` applies policy and then
-// exits, and this is what the running programs read afterwards.
-constexpr std::string_view kKeyMap = "bpfj_key_map";
-
 // The same keyrings the other way round, serial -> role, the direction
 // lsm/key_permission needs.
 constexpr std::string_view kOwnerMap = "bpfj_keyring_owner";
-
-// role -> the lowest sequence number a binary claiming it may carry, straight
-// from `min-seq`; a role absent from here is not sequence-checked.
-constexpr std::string_view kSeqMap = "bpfj_verity_seq_map";
-
-// Declared with one entry, like the pod map, and sized here. Keyed by role, so
-// it needs room for the host's roles rather than its jails.
-constexpr std::uint32_t kMaxRoleKeys = 1024;
-
-// Which roles may write another role's keyring.
-constexpr RoleGate kGate{
-    .rolesMap = "bpfj_keyring_roles",
-    .accessMap = "bpfj_keyring_access",
-    .configured = &RolePolicy::hasKeyring,
-    .denied = &RolePolicy::noKeyring,
-    .targets = &RolePolicy::keyring,
-};
 
 // Named "bpfj:<scope>:<role>", <scope> unique to the load that built it,
 // since the user keyring is per-UID and a bare "bpfj:<role>" let a replace's
@@ -107,29 +87,27 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
   return static_cast<std::uint32_t>(serial);
 }
 
-/// @brief Write one bpfj_key_map entry per role that names a certificate, and
-/// the matching bpfj_keyring_owner entry. Before attach(), so no jailed task
-/// reaches the hooks mid-write and the add_key() calls here are not yet
-/// subject to the key_permission gate they install.
-[[nodiscard]] Expected<> writeKeyMap(
+/// @brief Publish each keyring serial in its arena policy and write the
+/// matching bpfj_keyring_owner entry. Before attach(), so no jailed task
+/// reaches the hooks mid-write and the add_key() calls here are not yet subject
+/// to the key_permission gate they install.
+[[nodiscard]] Expected<> writeKeyrings(
     bpfj::libbpf::BpfSkelBase& skel,
+    const PinConfig& cfg,
     const Policy& policy) noexcept {
-  auto map = skel.getMap(kKeyMap.data());
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory, "no map named ", kKeyMap));
-  }
-
   auto owners = skel.getMap(kOwnerMap.data());
   if (!owners) {
     return makeUnexpected(makeError(
         std::errc::no_such_file_or_directory, "no map named ", kOwnerMap));
   }
 
-  auto floors = skel.getMap(kSeqMap.data());
-  if (!floors) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory, "no map named ", kSeqMap));
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
   }
 
   // One scope for the load, so a reader can tell which tree a keyring is.
@@ -150,21 +128,24 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
       return makeUnexpected(serial.error());
     }
 
-    if (auto res = map->updateElem(*id, *serial); !res) {
+    auto publishedPolicy = lookupRolePolicy(*rolePolicies, *id);
+    if (!publishedPolicy) {
+      return makeUnexpected(publishedPolicy.error());
+    }
+    if (!*publishedPolicy) {
+      return makeUnexpected(makeError(
+          std::errc::invalid_argument,
+          "role ",
+          role,
+          " is missing from the arena policy catalog"));
+    }
+    const struct bpfj_role_policy_ref ref{.policy = *publishedPolicy};
+    if (auto res = owners->updateElem(*serial, ref); !res) {
       return res;
     }
 
-    if (auto res = owners->updateElem(*serial, *id); !res) {
-      return res;
-    }
-
-    // Last of the three, so a role is never sequence-checked before it has a
-    // keyring to verify the signature against.
-    if (rolePolicy.hasMinSeq) {
-      if (auto res = floors->updateElem(*id, rolePolicy.minSeq); !res) {
-        return res;
-      }
-    }
+    auto* published = const_cast<struct bpfj_role_policy*>(*publishedPolicy);
+    published->key_serial = *serial;
   }
 
   return unit;
@@ -195,19 +176,11 @@ Expected<> VerityEnforcer::load(
     return res;
   }
 
-  if (auto res = pins::pinMap(skel, kKeyMap, mapDir, kMaxRoleKeys); !res) {
-    return res;
-  }
-
-  if (auto res = pins::pinMap(skel, kOwnerMap, mapDir, kMaxRoleKeys); !res) {
-    return res;
-  }
-
-  if (auto res = pins::pinMap(skel, kSeqMap, mapDir, kMaxRoleKeys); !res) {
-    return res;
-  }
-
-  if (auto res = gate::pinMaps(skel, kGate, mapDir); !res) {
+  const auto keyringCount = static_cast<std::uint32_t>(std::count_if(
+      policy.roles.begin(), policy.roles.end(), [](const auto& role) {
+        return !role.second.enforceBinaryCerts.empty();
+      }));
+  if (auto res = pins::pinMap(skel, kOwnerMap, mapDir, keyringCount); !res) {
     return res;
   }
 
@@ -219,11 +192,7 @@ Expected<> VerityEnforcer::load(
     return res;
   }
 
-  if (auto res = writeKeyMap(skel, policy); !res) {
-    return res;
-  }
-
-  if (auto res = gate::writePolicy(skel, kGate, policy); !res) {
+  if (auto res = writeKeyrings(skel, cfg, policy); !res) {
     return res;
   }
 
@@ -251,39 +220,28 @@ Expected<std::vector<keyctl::Serial>> VerityEnforcer::disarm(
   std::vector<keyctl::Serial> serials;
 
   std::error_code ec;
-  if (!std::filesystem::exists(cfg.mapPath(kKeyMap), ec)) {
+  if (!std::filesystem::exists(cfg.mapPath("bpfj_heap_arena"), ec)) {
     // Nothing loaded here, or a tree that never named a certificate.
     return serials;
   }
 
-  auto map = pins::openPinnedMap(cfg, kKeyMap);
-  if (!map) {
-    return makeUnexpected(map.error());
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
-
-  // Every role collected before any is deleted, since deleting the key a
-  // walk is on sends bpf_map_get_next_key back to the start.
-  std::vector<struct bpfj_role_id> roles;
-  struct bpfj_role_id next{};
-  int rc = ::bpf_map_get_next_key(map->get(), nullptr, &next);
-  while (rc == 0) {
-    roles.push_back(next);
-    rc = ::bpf_map_get_next_key(map->get(), &roles.back(), &next);
+  auto catalog = readPolicyCatalog(*arena);
+  if (!catalog || !*catalog) {
+    return serials;
   }
-
-  for (const auto& role : roles) {
-    std::uint32_t serial = 0;
-    if (::bpf_map_lookup_elem(map->get(), &role, &serial) != 0) {
-      continue;
+  const std::size_t count = (*catalog)->count;
+  for (std::size_t i = 0; i < count; ++i) {
+    auto& policy =
+        const_cast<struct bpfj_role_policy&>((*catalog)->policies[i]);
+    const auto serial = policy.key_serial;
+    if (serial != 0) {
+      serials.push_back(static_cast<keyctl::Serial>(serial));
+      policy.key_serial = 0;
     }
-
-    if (::bpf_map_delete_elem(map->get(), &role) != 0) {
-      return makeUnexpected(makeError(
-          std::error_code(errno, std::generic_category()),
-          "failed to clear ",
-          kKeyMap));
-    }
-    serials.push_back(static_cast<keyctl::Serial>(serial));
   }
 
   return serials;
