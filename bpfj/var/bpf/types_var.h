@@ -12,14 +12,20 @@
 
 #include "bpfj/lib/bpf/types_heap.h"
 
+#ifdef __cplusplus
+#define BPFJ_VAR_INLINE inline
+#define BPFJ_VAR_NULL nullptr
+#else
+#define BPFJ_VAR_INLINE static inline
+#define BPFJ_VAR_NULL NULL
+#endif
+
 // Sized for a canonical 36-character UUID plus the NUL. In the open source
 // tree values live out of line in the arena, so widening this no longer grows
 // bpfj_pod; the glob NFA gadget width deliberately does not track it, a
 // 39-wide gadget having pushed fs2_enforce over the 6.13 verifier limit.
 #define BPFJ_VAR_VAL_LEN 40
 #define BPFJ_VAR_MAX 4
-// Variable ids are 1-based, so slot 0 remains "no variable".
-#define BPFJ_VAR_ID_SLOTS 16
 
 struct vsock_address {
   __u32 cid;
@@ -34,12 +40,24 @@ enum bpfj_var_type {
 };
 
 // The running jail's variable allowlist, shared through the arena and named by
-// a pinned singleton map entry. ids stay 1-based, so names[0] is always NULL.
+// a pinned singleton map entry. ids stay 1-based, so names[0] is always NULL
+// and count is the largest valid id. Additional name slots are stored in the
+// trailing arena allocation and accessed via bpfj_var_catalog_names().
 struct bpfj_var_catalog {
   __u32 count;
   __u32 reserved;
-  const char __arena* names[BPFJ_VAR_ID_SLOTS];
+  const char __arena* names[1];
 };
+
+BPFJ_VAR_INLINE const char __arena** bpfj_var_catalog_names_mut(
+    struct bpfj_var_catalog* catalog) {
+  return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
+}
+
+BPFJ_VAR_INLINE const char __arena* const* bpfj_var_catalog_names(
+    const struct bpfj_var_catalog* catalog) {
+  return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
+}
 
 // A variable set to a value
 struct bpfj_var {
@@ -64,17 +82,17 @@ struct bpfj_var_array {
   __u8 reserved[7];
 };
 
-static inline __u32 bpfj_var_align_up(__u32 size) {
+BPFJ_VAR_INLINE __u32 bpfj_var_align_up(__u32 size) {
   return (size + sizeof(__u32) - 1) & ~((__u32)sizeof(__u32) - 1);
 }
 
-static inline void bpfj_var_array_init(struct bpfj_var_array* vars) {
-  vars->vars = NULL;
+BPFJ_VAR_INLINE void bpfj_var_array_init(struct bpfj_var_array* vars) {
+  vars->vars = BPFJ_VAR_NULL;
   vars->count = 0;
   __builtin_memset(vars->reserved, 0, sizeof(vars->reserved));
 }
 
-static inline __u32 bpfj_var_payload_size(const struct bpfj_var* var) {
+BPFJ_VAR_INLINE __u32 bpfj_var_payload_size(const struct bpfj_var* var) {
   switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
       return (__u32)var->size + 1;
@@ -85,33 +103,34 @@ static inline __u32 bpfj_var_payload_size(const struct bpfj_var* var) {
   }
 }
 
-static inline struct bpfj_var __arena* bpfj_var_array_at(
+BPFJ_VAR_INLINE struct bpfj_var __arena* bpfj_var_array_at(
     const struct bpfj_var_array* vars,
     __u32 idx) {
-  if (vars == NULL || idx >= vars->count || vars->vars == NULL) {
-    return NULL;
+  if (vars == BPFJ_VAR_NULL || idx >= vars->count ||
+      vars->vars == BPFJ_VAR_NULL) {
+    return BPFJ_VAR_NULL;
   }
   return vars->vars + idx;
 }
 
-static inline const void __arena* bpfj_var_value_ptr(
+BPFJ_VAR_INLINE const void __arena* bpfj_var_value_ptr(
     const struct bpfj_var* var) {
-  if (var == NULL) {
-    return NULL;
+  if (var == BPFJ_VAR_NULL) {
+    return BPFJ_VAR_NULL;
   }
   return var->val;
 }
 
-static inline const char __arena* bpfj_var_name_ptr(
+BPFJ_VAR_INLINE const char __arena* bpfj_var_name_ptr(
     const struct bpfj_var* var) {
-  if (var == NULL) {
-    return NULL;
+  if (var == BPFJ_VAR_NULL) {
+    return BPFJ_VAR_NULL;
   }
   return var->name;
 }
 
 // Get a variable value as a string
-inline int
+BPFJ_VAR_INLINE int
 bpfj_var_get_str(const struct bpfj_var* var, char* dest, __u8* size) {
   if (var->type != BPFJ_VAR_TYPE_STR) {
     return -EINVAL;
@@ -128,7 +147,7 @@ bpfj_var_get_str(const struct bpfj_var* var, char* dest, __u8* size) {
 }
 
 // Get a variable value as a vsock address
-inline int bpfj_var_get_vsock_addr(
+BPFJ_VAR_INLINE int bpfj_var_get_vsock_addr(
     const struct bpfj_var* var,
     struct vsock_address* dest) {
   if (var->type != BPFJ_VAR_TYPE_VSOCK_ADDR) {
@@ -142,7 +161,7 @@ inline int bpfj_var_get_vsock_addr(
 }
 
 // Get a variable value as binary data
-inline int
+BPFJ_VAR_INLINE int
 bpfj_var_get_bin(const struct bpfj_var* var, unsigned char* dest, __u8* size) {
   __builtin_memset(dest, 0, BPFJ_VAR_VAL_LEN);
   __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size);
@@ -155,7 +174,7 @@ bpfj_var_get_bin(const struct bpfj_var* var, unsigned char* dest, __u8* size) {
 }
 
 // Serialize a variable to a string
-static inline int
+BPFJ_VAR_INLINE int
 bpfj_var_serialize(const struct bpfj_var* var, char* dest, size_t dest_size) {
   switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
@@ -181,10 +200,10 @@ bpfj_var_serialize(const struct bpfj_var* var, char* dest, size_t dest_size) {
 
 // Deserialize a variable from a string. Can't be called from bpf
 #ifdef __cplusplus
-static inline int
+inline int
 bpfj_var_deserialize(const char* src, size_t src_size, struct bpfj_var* var) {
   void __arena* dest = var->val;
-  if (dest == NULL) {
+  if (dest == nullptr) {
     return -EINVAL;
   }
 
@@ -217,3 +236,6 @@ bpfj_var_deserialize(const char* src, size_t src_size, struct bpfj_var* var) {
   return 0;
 }
 #endif
+
+#undef BPFJ_VAR_NULL
+#undef BPFJ_VAR_INLINE

@@ -44,7 +44,8 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
 
 [[nodiscard]] std::uint32_t varCatalogAllocSize(
     std::span<const std::string> names) noexcept {
-  std::uint32_t size = bpfj_var_align_up(sizeof(struct bpfj_var_catalog));
+  std::uint32_t size = bpfj_var_align_up(
+      sizeof(struct bpfj_var_catalog) + sizeof(const char*) * names.size());
   for (const auto& name : names) {
     size += bpfj_var_align_up(static_cast<__u32>(name.size()) + 1);
   }
@@ -65,17 +66,6 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
 Expected<> publishVarNames(
     const PinConfig& cfg,
     std::span<const std::string> names) noexcept {
-  // Slot 0 means "no name", so the names need one more slot than there are
-  // names.
-  if (names.size() + 1 > BPFJ_VAR_ID_SLOTS) {
-    return makeUnexpected(makeError(
-        std::errc::value_too_large,
-        "a policy may declare at most ",
-        std::to_string(BPFJ_VAR_ID_SLOTS - 1),
-        " vars, got ",
-        std::to_string(names.size())));
-  }
-
   auto arena = PodArena::open(cfg);
   if (!arena) {
     return makeUnexpected(arena.error());
@@ -101,14 +91,16 @@ Expected<> publishVarNames(
     auto* catalog = static_cast<struct bpfj_var_catalog*>(*blob);
     *catalog = {};
     catalog->count = static_cast<__u32>(names.size());
+    auto* publishedNames = bpfj_var_catalog_names_mut(catalog);
 
-    std::uint32_t nameOff = bpfj_var_align_up(sizeof(struct bpfj_var_catalog));
+    std::uint32_t nameOff = bpfj_var_align_up(
+        sizeof(struct bpfj_var_catalog) + sizeof(const char*) * names.size());
     for (std::size_t i = 0; i < names.size(); ++i) {
       const auto& name = names[i];
       auto* stored = static_cast<char*>(*blob) + nameOff;
       std::memcpy(stored, name.data(), name.size());
       stored[name.size()] = '\0';
-      catalog->names[i + 1] = stored;
+      publishedNames[i + 1] = stored;
       nameOff += bpfj_var_align_up(static_cast<__u32>(name.size()) + 1);
     }
 
@@ -156,11 +148,10 @@ Expected<ResolvedPolicyVar> lookupVar(
         makeError(std::errc::invalid_argument, "a variable name is empty"));
   }
 
-  const std::uint32_t count = catalog == nullptr
-      ? 0
-      : std::min<std::uint32_t>(catalog->count, BPFJ_VAR_ID_SLOTS - 1);
+  const std::uint32_t count = catalog == nullptr ? 0 : catalog->count;
+  const auto* publishedNames = bpfj_var_catalog_names(catalog);
   for (std::uint32_t id = 1; id <= count; ++id) {
-    const char* published = catalog->names[id];
+    const char* published = publishedNames[id];
     if (published != nullptr && std::string_view(published) == name) {
       return ResolvedPolicyVar{.id = id, .name = published};
     }
