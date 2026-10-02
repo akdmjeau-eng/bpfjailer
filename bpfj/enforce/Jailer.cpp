@@ -120,16 +120,18 @@ constexpr RoleGate kEnrollGate{
 
 } // namespace
 
-Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
+Expected<ScratchMapFds> Jailer::load(
+    const PinConfig& cfg,
+    const Policy& policy) noexcept {
   // Before makeTree rather than inside it: the links going is what detaches
   // whatever was running, so removing only the map pins would leave those
   // programs attached to unreachable maps.
   if (auto res = unload(cfg); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = pins::makeTree(cfg); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   auto created = bpfj::libbpf::BpfSkel<jailer_bpf>::create();
@@ -155,23 +157,24 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
   }
 
   if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
-    return res;
-  }
-
-  if (auto res = pins::pinScratchMaps(skel, cfg.mapDir()); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = gate::pinMaps(skel, kEnrollGate, cfg.mapDir()); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = skel.load(); !res) {
-    return res;
+    return makeUnexpected(res.error());
+  }
+
+  auto scratchMaps = ScratchMapFds::duplicateFrom(skel);
+  if (!scratchMaps) {
+    return makeUnexpected(scratchMaps.error());
   }
 
   if (auto res = heap::init(created.value()); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   std::optional<PodArena> baseRoleArena;
@@ -194,15 +197,15 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
   // Before attach, so no hook can run against a half-written map and read an
   // overriding role as an ordinary one.
   if (auto res = writeOverrideRoles(skel, policy); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = gate::writePolicy(skel, kEnrollGate, policy); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = skel.attach(); !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   // After attach, so anything forked from here on is covered by
@@ -222,17 +225,22 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
   if (auto res = pins::pinLink(
           skel.links().bpfj_jailer_fork, "bpfj_jailer_fork", linkDir);
       !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
   if (auto res = pins::pinLink(
           skel.links().bpfj_jailer_exec, "bpfj_jailer_exec", linkDir);
       !res) {
-    return res;
+    return makeUnexpected(res.error());
   }
 
-  return pins::pinLink(
-      skel.links().bpfj_jailer_free, "bpfj_jailer_free", linkDir);
+  if (auto res = pins::pinLink(
+          skel.links().bpfj_jailer_free, "bpfj_jailer_free", linkDir);
+      !res) {
+    return makeUnexpected(res.error());
+  }
+
+  return std::move(*scratchMaps);
 }
 
 Expected<> Jailer::unload(const PinConfig& cfg) noexcept {

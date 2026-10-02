@@ -32,17 +32,6 @@ constexpr std::array<std::string_view, 8> kSharedMapNames = {
     "bpfj_log_map",
 };
 
-// The scratch pool, separate from the list above because an enforcer with no
-// buffer too big for the stack never includes bpfj/lib/bpf/scratch.h. Pinned
-// for the same reason the maps above are: the pin is what makes one pool for
-// the host rather than a megabyte per object that declares it.
-constexpr std::array<std::string_view, 4> kScratchMapNames = {
-    "bpfj_scratch_small",
-    "bpfj_scratch_large",
-    "bpfj_scratch_small_claimed",
-    "bpfj_scratch_large_claimed",
-};
-
 // logging_bpf.h measures the ring buffer in 4 KiB pages and the closed source
 // jailer uses 64 of them for bpfj_log_map.
 constexpr std::uint32_t kBpfEventMapEntries = 512 * 4096;
@@ -184,18 +173,6 @@ Expected<> pinSharedMaps(
           res.error().code() == std::errc::no_such_file_or_directory) {
         continue;
       }
-      return res;
-    }
-  }
-
-  return unit;
-}
-
-Expected<> pinScratchMaps(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const fs::path& mapDir) noexcept {
-  for (const auto& name : kScratchMapNames) {
-    if (auto res = pinMap(skel, name, mapDir); !res) {
       return res;
     }
   }

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/ScratchMapFds.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/fsverity/Keyctl.h"
 #include "bpfj/policy/Policy.h"
@@ -21,10 +22,11 @@ class VerityEnforcer {
  public:
   /// @brief Load and attach the enforcer, pinning its links and maps under
   /// `cfg` and keying it from `policy`. Expects Jailer::load() to have run
-  /// first, so the jail membership maps exist and this adopts them.
+  /// first, so this can adopt the pinned jail maps and reuse its scratch maps.
   [[nodiscard]] static Expected<> load(
       const PinConfig& cfg,
-      const Policy& policy) noexcept;
+      const Policy& policy,
+      const ScratchMapFds& scratchMaps) noexcept;
 
   /// @brief Empty this tree's `bpfj_key_map` and return the keyring serials
   /// it held, for release() once the tree's programs are gone. Unlinking the

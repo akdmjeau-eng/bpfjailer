@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/ScratchMapFds.h"
 #include "bpfj/policy/Policy.h"
 
 // What the enforcer tests share: every enforcer comes up the same way -- a
@@ -26,6 +27,10 @@ namespace bpfjailer::test {
 /// @brief Bring the jailer up under testPins(), ending the test if it fails;
 /// every enforcer expects this to have created the maps it adopts.
 void loadJailer(const Policy& policy);
+
+/// @brief Bring the jailer up and retain its scratch map FDs for another BPF
+/// object to reuse.
+[[nodiscard]] ScratchMapFds loadJailerWithScratchMaps(const Policy& policy);
 
 /// @brief Whether an enforcer link named `name` is pinned under testPins().
 [[nodiscard]] bool linkPinned(std::string_view name);

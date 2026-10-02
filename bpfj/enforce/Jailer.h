@@ -3,6 +3,7 @@
 #pragma once
 
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/ScratchMapFds.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/policy/Policy.h"
 
@@ -16,14 +17,15 @@ class Jailer {
   /// @brief Load and attach the jailer, pinning its links and maps under
   /// `cfg`. A `policy` naming a `baseRole` gets one pod with every running
   /// process enrolled before this returns, and everything forked afterwards
-  /// inherits it.
+  /// inherits it. The returned FDs let the enforcers reuse the unpinned
+  /// scratch maps while they load.
   ///
   /// Destructive: anything already pinned under `cfg` is torn down first and
   /// every task jailed under it released, rather than carrying a previous
   /// jailer's membership into a jail built from a different policy --
   /// `replace` is the bring-up that keeps the jail. An enforcer loading
   /// afterwards still adopts these maps.
-  [[nodiscard]] static Expected<> load(
+  [[nodiscard]] static Expected<ScratchMapFds> load(
       const PinConfig& cfg,
       const Policy& policy) noexcept;
 

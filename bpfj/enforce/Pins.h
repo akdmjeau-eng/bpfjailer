@@ -82,13 +82,6 @@ namespace pins {
     bpfj::libbpf::BpfSkelBase& skel,
     const std::filesystem::path& mapDir) noexcept;
 
-/// @brief Pin the scratch pool, which is what makes it one pool for the host
-/// rather than one per object. Unlike pinSharedMaps(), only for objects
-/// including bpfj/lib/bpf/scratch.h.
-[[nodiscard]] Expected<> pinScratchMaps(
-    bpfj::libbpf::BpfSkelBase& skel,
-    const std::filesystem::path& mapDir) noexcept;
-
 /// @brief Open the map pinned as `name` under `cfg`, the only way into a
 /// running jail for a process that did not load it. Fails when nothing is
 /// pinned there, which is what a command run against no jailer sees.

@@ -72,9 +72,17 @@ static __always_inline void* bpfj_scratch_claim(
     __u32 count,
     __u32 tag,
     __u32* slot) {
+  if (count == 0) {
+    return NULL;
+  }
+  // Spread concurrent callers across the bitmap instead of its first word.
+  const __u32 start = bpf_get_prandom_u32() % count;
   int i;
   bpf_for(i, 0, count) {
-    const __u32 idx = (__u32)i;
+    __u32 idx = start + (__u32)i;
+    if (idx >= count) {
+      idx -= count;
+    }
     const __u32 w = idx / 64;
     __u64* word = bpf_map_lookup_elem(claimed, &w);
     if (!word) {

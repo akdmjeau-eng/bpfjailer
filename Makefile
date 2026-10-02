@@ -210,6 +210,7 @@ COMMON_SRCS := \
 	bpfj/enforce/UnprivRoles.cpp \
 	bpfj/enforce/EnrollGate.cpp \
 	bpfj/enforce/Pins.cpp \
+	bpfj/enforce/ScratchMapFds.cpp \
 	bpfj/enforce/Jailer.cpp \
 	bpfj/enforce/Replace.cpp \
 	bpfj/enforce/VerityEnforcer.cpp \

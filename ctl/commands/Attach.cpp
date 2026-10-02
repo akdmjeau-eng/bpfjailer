@@ -61,15 +61,16 @@ int attachPolicy(
     const PinConfig& pin,
     const Policy& policy,
     std::string_view source) {
-  if (auto res = Jailer::load(pin, policy); !res) {
-    std::cerr << "attach failed: " << res.error() << std::endl;
+  auto scratchMaps = Jailer::load(pin, policy);
+  if (!scratchMaps) {
+    std::cerr << "attach failed: " << scratchMaps.error() << std::endl;
     return 1;
   }
 
   // After the jailer, so the membership maps exist for the enforcer to adopt. A
   // failure here leaves the jailer attached, which `bpfjctl unload` clears by
   // removing the pin tree.
-  if (auto res = VerityEnforcer::load(pin, policy); !res) {
+  if (auto res = VerityEnforcer::load(pin, policy, *scratchMaps); !res) {
     std::cerr << "fs-verity enforcer load failed: " << res.error() << std::endl;
     return 1;
   }

@@ -174,7 +174,8 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
 
 Expected<> VerityEnforcer::load(
     const PinConfig& cfg,
-    const Policy& policy) noexcept {
+    const Policy& policy,
+    const ScratchMapFds& scratchMaps) noexcept {
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }
@@ -185,12 +186,12 @@ Expected<> VerityEnforcer::load(
   }
   auto& skel = *created.value();
 
-  const auto mapDir = cfg.mapDir();
-  if (auto res = pins::pinSharedMaps(skel, mapDir); !res) {
+  if (auto res = scratchMaps.reuseIn(skel); !res) {
     return res;
   }
 
-  if (auto res = pins::pinScratchMaps(skel, mapDir); !res) {
+  const auto mapDir = cfg.mapDir();
+  if (auto res = pins::pinSharedMaps(skel, mapDir); !res) {
     return res;
   }
 

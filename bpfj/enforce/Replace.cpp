@@ -789,11 +789,12 @@ struct BackfillStats {
   // Destructive, which clears a tree left by a run that died before its swap,
   // and seeds the new base role onto every task before the backfill merges the
   // old membership on top.
-  if (auto res = Jailer::load(newCfg, policy); !res) {
-    return makeUnexpected(res.error());
+  auto scratchMaps = Jailer::load(newCfg, policy);
+  if (!scratchMaps) {
+    return makeUnexpected(scratchMaps.error());
   }
 
-  if (auto res = VerityEnforcer::load(newCfg, policy); !res) {
+  if (auto res = VerityEnforcer::load(newCfg, policy, *scratchMaps); !res) {
     return makeUnexpected(res.error());
   }
 

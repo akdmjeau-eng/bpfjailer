@@ -28,6 +28,18 @@ void loadJailer(const Policy& policy) {
   ASSERT_OK(Jailer::load(testPins(), policy));
 }
 
+ScratchMapFds loadJailerWithScratchMaps(const Policy& policy) {
+  auto scratchMaps = Jailer::load(testPins(), policy);
+  if (!scratchMaps) {
+    fail(
+        __FILE__,
+        __LINE__,
+        "Jailer::load(testPins(), policy)",
+        "      " + scratchMaps.error().message());
+  }
+  return std::move(*scratchMaps);
+}
+
 bool linkPinned(std::string_view name) {
   return exists(testPins().linkDir() / name);
 }

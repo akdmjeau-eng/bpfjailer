@@ -49,7 +49,7 @@
 #define BPFJ_SCRATCH_LARGE_SIZE 16640
 #define BPFJ_SCRATCH_LARGE_SLOTS 512
 
-// 2048 * 1024 + 512 * 16640 = 10618880, about 10MB against the 1MB this was
+// 2048 * 1024 + 512 * 16640 = 10616832, about 10.6MB against the 1MB this was
 // -- the price of denying on exhaustion, which needs a pool a busy host does
 // not reach the end of.
 #define BPFJ_SCRATCH_BYTES                              \

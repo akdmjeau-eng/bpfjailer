@@ -41,7 +41,7 @@ using bpfjailer::VerityEnforcer;
 using bpfjailer::test::Child;
 using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
-using bpfjailer::test::loadJailer;
+using bpfjailer::test::loadJailerWithScratchMaps;
 using bpfjailer::test::mapPinned;
 using bpfjailer::test::pinnedMapIsEmpty;
 using bpfjailer::test::policyOf;
@@ -56,8 +56,8 @@ constexpr int kRanAndFailed = -1;
 /// @brief Bring up the jailer and the fs-verity enforcer over `yaml`.
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);
-  loadJailer(policy);
-  ASSERT_OK(VerityEnforcer::load(testPins(), policy));
+  auto scratchMaps = loadJailerWithScratchMaps(policy);
+  ASSERT_OK(VerityEnforcer::load(testPins(), policy, scratchMaps));
 }
 
 /// @brief Run `path` in a child and report 0, an exec errno or
@@ -505,8 +505,9 @@ TEST(VerityEnforcer, ASecondTreeDoesNotDisplaceTheFirstsKeyrings) {
   // first out of the shared per-UID user keyring.
   PinConfig second = testPins();
   second.pinDir += "-second";
-  ASSERT_OK(Jailer::load(second, policy));
-  ASSERT_OK(VerityEnforcer::load(second, policy));
+  auto scratchMaps = Jailer::load(second, policy);
+  ASSERT(scratchMaps);
+  ASSERT_OK(VerityEnforcer::load(second, policy, *scratchMaps));
 
   ASSERT(persistKeyringHolds(first));
 
@@ -535,8 +536,9 @@ TEST(VerityEnforcer, ASignedBinaryKeepsRunningAcrossAReplace) {
   const Policy policy = policyOf(signedPolicy(fixture));
 
   ASSERT(inOwnSession([&] {
-    return Jailer::load(testPins(), policy) &&
-        VerityEnforcer::load(testPins(), policy);
+    auto scratchMaps = Jailer::load(testPins(), policy);
+    return scratchMaps &&
+        VerityEnforcer::load(testPins(), policy, *scratchMaps);
   }));
 
   const std::string hello = fixture.path("hello");
@@ -966,18 +968,17 @@ TEST(VerityEnforcer, ASharedObjectNeedsNoSequenceUnderAFloor) {
 
 // The scratch pool the checks above take their buffers from.
 
-TEST(VerityEnforcer, LoadPinsTheScratchPool) {
+TEST(VerityEnforcer, LoadDoesNotPinTheScratchPool) {
   attach("roles:\n  svc:\n");
 
-  // Pinned rather than created per object, so it is one pool for the host.
-  ASSERT(mapPinned("bpfj_scratch_small"));
-  ASSERT(mapPinned("bpfj_scratch_large"));
-  ASSERT(mapPinned("bpfj_scratch_small_claimed"));
-  ASSERT(mapPinned("bpfj_scratch_large_claimed"));
+  ASSERT(!mapPinned("bpfj_scratch_small"));
+  ASSERT(!mapPinned("bpfj_scratch_large"));
+  ASSERT(!mapPinned("bpfj_scratch_small_claimed"));
+  ASSERT(!mapPinned("bpfj_scratch_large_claimed"));
 }
 
-// Comfortably more executions than the pool has slots, so a guard that failed
-// to give a slot back shows up as exhaustion.
+// Comfortably more executions than either pool has slots, so a guard that
+// failed to give a slot back shows up as exhaustion.
 constexpr int kMoreRunsThanSlots = BPFJ_SCRATCH_LARGE_SLOTS * 3 + 4;
 
 TEST(VerityEnforcer, SlotsComeBackAcrossFarMoreRunsThanThePoolHolds) {
