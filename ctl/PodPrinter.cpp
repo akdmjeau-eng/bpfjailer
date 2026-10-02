@@ -6,7 +6,7 @@
 #include <cstring>
 #include <string_view>
 
-#include "bpfj/var/bpf/var.h"
+#include "bpfj/var/bpf/types_var.h"
 
 namespace bpfjailer::ctl {
 
@@ -60,7 +60,7 @@ void printVars(
       os << "<unavailable>\n";
       continue;
     }
-    if (const char* name = bpfj_var_get_name(var); name != nullptr) {
+    if (const char* name = bpfj_var_name_ptr(var); name != nullptr) {
       os << name;
     } else {
       os << "#" << var->id;

@@ -35,7 +35,7 @@
 #include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
-#include "bpfj/var/bpf/var.h"
+#include "bpfj/var/bpf/types_var.h"
 
 namespace bpfjailer {
 
@@ -65,12 +65,12 @@ struct ReplacePodKey {
 [[nodiscard]] Expected<ResolvedPolicyVar> translatedVar(
     const struct bpfj_var* var,
     const struct bpfj_var_catalog* catalog) noexcept {
-  if (var == nullptr || bpfj_var_get_name(var) == nullptr) {
+  if (var == nullptr || bpfj_var_name_ptr(var) == nullptr) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument, "pod variable has no published name"));
   }
 
-  const std::string_view name = bpfj_var_get_name(var);
+  const std::string_view name = bpfj_var_name_ptr(var);
   auto translated = lookupVar(catalog, name);
   if (!translated) {
     return makeUnexpected(makeError(

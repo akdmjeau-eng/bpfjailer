@@ -4,7 +4,7 @@
 
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/heap.h"
-#include "bpfj/var/bpf/var.h"
+#include "bpfj/var/bpf/types_var.h"
 
 // The jail membership maps, shared by every BPF object in the open source
 // jailer. Each including object gets its own definition and the pin is what
