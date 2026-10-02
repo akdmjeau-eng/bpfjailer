@@ -35,6 +35,7 @@
 #include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
+#include "bpfj/var/bpf/var.h"
 
 namespace bpfjailer {
 
@@ -61,54 +62,25 @@ struct ReplacePodKey {
   struct bpfj_pod* oldPod = nullptr;
 };
 
-/// @brief Both trees' variable names, indexed by id, for translateVars().
-struct VarNames {
-  std::vector<std::string> oldNames;
-  std::vector<std::string> newNames;
-};
-
-[[nodiscard]] Expected<VarNames> readBothVarNames(
-    const PinConfig& oldCfg,
-    const PinConfig& newCfg) noexcept {
-  VarNames names;
-  for (auto [cfg, out] :
-       {std::pair{&oldCfg, &names.oldNames},
-        std::pair{&newCfg, &names.newNames}}) {
-    auto varMap = openVarMap(*cfg);
-    if (!varMap) {
-      return makeUnexpected(varMap.error());
-    }
-
-    auto read = readVarNames(*varMap);
-    if (!read) {
-      return makeUnexpected(read.error());
-    }
-    *out = std::move(*read);
-  }
-
-  return names;
-}
-
-[[nodiscard]] Expected<std::uint32_t> translatedVarId(
+[[nodiscard]] Expected<ResolvedPolicyVar> translatedVar(
     const struct bpfj_var* var,
-    const VarNames& names) noexcept {
-  if (var == nullptr || var->id >= names.oldNames.size()) {
+    const struct bpfj_var_catalog* catalog) noexcept {
+  if (var == nullptr || bpfj_var_get_name(var) == nullptr) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument, "pod variable has no published name"));
   }
 
-  const std::string_view name = names.oldNames[var->id];
-  const auto found =
-      std::find(names.newNames.begin(), names.newNames.end(), name);
-  if (name.empty() || found == names.newNames.end()) {
+  const std::string_view name = bpfj_var_get_name(var);
+  auto translated = lookupVar(catalog, name);
+  if (!translated) {
     return makeUnexpected(makeError(
-        std::errc::invalid_argument,
+        translated.error().code(),
         "pod carries variable '",
         name,
         "', which the new policy does not declare in vars"));
   }
 
-  return static_cast<__u32>(found - names.newNames.begin());
+  return translated;
 }
 
 [[nodiscard]] Expected<Fd> openPidFd(pid_t pid) noexcept {
@@ -163,7 +135,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 [[nodiscard]] Expected<struct bpfj_pod*> translatePod(
     const bpfj_pod& src,
     PodArena& newArena,
-    const VarNames& names) noexcept {
+    const struct bpfj_var_catalog* catalog) noexcept {
   const auto count = std::min<std::size_t>(src.var_array.count, BPFJ_VAR_MAX);
   std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
   blobSize += bpfj_var_align_up(sizeof(struct bpfj_var) * count);
@@ -199,23 +171,24 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto* oldVar = bpfj_var_array_at(&src.var_array, i);
-    auto newId = translatedVarId(oldVar, names);
-    if (!newId) {
+    auto translated = translatedVar(oldVar, catalog);
+    if (!translated) {
       (void)newArena.free(*blob);
       return makeUnexpected(makeError(
-          newId.error().code(),
+          translated.error().code(),
           "pod ",
           uuidToString(src.uuid),
           ": ",
-          newId.error().message()));
+          translated.error().message()));
     }
 
     const std::uint32_t payloadSize = bpfj_var_payload_size(oldVar);
     outVars[i] = {
-        .id = *newId,
+        .id = translated->id,
         .type = oldVar->type,
         .size = oldVar->size,
         .reserved = oldVar->reserved,
+        .name = translated->name,
         .val = static_cast<unsigned char*>(*blob) + valueOff,
     };
     std::memcpy(outVars[i].val, bpfj_var_value_ptr(oldVar), payloadSize);
@@ -241,9 +214,6 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
     return makeUnexpected(oldTaskMap.error());
   }
 
-  // Read only once a pod carries a variable, so a tree with none replaces
-  // without either var map.
-  std::optional<VarNames> varNames;
   auto oldArena = PodArena::open(oldCfg);
   if (!oldArena) {
     return makeUnexpected(oldArena.error());
@@ -259,6 +229,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       (void)newArena->free(pod);
     }
   });
+  std::optional<const struct bpfj_var_catalog*> newCatalog;
 
   std::set<std::uintptr_t> seen;
   auto pids = runningPids();
@@ -288,16 +259,16 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
         continue;
       }
 
-      if (pod->var_array.count != 0 && !varNames) {
-        auto read = readBothVarNames(oldCfg, newCfg);
+      if (pod->var_array.count != 0 && !newCatalog) {
+        auto read = readVarCatalog(newCfg, *newArena);
         if (!read) {
           return makeUnexpected(read.error());
         }
-        varNames = std::move(*read);
+        newCatalog = *read;
       }
 
       auto translated =
-          translatePod(*pod, *newArena, varNames ? *varNames : VarNames{});
+          translatePod(*pod, *newArena, newCatalog ? *newCatalog : nullptr);
       if (!translated) {
         return makeUnexpected(translated.error());
       }
@@ -631,8 +602,8 @@ struct BackfillStats {
   }
 
   // Filled before anything reads them: an enrollment naming a variable
-  // resolves it against the var map, and bpfjsrv refuses a role missing from
-  // the other.
+  // resolves it against this allowlist catalog, and bpfjsrv refuses a role
+  // missing from the other.
   if (auto res = publishVarNames(newCfg, policy.vars); !res) {
     return makeUnexpected(res.error());
   }

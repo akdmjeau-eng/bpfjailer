@@ -121,7 +121,7 @@ struct bpfj_pid_data {
   _Static_assert(condition, "pod layout is shared through pinned jail maps")
 #endif
 
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 16);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 24);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 328);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 48);

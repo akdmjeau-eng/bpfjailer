@@ -12,23 +12,18 @@
 
 #include "bpfj/lib/bpf/types_heap.h"
 
-#define BPFJ_VAR_NAME_LEN 16
 // Sized for a canonical 36-character UUID plus the NUL. In the open source
 // tree values live out of line in the arena, so widening this no longer grows
 // bpfj_pod; the glob NFA gadget width deliberately does not track it, a
 // 39-wide gadget having pushed fs2_enforce over the 6.13 verifier limit.
 #define BPFJ_VAR_VAL_LEN 40
 #define BPFJ_VAR_MAX 4
-#define BPFJ_VAR_MAP_SIZE 16
+// Variable ids are 1-based, so slot 0 remains "no variable".
+#define BPFJ_VAR_ID_SLOTS 16
 
 struct vsock_address {
   __u32 cid;
   __u32 port;
-};
-
-// Name of the variable
-struct bpfj_var_name {
-  char name[BPFJ_VAR_NAME_LEN];
 };
 
 // Type of the variable
@@ -36,6 +31,14 @@ enum bpfj_var_type {
   BPFJ_VAR_TYPE_UNKNOWN = 0,
   BPFJ_VAR_TYPE_STR = 1,
   BPFJ_VAR_TYPE_VSOCK_ADDR = 2,
+};
+
+// The running jail's variable allowlist, shared through the arena and named by
+// a pinned singleton map entry. ids stay 1-based, so names[0] is always NULL.
+struct bpfj_var_catalog {
+  __u32 count;
+  __u32 reserved;
+  const char __arena* names[BPFJ_VAR_ID_SLOTS];
 };
 
 // A variable set to a value
@@ -47,6 +50,8 @@ struct bpfj_var {
   // Size of the value
   __u8 size;
   __u16 reserved;
+  // Shared allowlist string for this variable's name.
+  const char __arena* name;
   // Value bytes for this variable, stored in the shared arena.
   void __arena* val;
 };
@@ -95,6 +100,14 @@ static inline const void __arena* bpfj_var_value_ptr(
     return NULL;
   }
   return var->val;
+}
+
+static inline const char __arena* bpfj_var_name_ptr(
+    const struct bpfj_var* var) {
+  if (var == NULL) {
+    return NULL;
+  }
+  return var->name;
 }
 
 // Get a variable value as a string

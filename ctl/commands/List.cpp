@@ -64,16 +64,10 @@ int listRun(int argc, char** argv) {
     return 1;
   }
 
-  const auto varNames = jailVarNames(cfg);
   auto arena = PodArena::open(cfg);
   std::cout << members->size() << " pod(s)" << std::endl;
   for (const auto& member : *members) {
-    printPod(
-        std::cout,
-        member.pod,
-        *nowNs,
-        varNames,
-        arena ? arena->base() : nullptr);
+    printPod(std::cout, member.pod, *nowNs, arena ? arena->base() : nullptr);
     printPids(member.pids);
   }
 

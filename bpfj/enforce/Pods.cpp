@@ -40,6 +40,7 @@ struct ActiveEnroll {
 
 struct ResolvedPodVar {
   std::uint32_t id = 0;
+  const char* name = nullptr;
   std::string_view value;
 };
 
@@ -207,7 +208,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 /// is refused whole.
 [[nodiscard]] Expected<std::vector<ResolvedPodVar>> resolveVars(
     std::span<const PodVar> vars,
-    const Fd& varMap) noexcept {
+    const struct bpfj_var_catalog* catalog) noexcept {
   if (vars.size() > BPFJ_VAR_MAX) {
     return makeUnexpected(makeError(
         std::errc::value_too_large,
@@ -220,13 +221,13 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   std::vector<ResolvedPodVar> resolved;
   resolved.reserve(vars.size());
   for (const PodVar& var : vars) {
-    auto id = lookupVarId(varMap, var.name);
-    if (!id) {
-      return makeUnexpected(id.error());
+    auto policyVar = lookupVar(catalog, var.name);
+    if (!policyVar) {
+      return makeUnexpected(policyVar.error());
     }
 
     for (const auto& existing : resolved) {
-      if (existing.id == *id) {
+      if (existing.id == policyVar->id) {
         return makeUnexpected(makeError(
             std::errc::invalid_argument,
             "variable ",
@@ -247,7 +248,12 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
           " characters"));
     }
 
-    resolved.push_back(ResolvedPodVar{.id = *id, .value = var.value});
+    resolved.push_back(
+        ResolvedPodVar{
+            .id = policyVar->id,
+            .name = policyVar->name,
+            .value = var.value,
+        });
   }
 
   return resolved;
@@ -318,6 +324,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
         .type = BPFJ_VAR_TYPE_STR,
         .size = static_cast<__u8>(var.value.size()),
         .reserved = 0,
+        .name = var.name,
         .val = static_cast<unsigned char*>(*blob) + valueOff,
     };
 
@@ -434,12 +441,12 @@ Expected<bpfj_uuid> enrollPod(
 
   std::vector<ResolvedPodVar> resolved;
   if (!vars.empty()) {
-    auto varMap = openVarMap(cfg);
-    if (!varMap) {
-      return makeUnexpected(varMap.error());
+    auto catalog = readVarCatalog(cfg, arena);
+    if (!catalog) {
+      return makeUnexpected(catalog.error());
     }
 
-    auto read = resolveVars(vars, *varMap);
+    auto read = resolveVars(vars, *catalog);
     if (!read) {
       return makeUnexpected(read.error());
     }

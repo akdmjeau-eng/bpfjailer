@@ -18,7 +18,7 @@ namespace bpfjailer {
 
 namespace {
 
-constexpr std::string_view kVarMap = "bpfj_var_map";
+constexpr std::string_view kVarCatalogMap = "bpfj_var_catalog_map";
 constexpr std::string_view kArenaMap = "bpfj_heap_arena";
 
 std::mutex& openMutex() noexcept {
@@ -38,8 +38,28 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
 
 } // namespace
 
-Expected<Fd> openVarMap(const PinConfig& cfg) noexcept {
-  return pins::openPinnedMap(cfg, kVarMap);
+[[nodiscard]] Expected<Fd> openVarCatalogMap(const PinConfig& cfg) noexcept {
+  return pins::openPinnedMap(cfg, kVarCatalogMap);
+}
+
+[[nodiscard]] std::uint32_t varCatalogAllocSize(
+    std::span<const std::string> names) noexcept {
+  std::uint32_t size = bpfj_var_align_up(sizeof(struct bpfj_var_catalog));
+  for (const auto& name : names) {
+    size += bpfj_var_align_up(static_cast<__u32>(name.size()) + 1);
+  }
+  return size;
+}
+
+[[nodiscard]] Expected<const struct bpfj_var_catalog*> readVarCatalogPointer(
+    const Fd& catalogMap) noexcept {
+  const std::uint32_t slot = 0;
+  struct bpfj_var_catalog* catalog = nullptr;
+  if (::bpf_map_lookup_elem(catalogMap.get(), &slot, &catalog) != 0) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read the running jail's variable catalog pointer"));
+  }
+  return catalog;
 }
 
 Expected<> publishVarNames(
@@ -47,80 +67,102 @@ Expected<> publishVarNames(
     std::span<const std::string> names) noexcept {
   // Slot 0 means "no name", so the names need one more slot than there are
   // names.
-  if (names.size() + 1 > BPFJ_VAR_MAP_SIZE) {
+  if (names.size() + 1 > BPFJ_VAR_ID_SLOTS) {
     return makeUnexpected(makeError(
         std::errc::value_too_large,
         "a policy may declare at most ",
-        std::to_string(BPFJ_VAR_MAP_SIZE - 1),
+        std::to_string(BPFJ_VAR_ID_SLOTS - 1),
         " vars, got ",
         std::to_string(names.size())));
   }
 
-  auto varMap = openVarMap(cfg);
-  if (!varMap) {
-    return makeUnexpected(varMap.error());
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
 
-  for (std::uint32_t i = 0; i < names.size(); ++i) {
-    const std::string_view name = names[i];
-    if (name.size() >= BPFJ_VAR_NAME_LEN) {
-      return makeUnexpected(makeError(
-          std::errc::value_too_large,
-          "variable name ",
-          name,
-          " must be at most ",
-          std::to_string(BPFJ_VAR_NAME_LEN - 1),
-          " characters"));
+  auto catalogMap = openVarCatalogMap(cfg);
+  if (!catalogMap) {
+    return makeUnexpected(catalogMap.error());
+  }
+
+  auto oldCatalog = readVarCatalogPointer(*catalogMap);
+  if (!oldCatalog) {
+    return makeUnexpected(oldCatalog.error());
+  }
+
+  struct bpfj_var_catalog* published = nullptr;
+  if (!names.empty()) {
+    auto blob = arena->alloc(varCatalogAllocSize(names));
+    if (!blob) {
+      return makeUnexpected(blob.error());
     }
 
-    bpfj_var_name entry{};
-    std::memcpy(entry.name, name.data(), name.size());
+    auto* catalog = static_cast<struct bpfj_var_catalog*>(*blob);
+    *catalog = {};
+    catalog->count = static_cast<__u32>(names.size());
 
-    const std::uint32_t id = i + 1;
-    if (::bpf_map_update_elem(varMap->get(), &id, &entry, BPF_ANY) != 0) {
-      return makeUnexpected(
-          makeErrnoError("failed to publish variable name ", name));
+    std::uint32_t nameOff = bpfj_var_align_up(sizeof(struct bpfj_var_catalog));
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      const auto& name = names[i];
+      auto* stored = static_cast<char*>(*blob) + nameOff;
+      std::memcpy(stored, name.data(), name.size());
+      stored[name.size()] = '\0';
+      catalog->names[i + 1] = stored;
+      nameOff += bpfj_var_align_up(static_cast<__u32>(name.size()) + 1);
     }
+
+    published = catalog;
+  }
+
+  const std::uint32_t slot = 0;
+  if (::bpf_map_update_elem(catalogMap->get(), &slot, &published, BPF_ANY) !=
+      0) {
+    if (published != nullptr) {
+      (void)arena->free(published);
+    }
+    return makeUnexpected(
+        makeErrnoError("failed to publish variable allowlist catalog"));
+  }
+
+  if (*oldCatalog != nullptr) {
+    (void)arena->free(const_cast<struct bpfj_var_catalog*>(*oldCatalog));
   }
 
   return unit;
 }
 
-Expected<std::vector<std::string>> readVarNames(const Fd& varMap) noexcept {
-  std::vector<std::string> names(BPFJ_VAR_MAP_SIZE);
-  for (std::uint32_t id = 1; id < BPFJ_VAR_MAP_SIZE; ++id) {
-    bpfj_var_name entry{};
-    if (::bpf_map_lookup_elem(varMap.get(), &id, &entry) != 0) {
-      return makeUnexpected(makeErrnoError(
-          "failed to read the name of variable ", std::to_string(id)));
-    }
-
-    names[id].assign(entry.name, ::strnlen(entry.name, BPFJ_VAR_NAME_LEN));
+Expected<const struct bpfj_var_catalog*> readVarCatalog(
+    const PinConfig& cfg,
+    const PodArena& arena) noexcept {
+  if (!arena.valid()) {
+    return makeUnexpected(makeError(
+        std::errc::bad_address, "variable catalog read needs an open arena"));
   }
 
-  return names;
+  auto catalogMap = openVarCatalogMap(cfg);
+  if (!catalogMap) {
+    return makeUnexpected(catalogMap.error());
+  }
+
+  return readVarCatalogPointer(*catalogMap);
 }
 
-Expected<std::uint32_t> lookupVarId(
-    const Fd& varMap,
+Expected<ResolvedPolicyVar> lookupVar(
+    const struct bpfj_var_catalog* catalog,
     std::string_view name) noexcept {
   if (name.empty()) {
     return makeUnexpected(
         makeError(std::errc::invalid_argument, "a variable name is empty"));
   }
 
-  // bpfj_var_map is an array, so every slot reads back whether or not anything
-  // was ever published to it, and an empty name is what an unused one holds.
-  for (std::uint32_t id = 1; id < BPFJ_VAR_MAP_SIZE; ++id) {
-    bpfj_var_name entry{};
-    if (::bpf_map_lookup_elem(varMap.get(), &id, &entry) != 0) {
-      continue;
-    }
-
-    const std::string_view published(
-        entry.name, ::strnlen(entry.name, BPFJ_VAR_NAME_LEN));
-    if (!published.empty() && published == name) {
-      return id;
+  const std::uint32_t count = catalog == nullptr
+      ? 0
+      : std::min<std::uint32_t>(catalog->count, BPFJ_VAR_ID_SLOTS - 1);
+  for (std::uint32_t id = 1; id <= count; ++id) {
+    const char* published = catalog->names[id];
+    if (published != nullptr && std::string_view(published) == name) {
+      return ResolvedPolicyVar{.id = id, .name = published};
     }
   }
 

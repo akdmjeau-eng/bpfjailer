@@ -6,7 +6,7 @@
 #include <cstring>
 #include <string_view>
 
-#include "bpfj/enforce/PodVars.h"
+#include "bpfj/var/bpf/var.h"
 
 namespace bpfjailer::ctl {
 
@@ -51,7 +51,6 @@ std::string_view boundedId(const char* id, std::size_t size) {
 void printVars(
     std::ostream& os,
     const bpfj_var_array& vars,
-    std::span<const std::string> names,
     const void* arenaBase) {
   const auto count = std::min<std::size_t>(vars.count, BPFJ_VAR_MAX);
   for (std::size_t i = 0; i < count; ++i) {
@@ -61,8 +60,8 @@ void printVars(
       os << "<unavailable>\n";
       continue;
     }
-    if (var->id < names.size() && !names[var->id].empty()) {
-      os << names[var->id];
+    if (const char* name = bpfj_var_get_name(var); name != nullptr) {
+      os << name;
     } else {
       os << "#" << var->id;
     }
@@ -80,21 +79,10 @@ void printVars(
 
 } // namespace
 
-std::vector<std::string> jailVarNames(const PinConfig& cfg) noexcept {
-  auto varMap = openVarMap(cfg);
-  if (!varMap) {
-    return {};
-  }
-
-  auto names = readVarNames(*varMap);
-  return names ? std::move(*names) : std::vector<std::string>{};
-}
-
 void printPod(
     std::ostream& os,
     const bpfj_pod& pod,
     std::int64_t nowNs,
-    std::span<const std::string> varNames,
     const void* arenaBase) {
   os << "  pod " << uuidToString(pod.uuid) << "\n"
      << "    role:    " << boundedId(pod.role_id.id, ROLE_ID_LEN) << "\n"
@@ -103,7 +91,7 @@ void printPod(
      << "    refs:    " << pod.refs << "\n"
      << "    age:     " << (nowNs - pod.creation_time_ns) / 1'000'000'000
      << "s\n";
-  printVars(os, pod.var_array, varNames, arenaBase);
+  printVars(os, pod.var_array, arenaBase);
 }
 
 } // namespace bpfjailer::ctl

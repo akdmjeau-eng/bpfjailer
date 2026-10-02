@@ -73,13 +73,23 @@ struct {
   __uint(max_entries, 1);
 } bpfj_event_map SEC(".maps");
 
-// bpfj_var_map comes in from bpfj/var/bpf/var.h above, and bpfj_heap_arena /
-// bpfj_heap_ctrl from bpfj/lib/bpf/heap.h. A bpfj_var carries a numeric id and
-// a shared-arena pointer rather than its name and inline value bytes, so pod
-// variables only mean anything next to those two objects.
+// bpfj_heap_arena / bpfj_heap_ctrl come from bpfj/lib/bpf/heap.h. The var
+// allowlist itself lives as one arena-backed blob, and this singleton map just
+// names that blob for userspace processes reopening the jail later.
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, struct bpfj_var_catalog __arena*);
+} bpfj_var_catalog_map SEC(".maps");
 
-// A pod is owned by the task-map entries that name it, one reference per uuid,
-// so it outlives its enroller for as long as some descendant is still jailed.
+// A bpfj_var carries a numeric id and direct pointers to its shared name and
+// value rather than inline bytes, so pod variables only mean anything next to
+// the arena.
+
+// A pod is owned by the task-map entries that name it, one reference per pod
+// pointer, so it outlives its enroller for as long as some descendant is still
+// jailed.
 // Nothing else removes a pod, and several CPUs write the counter at once.
 
 static __always_inline void bpfj_pod_refs_inc(struct bpfj_pod __arena* pod) {

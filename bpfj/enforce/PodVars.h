@@ -8,13 +8,15 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "bpfj/enforce/Pins.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/lib/Fd.h"
+#include "bpfj/var/bpf/types_var.h"
 
 namespace bpfjailer {
+
+class PodArena;
 
 /// @brief A pod variable as a caller spells it, before its id is resolved.
 struct PodVar {
@@ -22,31 +24,29 @@ struct PodVar {
   std::string value;
 };
 
-/// @brief Open the pinned bpfj_var_map.
-[[nodiscard]] Expected<Fd> openVarMap(const PinConfig& cfg) noexcept;
+/// @brief A policy variable resolved against the running jail's allowlist.
+struct ResolvedPolicyVar {
+  std::uint32_t id = 0;
+  const char* name = nullptr;
+};
 
-/// @brief Publish the policy's `vars` into the pinned bpfj_var_map. A name's id
-/// is its 1-based position in `names`, so an unused slot reads back as the
-/// empty name. The published list is the whole allowlist: an enrollment that
-/// names anything else fails to resolve. A bpfj_var carries the id, not the
-/// name, and this map lets processes that never talk to each other agree on
-/// what id 1 means. bpfjsrv is a fresh process for each connection. Ids are
-/// positions, so a different policy can renumber them. A replace therefore
-/// translates ids by name (see readVarNames()).
+/// @brief Publish the policy's `vars` as one arena-backed allowlist blob and
+/// point the running jail's pinned locator map at it. A name's id is its
+/// 1-based position in `names`, so an enrollment naming anything else fails.
 [[nodiscard]] Expected<> publishVarNames(
     const PinConfig& cfg,
     std::span<const std::string> names) noexcept;
 
-/// @brief Every name in `varMap`, indexed by id. An unused id reads back
-/// empty.
-[[nodiscard]] Expected<std::vector<std::string>> readVarNames(
-    const Fd& varMap) noexcept;
+/// @brief The running jail's shared variable allowlist, or null when the
+/// policy published no variables.
+[[nodiscard]] Expected<const struct bpfj_var_catalog*> readVarCatalog(
+    const PinConfig& cfg,
+    const PodArena& arena) noexcept;
 
-/// @brief The id `name` was published under in `varMap`, read back from the
-/// map so the answer is the running jail's rather than whatever policy this
-/// binary last saw.
-[[nodiscard]] Expected<std::uint32_t> lookupVarId(
-    const Fd& varMap,
+/// @brief The id and shared name pointer `name` was published under in
+/// `catalog`.
+[[nodiscard]] Expected<ResolvedPolicyVar> lookupVar(
+    const struct bpfj_var_catalog* catalog,
     std::string_view name) noexcept;
 
 /// @brief mmap of the jail's pinned arena map, at the fixed slot its map_extra
