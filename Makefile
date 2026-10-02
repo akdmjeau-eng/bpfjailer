@@ -631,7 +631,7 @@ $(TEST_BIN): $(COMMON_OBJS) $(TEST_OBJS) $(LINKMODE)
 # other means, or SUDO="sudo -n" to fail rather than prompt.
 SUDO ?= $(if $(filter 0,$(shell id -u)),,sudo)
 
-test: $(TEST_BIN)
+test: $(TEST_BIN) $(LOG_BIN)
 	$(SUDO) $(TEST_BIN)
 
 signed:
