@@ -202,6 +202,7 @@ COMMON_SRCS := \
 	bpfj/fsverity/FsVerityFile.cpp \
 	bpfj/fsverity/Keyring.cpp \
 	bpfj/policy/Policy.cpp \
+	bpfj/enforce/ArenaMap.cpp \
 	bpfj/enforce/PodVars.cpp \
 	bpfj/enforce/UnprivRoles.cpp \
 	bpfj/enforce/EnrollGate.cpp \

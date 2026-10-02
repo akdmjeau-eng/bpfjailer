@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,5 +48,38 @@ struct PodVar {
 [[nodiscard]] Expected<std::uint32_t> lookupVarId(
     const Fd& varMap,
     std::string_view name) noexcept;
+
+/// @brief mmap of the jail's pinned arena map, at the fixed slot its map_extra
+/// records, for the pod-owned flat var blobs stored by offset in bpfj_pod.
+class PodArena {
+ public:
+  PodArena() noexcept = default;
+  ~PodArena() noexcept;
+
+  PodArena(const PodArena&) = delete;
+  PodArena& operator=(const PodArena&) = delete;
+  PodArena(PodArena&& other) noexcept;
+  PodArena& operator=(PodArena&& other) noexcept;
+
+  [[nodiscard]] static Expected<PodArena> open(const PinConfig& cfg) noexcept;
+
+  [[nodiscard]] void* base() const noexcept {
+    return base_;
+  }
+
+  [[nodiscard]] bool valid() const noexcept {
+    return base_ != nullptr;
+  }
+
+  [[nodiscard]] Expected<std::uint32_t> alloc(std::uint32_t size) noexcept;
+  [[nodiscard]] Expected<> free(std::uint32_t offset) noexcept;
+
+ private:
+  void reset() noexcept;
+
+  std::shared_ptr<void> owner_;
+  void* base_ = nullptr;
+  std::uint64_t mapExtra_ = 0;
+};
 
 } // namespace bpfjailer

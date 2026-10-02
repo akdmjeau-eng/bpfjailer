@@ -9,6 +9,7 @@
 
 #include <array>
 
+#include "bpfj/enforce/ArenaMap.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 
 namespace bpfjailer {
@@ -18,11 +19,13 @@ namespace {
 namespace fs = std::filesystem;
 
 // The jail membership every BPF object declares: the per-task membership, the
-// pods it names, the variable names those pods' variables are identified by,
-// and the roles policy opens to unprivileged callers.
-constexpr std::array<std::string_view, 9> kSharedMapNames = {
+// pods it names, the arena their variable payloads live in, the variable names
+// those payloads are identified by, the roles policy opens to unprivileged
+// callers, and the shared event/log ring buffers.
+constexpr std::array<std::string_view, 10> kSharedMapNames = {
     "bpfj_task_map",
     "bpfj_pod_map",
+    "bpfj_heap_arena",
     "bpfj_var_map",
     "bpfj_unpriv_enroll_map",
     "bpfj_pod_override_map",
@@ -54,7 +57,10 @@ constexpr std::uint32_t kBpfEventMapEntries = 512 * 4096;
 constexpr std::uint32_t kBpfLogMapEntries = 64 * 4096;
 
 [[nodiscard]] bool isOptionalSharedMap(std::string_view name) noexcept {
-  return name == "bpfj_log_map";
+  // Programs that neither allocate arena state nor emit BPF logs do not
+  // declare these maps. They still share the maps when present, but absence
+  // must not make pinning an otherwise independent enforcer fail.
+  return name == "bpfj_heap_arena" || name == "bpfj_log_map";
 }
 
 // 0700 because the tree exposes the jail membership of every task on the host.
@@ -170,6 +176,10 @@ Expected<Fd> openPinnedMap(
 Expected<> pinSharedMaps(
     bpfj::libbpf::BpfSkelBase& skel,
     const fs::path& mapDir) noexcept {
+  if (auto res = arena::prepareMap(skel, mapDir); !res) {
+    return res;
+  }
+
   for (const auto& name : kSharedMapNames) {
     const auto maxEntries = name == "bpfj_pod_map"
         ? std::optional<std::uint32_t>(kMaxPods)
