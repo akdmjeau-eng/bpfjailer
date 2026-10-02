@@ -86,8 +86,12 @@ TEST(Ctl, AttachPinsTheMapsAndLinks) {
   ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_event_map"));
   ASSERT(exists(pinRoot() + "/maps/bpfj_log_map"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_mq_sysv_owners"));
+  ASSERT(exists(pinRoot() + "/maps/bpfj_mq_posix_owners"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_exec"));
+  ASSERT(exists(pinRoot() + "/links/bpfj_mq_sysv_send"));
+  ASSERT(exists(pinRoot() + "/links/bpfj_mq_posix_open"));
 }
 
 TEST(Ctl, AttachNeedsAPolicyPath) {
@@ -198,14 +202,16 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   ASSERT_EQ(ctl({"replace", "/dev/null"}).status, 0);
 
   // A replace bringing up only the jailer and the verity enforcer would leave
-  // bpf(2), signals, ptrace and kernel loading ungated while still looking
-  // attached.
+  // bpf(2), signals, ptrace, kernel loading and message queues ungated while
+  // still looking attached.
   for (const auto* link :
        {"bpfj_jailer_fork",
         "bpfj_verity_bprm_check",
         "bpfj_kill_check",
         "bpfj_ptrace_check",
         "bpfj_kernel_load_data",
+        "bpfj_mq_sysv_send",
+        "bpfj_mq_posix_open",
         "bpfj_bpf_syscall",
         "bpfj_bpf_map_check"}) {
     ASSERT(exists(pinRoot() + "/links/" + link));
@@ -215,6 +221,8 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
        {"bpfj_kill_roles",
         "bpfj_ptrace_roles",
         "bpfj_no_lkm_roles",
+        "bpfj_mq_sysv_owners",
+        "bpfj_mq_posix_owners",
         "bpfj_bpf_syscall_roles",
         "bpfj_bpf_map_owners"}) {
     ASSERT(exists(pinRoot() + "/maps/" + map));
@@ -474,6 +482,38 @@ TEST(Ctl, CheckRejectsANoLkmThatIsNotABoolean) {
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("neither true nor false"));
+}
+
+TEST(Ctl, CheckAcceptsIndependentMessageQueuePolicies) {
+  const std::string policy = writePolicy(
+      "roles:\n"
+      "  owner:\n"
+      "  client:\n"
+      "    mq-sysv:\n"
+      "      - owner\n"
+      "    mq-posix:\n"
+      "    no-mq-posix: false\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 0);
+}
+
+TEST(Ctl, CheckRejectsMessageQueueListAndOutrightDenialTogether) {
+  const std::string policy =
+      writePolicy("roles:\n  muddled:\n    mq-sysv:\n    no-mq-sysv: true\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict"));
+}
+
+TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
+  const std::string policy =
+      writePolicy("roles:\n  client:\n    mq-posix:\n      - missing\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("which is not in roles"));
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatIsNotAnInteger) {

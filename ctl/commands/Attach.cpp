@@ -10,6 +10,7 @@
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/LkmEnforcer.h"
+#include "bpfj/enforce/MqEnforcer.h"
 #include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
 #include "bpfj/enforce/UnprivRoles.h"
@@ -84,6 +85,12 @@ int attachPolicy(
 
   if (auto res = LkmEnforcer::load(pin, policy); !res) {
     std::cerr << "LKM enforcer load failed: " << res.error() << std::endl;
+    return 1;
+  }
+
+  if (auto res = MqEnforcer::load(pin, policy); !res) {
+    std::cerr << "message-queue enforcer load failed: " << res.error()
+              << std::endl;
     return 1;
   }
 

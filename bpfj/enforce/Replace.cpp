@@ -24,6 +24,7 @@
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/LkmEnforcer.h"
+#include "bpfj/enforce/MqEnforcer.h"
 #include "bpfj/enforce/PodVars.h"
 // For bpfj_pod and bpfj_uuid: Pods.h is where C++ pulls the shared ABI header
 // in, with the pedantic warning silenced around it.
@@ -51,6 +52,10 @@ constexpr std::string_view kActiveEnrollsMap = "bpfj_active_enrolls";
 constexpr std::string_view kMapOwners = "bpfj_bpf_map_owners";
 constexpr std::string_view kProgOwners = "bpfj_bpf_prog_owners";
 constexpr std::string_view kOwnerVersion = "bpfj_bpf_owner_version";
+constexpr std::string_view kMqSysvOwners = "bpfj_mq_sysv_owners";
+constexpr std::string_view kMqPosixOwners = "bpfj_mq_posix_owners";
+constexpr std::string_view kMqSysvOwnerVersion = "bpfj_mq_sysv_owner_version";
+constexpr std::string_view kMqPosixOwnerVersion = "bpfj_mq_posix_owner_version";
 
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
@@ -407,6 +412,116 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   return copied;
 }
 
+[[nodiscard]] bool hasPinnedMap(
+    const PinConfig& cfg,
+    std::string_view name) noexcept {
+  std::error_code ec;
+  return fs::exists(fs::path(cfg.mapPath(name)), ec);
+}
+
+[[nodiscard]] Expected<> checkMqOwnerVersion(
+    const PinConfig& cfg,
+    std::string_view owners,
+    std::string_view versionMap,
+    std::string_view kind) noexcept {
+  if (!hasPinnedMap(cfg, owners)) {
+    return unit;
+  }
+
+  auto map = pins::openPinnedMap(cfg, versionMap);
+  if (!map) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer records ",
+        kind,
+        " message-queue ownership without a layout version; detach and "
+        "attach to upgrade"));
+  }
+
+  const std::uint32_t slot = 0;
+  std::uint32_t version = 0;
+  if (::bpf_map_lookup_elem(map->get(), &slot, &version) != 0) {
+    return makeUnexpected(makeErrnoError(
+        "failed to read the ", kind, " message-queue ownership version"));
+  }
+  if (version != BPFJ_MQ_OWNER_VERSION) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer records ",
+        kind,
+        " message-queue ownership in layout v",
+        std::to_string(version),
+        ", and this build reads v",
+        std::to_string(BPFJ_MQ_OWNER_VERSION),
+        "; detach and attach to upgrade"));
+  }
+  return unit;
+}
+
+/// Copy a map without baking its key shape into replacement. This is used for
+/// both the pointer-keyed System V map and the (device,inode)-keyed POSIX map.
+[[nodiscard]] Expected<std::size_t>
+copyRawMap(int from, int to, std::string_view what) noexcept {
+  struct bpf_map_info info{};
+  std::uint32_t infoSize = sizeof(info);
+  if (::bpf_obj_get_info_by_fd(from, &info, &infoSize) != 0) {
+    return makeUnexpected(makeErrnoError("failed to inspect ", what));
+  }
+
+  std::vector<unsigned char> current(info.key_size);
+  std::vector<unsigned char> next(info.key_size);
+  std::vector<unsigned char> value(info.value_size);
+  std::set<std::vector<unsigned char>> seen;
+  const void* cursor = nullptr;
+  std::size_t copied = 0;
+  const std::size_t maxAttempts =
+      static_cast<std::size_t>(info.max_entries) * 2 + 1;
+  for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+    if (::bpf_map_get_next_key(from, cursor, next.data()) != 0) {
+      return copied;
+    }
+    const bool firstVisit = seen.insert(next).second;
+    if (firstVisit &&
+        ::bpf_map_lookup_elem(from, next.data(), value.data()) == 0) {
+      if (::bpf_map_update_elem(to, next.data(), value.data(), BPF_ANY) != 0) {
+        return makeUnexpected(makeErrnoError("failed to copy ", what));
+      }
+      ++copied;
+    }
+    current = next;
+    cursor = current.data();
+  }
+  return makeUnexpected(makeError(
+      std::errc::resource_unavailable_try_again,
+      what,
+      " kept changing while it was copied"));
+}
+
+[[nodiscard]] Expected<std::size_t> copyMqOwners(
+    const PinConfig& oldCfg,
+    const PinConfig& newCfg) noexcept {
+  std::size_t copied = 0;
+  for (const auto name : {kMqSysvOwners, kMqPosixOwners}) {
+    if (!hasPinnedMap(oldCfg, name)) {
+      continue;
+    }
+    auto from = pins::openPinnedMap(oldCfg, name);
+    auto to = pins::openPinnedMap(newCfg, name);
+    if (!from) {
+      return makeUnexpected(from.error());
+    }
+    if (!to) {
+      return makeUnexpected(to.error());
+    }
+    auto one = copyRawMap(from->get(), to->get(), name);
+    if (!one) {
+      return makeUnexpected(one.error());
+    }
+    copied += *one;
+  }
+  return copied;
+}
+
 /// @brief Read one of the iterator's single-slot counters.
 [[nodiscard]] Expected<std::size_t> readCounter(
     struct bpf_map* map,
@@ -575,6 +690,16 @@ struct BackfillStats {
     if (auto res = checkOwnerVersion(cfg); !res) {
       return makeUnexpected(res.error());
     }
+    if (auto res = checkMqOwnerVersion(
+            cfg, kMqSysvOwners, kMqSysvOwnerVersion, "System V");
+        !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = checkMqOwnerVersion(
+            cfg, kMqPosixOwners, kMqPosixOwnerVersion, "POSIX");
+        !res) {
+      return makeUnexpected(res.error());
+    }
   }
 
   // Destructive, which clears a tree left by a run that died before its swap,
@@ -597,6 +722,10 @@ struct BackfillStats {
   }
 
   if (auto res = LkmEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = MqEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 
@@ -645,6 +774,12 @@ struct BackfillStats {
       return makeUnexpected(owners.error());
     }
     stats.owners = *owners;
+
+    auto mqOwners = copyMqOwners(cfg, newCfg);
+    if (!mqOwners) {
+      return makeUnexpected(mqOwners.error());
+    }
+    stats.owners += *mqOwners;
 
     // Detaches the old programs, with the new ones held by newCfg's pins until
     // the rename below so no window has no jailer attached. Through unload()

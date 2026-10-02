@@ -26,6 +26,10 @@ constexpr std::string_view kEnforceBinaryCerts = "enforce-binary-certs";
 constexpr std::string_view kBpf = "bpf";
 constexpr std::string_view kNoBpf = "no-bpf";
 constexpr std::string_view kNoLkm = "no-lkm";
+constexpr std::string_view kMqSysv = "mq-sysv";
+constexpr std::string_view kNoMqSysv = "no-mq-sysv";
+constexpr std::string_view kMqPosix = "mq-posix";
+constexpr std::string_view kNoMqPosix = "no-mq-posix";
 constexpr std::string_view kKill = "kill";
 constexpr std::string_view kNoKill = "no-kill";
 constexpr std::string_view kPtrace = "ptrace";
@@ -421,6 +425,57 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         policy.noLkm = *denied;
       }
 
+      const auto parseMq = [&](std::string_view listKey,
+                               std::string_view denyKey,
+                               std::vector<std::string>& targets,
+                               bool& configured,
+                               bool& denied) -> err::Expected<err::Unit> {
+        if (Yaml::Node* list = findChild(value, listKey)) {
+          auto parsed =
+              parseIdList("role '" + id + "': " + std::string(listKey), *list);
+          if (parsed.hasError()) {
+            return parsed.error();
+          }
+          targets = std::move(*parsed);
+          configured = true;
+        }
+
+        if (Yaml::Node* noMq = findChild(value, denyKey)) {
+          auto parsed = parseRoleFlag(id, denyKey, *noMq);
+          if (parsed.hasError()) {
+            return parsed.error();
+          }
+          denied = *parsed;
+        }
+
+        if (configured && denied) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "': " + std::string(listKey) + " and " +
+                  std::string(denyKey) + " contradict each other");
+        }
+        return err::unit;
+      };
+
+      if (auto res = parseMq(
+              kMqSysv,
+              kNoMqSysv,
+              policy.mqSysv,
+              policy.hasMqSysv,
+              policy.noMqSysv);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseMq(
+              kMqPosix,
+              kNoMqPosix,
+              policy.mqPosix,
+              policy.hasMqPosix,
+              policy.noMqPosix);
+          res.hasError()) {
+        return res.error();
+      }
+
       // Absent is the same as false again. What it turns off is ownership,
       // not permission, so it is read after both of the above.
       if (Yaml::Node* untracked = findChild(value, kUntrackedBpf)) {
@@ -624,6 +679,24 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   for (const auto& [id, rolePolicy] : policy.roles) {
     if (auto res = checkRoleRefs(
             policy.roles, id, rolePolicy.bpf, "allows BPF access to");
+        res.hasError()) {
+      return res.error();
+    }
+
+    if (auto res = checkRoleRefs(
+            policy.roles,
+            id,
+            rolePolicy.mqSysv,
+            "allows System V message-queue access to");
+        res.hasError()) {
+      return res.error();
+    }
+
+    if (auto res = checkRoleRefs(
+            policy.roles,
+            id,
+            rolePolicy.mqPosix,
+            "allows POSIX message-queue access to");
         res.hasError()) {
       return res.error();
     }

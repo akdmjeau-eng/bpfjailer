@@ -33,6 +33,24 @@ struct RolePolicy {
   /// @brief Whether this role is denied kernel module and kexec loading.
   bool noLkm = false;
 
+  /// @brief Roles whose System V message queues this role may acquire: absent
+  /// is unrestricted, empty stays inside its own pod, and non-empty also
+  /// permits queues owned by the listed roles.
+  std::vector<std::string> mqSysv;
+  bool hasMqSysv = false;
+
+  /// @brief Deny System V message queues outright. Cannot be combined with
+  /// `mq-sysv`.
+  bool noMqSysv = false;
+
+  /// @brief The POSIX-mqueue counterpart of `mqSysv`.
+  std::vector<std::string> mqPosix;
+  bool hasMqPosix = false;
+
+  /// @brief Deny POSIX message queues outright. Cannot be combined with
+  /// `mq-posix`.
+  bool noMqPosix = false;
+
   /// @brief Whether what this role creates is left unowned, keeping `bpf`'s
   /// restriction without its ownership. Only meaningful on a role that wrote
   /// `bpf`, and needed on a base role, which would otherwise own every object

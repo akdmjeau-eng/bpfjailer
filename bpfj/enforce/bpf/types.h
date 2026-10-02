@@ -32,6 +32,11 @@
 // copies between two maps rather than adopting one.
 #define BPFJ_BPF_OWNER_VERSION 1
 
+// Layout of both message-queue ownership maps. The maps have distinct keys,
+// but intentionally share this value and version so replacement can validate
+// and carry both atomically.
+#define BPFJ_MQ_OWNER_VERSION 1
+
 #define BPFJ_EXEC_POLICY_XATTR "user.bpfj.policy.exec"
 
 // How a pod came to exist, numbered to match the internal tree's.
@@ -105,6 +110,18 @@ struct bpfj_bpf_owner {
   __u32 id;
 };
 
+struct bpfj_mq_owner {
+  struct bpfj_role_id role;
+  struct bpfj_uuid pod;
+};
+
+// mqueuefs inode identity. s_dev separates mounts/filesystems and i_ino names
+// the queue within one of them; unlike an fd, the pair survives close/open.
+struct bpfj_posix_mq_key {
+  __u64 dev;
+  __u64 ino;
+};
+
 struct bpfj_pid_data {
   __s8 version;
   __u8 num_pods;
@@ -130,5 +147,7 @@ BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 48);
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_bpf_owner) == 20);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_mq_owner) == 32);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_posix_mq_key) == 16);
 
 #undef BPFJ_POD_STATIC_ASSERT
