@@ -143,23 +143,18 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
     }                                                  \
   } while (0)
 
-// Out of line, so libarena's code is verified in a frame of its own rather
-// than among the caller's live values, which pushed its result through a
-// 4-byte stack slot the verifier could not follow. Static rather than global:
-// the verifier checks a global function as a program of its own, and rejects
-// one that returns with preemption or interrupts still disabled, which a lock
-// function has to. Called directly for a lock held across a return: the
-// release takes the same `flags`, kept in a frame that outlives the hold, and
-// both calls must fall within one global function.
+// Inline so the arena pointer keeps its type: the verifier does not support
+// __arg_arena on static subprograms, while a global lock function cannot
+// return with interrupts disabled.
 // Static BPF subprogram argument tags are rejected by the verifier, while the
 // address-space-qualified pointee preserves the arena cast here without one.
-static __noinline int bpfj_lock_acquire(
+static __always_inline int bpfj_lock_acquire(
     struct bpfj_lock __arena* l,
     unsigned long* flags) {
   return BPFJ_ARENA_LOCK(bpfj_lock_qspinlock(l), *flags);
 }
 
-static __noinline void bpfj_lock_release(
+static __always_inline void bpfj_lock_release(
     struct bpfj_lock __arena* l,
     unsigned long* flags) {
   BPFJ_ARENA_UNLOCK(bpfj_lock_qspinlock(l), *flags);

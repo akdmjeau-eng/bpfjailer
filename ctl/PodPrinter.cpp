@@ -52,7 +52,7 @@ void printVars(
     std::ostream& os,
     const bpfj_var_array& vars,
     const void* arenaBase) {
-  const auto count = std::min<std::size_t>(vars.count, BPFJ_VAR_MAX);
+  const auto count = std::min<std::size_t>(vars.count, BPFJ_OSS_VAR_MAX);
   for (std::size_t i = 0; i < count; ++i) {
     const auto* var = bpfj_var_array_at(&vars, static_cast<__u32>(i));
     os << (i == 0 ? "    vars:    " : "             ");
@@ -67,7 +67,7 @@ void printVars(
     }
     os << "=";
 
-    char value[BPFJ_VAR_VAL_LEN] = {};
+    char value[BPFJ_OSS_VAR_VAL_LEN] = {};
     if (arenaBase == nullptr ||
         bpfj_var_serialize(var, value, sizeof(value)) != 0) {
       os << "<unavailable>\n";

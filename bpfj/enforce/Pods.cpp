@@ -211,11 +211,11 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 [[nodiscard]] Expected<std::vector<ResolvedPodVar>> resolveVars(
     std::span<const PodVar> vars,
     const struct bpfj_var_catalog* catalog) noexcept {
-  if (vars.size() > BPFJ_VAR_MAX) {
+  if (vars.size() > BPFJ_OSS_VAR_MAX) {
     return makeUnexpected(makeError(
         std::errc::value_too_large,
         "a pod holds at most ",
-        std::to_string(BPFJ_VAR_MAX),
+        std::to_string(BPFJ_OSS_VAR_MAX),
         " variables, got ",
         std::to_string(vars.size())));
   }
@@ -240,13 +240,13 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 
     // StrVarParser's cap, restated so an oversized value is named as the
     // problem rather than silently truncated into the pod.
-    if (var.value.size() > BPFJ_VAR_VAL_LEN - 2) {
+    if (var.value.size() > BPFJ_OSS_VAR_VAL_LEN - 2) {
       return makeUnexpected(makeError(
           std::errc::value_too_large,
           "value of variable ",
           var.name,
           " must be at most ",
-          std::to_string(BPFJ_VAR_VAL_LEN - 2),
+          std::to_string(BPFJ_OSS_VAR_VAL_LEN - 2),
           " characters"));
     }
 

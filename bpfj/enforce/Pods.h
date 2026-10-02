@@ -39,7 +39,8 @@ enum class Threads {
 /// @brief Put `pid` in a new pod named by `roleId` and `userId`, through the
 /// pinned maps rather than loading anything. `roleId` is not validated, the
 /// open source jailer carrying no policy yet, but each of the at most
-/// BPFJ_VAR_MAX `vars` must be one the policy declares, which attach publishes
+/// BPFJ_OSS_VAR_MAX `vars` must be one the policy declares, which attach
+/// publishes
 /// as an arena-backed allowlist (see publishVarNames()).
 /// @return The uuid of the pod that was created.
 [[nodiscard]] Expected<bpfj_uuid> enrollPod(

@@ -23,7 +23,7 @@ namespace bpfjailer::srv {
 namespace {
 
 static_assert(
-    kMaxVars == BPFJ_VAR_MAX,
+    kMaxVars == BPFJ_OSS_VAR_MAX,
     "the protocol's variable ceiling has drifted from the pod's");
 
 [[nodiscard]] Expected<std::string> scalarField(

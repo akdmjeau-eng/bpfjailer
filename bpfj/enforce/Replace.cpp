@@ -150,7 +150,8 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
     const bpfj_pod& src,
     PodArena& newArena,
     const struct bpfj_var_catalog* catalog) noexcept {
-  const auto count = std::min<std::size_t>(src.var_array.count, BPFJ_VAR_MAX);
+  const auto count =
+      std::min<std::size_t>(src.var_array.count, BPFJ_OSS_VAR_MAX);
   std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
   blobSize += bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {

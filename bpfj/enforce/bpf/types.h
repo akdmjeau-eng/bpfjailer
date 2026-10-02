@@ -7,6 +7,10 @@
 #include "bpfj/lib/bpf/types_uuid.h"
 #include "bpfj/var/bpf/types_var.h"
 
+// OSS task storage holds arena pointers rather than embedded pods.
+#undef BPFJ_MAX_POD_PER_PID
+#define BPFJ_MAX_POD_PER_PID BPFJ_OSS_MAX_POD_PER_PID
+
 // The types the open source jailer needs, and nothing else; the internal tree
 // keeps its own, much larger one at bpfjailer/enforce/bpf/types.h, and what is
 // shared is what this header includes. The pod layout is now OSS-specific: pod
@@ -23,7 +27,7 @@
 #define BPFJ_MAX_UNPRIV_ROLES 1024
 
 // Versioning
-#define BPFJ_PID_DATA_VERSION 2
+#define BPFJ_PID_DATA_VERSION 3
 
 // The layout of the bpfj_bpf_owner records below, which a replace reads
 // through the running tree's pin to decide whether it can carry them across;
@@ -161,7 +165,7 @@ struct bpfj_pid_data {
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 24);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 328);
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 48);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 80);
 
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.

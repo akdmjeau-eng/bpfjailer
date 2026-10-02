@@ -716,6 +716,43 @@ TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
   ASSERT(shown.outHas("vars:    vm_uuid=abc"));
 }
 
+TEST(Ctl, EnrollAcceptsSixteenDeclaredVars) {
+  std::string policy = "vars:\n";
+  std::vector<std::string> args = {"enroll", "role", "user", selfPid()};
+  for (int i = 0; i < 16; ++i) {
+    const std::string name = "var" + std::to_string(i);
+    const std::string value = "value" + std::to_string(i);
+    policy.append("  - ").append(name).append("\n");
+    args.push_back(name + "=" + value);
+  }
+
+  ASSERT_EQ(ctl({"attach", writePolicy(policy)}).status, 0);
+  ASSERT_EQ(ctl(std::move(args)).status, 0);
+
+  const CommandResult shown = ctl({"show", selfPid()});
+  ASSERT_EQ(shown.status, 0);
+  for (int i = 0; i < 16; ++i) {
+    ASSERT(
+        shown.outHas("var" + std::to_string(i) + "=value" + std::to_string(i)));
+  }
+}
+
+TEST(Ctl, EnrollAcceptsEightPods) {
+  attach();
+
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_EQ(
+        ctl({"enroll", "role" + std::to_string(i), "user", selfPid()}).status,
+        0);
+  }
+
+  const CommandResult shown = ctl({"show", selfPid()});
+  ASSERT_EQ(shown.status, 0);
+  for (int i = 0; i < 8; ++i) {
+    ASSERT(shown.outHas("role" + std::to_string(i)));
+  }
+}
+
 TEST(Ctl, ShowOnAnUnjailedPidSaysSo) {
   attach();
 

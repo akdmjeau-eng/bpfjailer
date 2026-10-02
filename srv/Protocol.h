@@ -40,13 +40,13 @@ namespace bpfjailer::srv {
 /// the role's `unpriv-enroll` policy decide what it may ask for.
 inline constexpr std::string_view kDefaultSocketPath = "@bpfj";
 
-// A request is a role, a user id and at most four short variables, so anything
-// approaching this is not a request this protocol can express.
+// A request is a role, a user id and at most sixteen short variables, so
+// anything approaching this is not a request this protocol can express.
 inline constexpr std::size_t kMaxMessageBytes = 4096;
 
-// Mirrors BPFJ_VAR_MAX, restated so Client.h does not drag in the BPF headers;
-// Server.cpp static_asserts that the two still agree.
-inline constexpr std::size_t kMaxVars = 4;
+// Mirrors BPFJ_OSS_VAR_MAX, restated so Client.h does not drag in the BPF
+// headers; Server.cpp static_asserts that the two still agree.
+inline constexpr std::size_t kMaxVars = 16;
 
 inline constexpr std::string_view kRoleField = "role";
 inline constexpr std::string_view kUserIdField = "user-id";

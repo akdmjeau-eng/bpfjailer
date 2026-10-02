@@ -24,8 +24,11 @@
 // tree values live out of line in the arena, so widening this no longer grows
 // bpfj_pod; the glob NFA gadget width deliberately does not track it, a
 // 39-wide gadget having pushed fs2_enforce over the 6.13 verifier limit.
+// Keep the legacy bounds stable for closed layouts that include this header.
 #define BPFJ_VAR_VAL_LEN 40
 #define BPFJ_VAR_MAX 4
+#define BPFJ_OSS_VAR_VAL_LEN 64
+#define BPFJ_OSS_VAR_MAX 16
 
 struct vsock_address {
   __u32 cid;
@@ -147,7 +150,7 @@ bpfj_var_get_str(const struct bpfj_var* var, char* dest, __u8* size) {
     return -EINVAL;
   }
 
-  __builtin_memset(dest, 0, BPFJ_VAR_VAL_LEN);
+  __builtin_memset(dest, 0, BPFJ_OSS_VAR_VAL_LEN);
   __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size + 1);
 
   if (size) {
@@ -174,7 +177,7 @@ BPFJ_VAR_INLINE int bpfj_var_get_vsock_addr(
 // Get a variable value as binary data
 BPFJ_VAR_INLINE int
 bpfj_var_get_bin(const struct bpfj_var* var, unsigned char* dest, __u8* size) {
-  __builtin_memset(dest, 0, BPFJ_VAR_VAL_LEN);
+  __builtin_memset(dest, 0, BPFJ_OSS_VAR_VAL_LEN);
   __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size);
 
   if (size) {
@@ -220,7 +223,7 @@ bpfj_var_deserialize(const char* src, size_t src_size, struct bpfj_var* var) {
 
   switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
-      if (src_size > BPFJ_VAR_VAL_LEN - 1) {
+      if (src_size > BPFJ_OSS_VAR_VAL_LEN - 1) {
         return -ERANGE;
       }
 
