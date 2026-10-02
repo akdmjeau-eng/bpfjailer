@@ -9,9 +9,8 @@
 
 // The types the open source jailer needs, and nothing else; the internal tree
 // keeps its own, much larger one at bpfjailer/enforce/bpf/types.h, and what is
-// shared is what this header includes. The pod layout matches the internal one
-// apart from child_role_id, which this tree has no policy to populate, so
-// bpfj_pod is 512 bytes rather than 528 and the two cannot share a map.
+// shared is what this header includes. The pod layout is now OSS-specific: pod
+// variables live in the shared arena and the pod carries only arena pointers.
 
 // Sized for long service/tenant identity strings (255 chars plus NUL). Never
 // put a bpfj_user_id on the BPF stack -- even at 64 bytes it pushed the
@@ -122,9 +121,9 @@ struct __attribute__((packed)) bpfj_pid_data {
   _Static_assert(condition, "pod layout is shared through bpfj_pod_map")
 #endif
 
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 48);
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 196);
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 512);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 16);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 16);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 328);
 
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.

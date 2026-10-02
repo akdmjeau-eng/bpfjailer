@@ -209,17 +209,23 @@ Expected<PodArena> PodArena::open(const PinConfig& cfg) noexcept {
   return arena;
 }
 
-Expected<std::uint32_t> PodArena::alloc(std::uint32_t size) noexcept {
-  const long off = heap::alloc(base_, size);
-  if (off <= 0) {
+Expected<void*> PodArena::alloc(std::uint32_t size) noexcept {
+  const long offset = heap::alloc(base_, size);
+  if (offset <= BPFJ_HEAP_NULL) {
     return makeUnexpected(
         makeError(std::errc::not_enough_memory, "failed to allocate pod vars"));
   }
-  return static_cast<std::uint32_t>(off);
+
+  void* const ptr = heap::offsetToPtr(base_, static_cast<__u32>(offset));
+  if (ptr == nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::bad_address, "pod vars allocation lies outside the arena"));
+  }
+  return ptr;
 }
 
-Expected<> PodArena::free(std::uint32_t offset) noexcept {
-  const long res = heap::free(base_, offset);
+Expected<> PodArena::free(void* ptr) noexcept {
+  const long res = heap::free(base_, ptr);
   if (res != 0) {
     return makeUnexpected(
         makeError(std::errc(-res), "failed to free pod vars from arena"));

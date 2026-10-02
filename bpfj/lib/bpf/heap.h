@@ -99,6 +99,7 @@ int bpfj_heap_syscall(void* ctx) {
 
 // Grow the arena by at least `min_bytes`. Thread safe; sleepable context only.
 __noinline long bpfj_heap_grow(u32 min_bytes) {
+  bpfj_heap_use_arena();
   struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
   void __arena* base = (void __arena*)ctrl;
 
@@ -208,27 +209,21 @@ static unsigned char __arena* bpfj_heap_ptr() {
 // Allocate at least `size` bytes, returning the payload's arena offset or 0 on
 // failure (including an exhausted pool). Safe in any BPF context.
 __noinline long bpfj_heap_alloc(u32 size) {
+  bpfj_heap_use_arena();
   struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
   void __arena* base = (void __arena*)ctrl;
 
-  // libarena's lock called directly rather than through
-  // BPFJ_LOCK_WAIT_GUARD, whose guard costs this frame 16 bytes more. This
-  // function is the last frame of stack chains at the verifier's 512-byte
-  // limit, and those 16 bytes are the difference.
-  unsigned long flags;
-  arena_spinlock_t __arena* lock = bpfj_lock_qspinlock(&ctrl->lock);
-  if (BPFJ_ARENA_LOCK(lock, flags)) {
+  BPFJ_LOCK_GUARD(hl, &ctrl->lock);
+  if (!BPFJ_LOCK_IS_ACQUIRED(hl)) {
     return -EBUSY;
   }
 
-  long result = bpfj_heap_alloc_impl(base, ctrl, size);
-
-  BPFJ_ARENA_UNLOCK(lock, flags);
-  return result;
+  return bpfj_heap_alloc_impl(base, ctrl, size);
 }
 
 // Free a block by the payload offset bpfj_heap_alloc returned.
 __noinline long bpfj_heap_free(u32 offset) {
+  bpfj_heap_use_arena();
   if (offset == BPFJ_HEAP_NULL) {
     return 0;
   }
@@ -239,17 +234,12 @@ __noinline long bpfj_heap_free(u32 offset) {
   struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
   void __arena* base = (void __arena*)ctrl;
 
-  // Direct, for the reason bpfj_heap_alloc gives.
-  unsigned long flags;
-  arena_spinlock_t __arena* lock = bpfj_lock_qspinlock(&ctrl->lock);
-  if (BPFJ_ARENA_LOCK(lock, flags)) {
+  BPFJ_LOCK_GUARD(hl, &ctrl->lock);
+  if (!BPFJ_LOCK_IS_ACQUIRED(hl)) {
     return -EBUSY;
   }
 
-  long result = bpfj_heap_free_impl(base, ctrl, offset);
-
-  BPFJ_ARENA_UNLOCK(lock, flags);
-  return result;
+  return bpfj_heap_free_impl(base, ctrl, offset);
 }
 
 // Allocate a zeroed block, returning the payload's arena offset or 0. Inlined
@@ -274,6 +264,7 @@ static __always_inline long bpfj_heap_calloc(u32 size) {
 }
 
 __noinline long bpfj_heap_realloc(u32 offset, u32 new_size) {
+  bpfj_heap_use_arena();
   if (offset == BPFJ_HEAP_NULL) {
     return bpfj_heap_alloc(new_size);
   }

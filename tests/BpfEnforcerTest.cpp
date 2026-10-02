@@ -146,6 +146,7 @@ TEST(BpfEnforcer, LoadPinsItsLinksAndMaps) {
   ASSERT(mapPinned("bpfj_bpf_access"));
   ASSERT(mapPinned("bpfj_bpf_map_owners"));
   ASSERT(mapPinned("bpfj_bpf_prog_owners"));
+  ASSERT(mapPinned("bpfj_heap_arena"));
 }
 
 TEST(BpfEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {

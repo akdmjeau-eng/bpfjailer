@@ -10,12 +10,13 @@
 
 #include <errno.h>
 
+#include "bpfj/lib/bpf/types_heap.h"
+
 #define BPFJ_VAR_NAME_LEN 16
-// Sized for a canonical 36-character UUID plus the NUL. Widening it grows
-// bpfj_pod and so bpfj_pod_array, which MetArmor embeds by value and shares by
-// fd, so deploy bpfjailerd and MetArmor together. The glob NFA gadget width
-// (BPFJ_GLOB_MAP_MAX_VAR_LEN) deliberately does not track this, a 39-wide
-// gadget having pushed fs2_enforce over the 6.13 verifier limit.
+// Sized for a canonical 36-character UUID plus the NUL. In the open source
+// tree values live out of line in the arena, so widening this no longer grows
+// bpfj_pod; the glob NFA gadget width deliberately does not track it, a
+// 39-wide gadget having pushed fs2_enforce over the 6.13 verifier limit.
 #define BPFJ_VAR_VAL_LEN 40
 #define BPFJ_VAR_MAX 4
 #define BPFJ_VAR_MAP_SIZE 16
@@ -45,62 +46,55 @@ struct bpfj_var {
   __u8 type;
   // Size of the value
   __u8 size;
-
   __u16 reserved;
-
-  // Union to provide type-safe access to different value types
-  union {
-    char str_val[BPFJ_VAR_VAL_LEN - 1]; // String values (reserve 1 byte for
-                                        // null terminator)
-    struct vsock_address vsock_val; // vsock address values
-    unsigned char bin_val[BPFJ_VAR_VAL_LEN]; // Binary/raw data values
-  } val;
+  // Value bytes for this variable, stored in the shared arena.
+  void __arena* val;
 };
 
 struct bpfj_var_array {
-  struct bpfj_var vars[BPFJ_VAR_MAX];
+  // Pod-owned flat var blob in the shared arena, beginning with `count`
+  // bpfj_var records followed by each value payload.
+  struct bpfj_var __arena* vars;
   __u8 count;
+  __u8 reserved[7];
 };
 
-// Set a variable value
-inline int bpfj_var_set(
-    struct bpfj_var* out,
-    __u32 id,
-    __u8 type,
-    const void* val,
-    __u8 size) {
-  // str
-  if (type == BPFJ_VAR_TYPE_STR && size > BPFJ_VAR_VAL_LEN - 1) {
-    return -ERANGE;
-  }
-  // vsock addr
-  if (type == BPFJ_VAR_TYPE_VSOCK_ADDR &&
-      size != sizeof(struct vsock_address)) {
-    return -EINVAL;
-  }
-  // bin
-  if (size > BPFJ_VAR_VAL_LEN) {
-    return -ERANGE;
-  }
+static inline __u32 bpfj_var_align_up(__u32 size) {
+  return (size + sizeof(__u32) - 1) & ~((__u32)sizeof(__u32) - 1);
+}
 
-  out->id = id;
-  out->type = type;
-  out->size = size;
+static inline void bpfj_var_array_init(struct bpfj_var_array* vars) {
+  vars->vars = NULL;
+  vars->count = 0;
+  __builtin_memset(vars->reserved, 0, sizeof(vars->reserved));
+}
 
-  switch (type) {
+static inline __u32 bpfj_var_payload_size(const struct bpfj_var* var) {
+  switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
-      __builtin_memcpy(out->val.str_val, val, size);
-      out->val.str_val[size] = '\0';
-      break;
+      return (__u32)var->size + 1;
     case BPFJ_VAR_TYPE_VSOCK_ADDR:
-      __builtin_memcpy(&out->val.vsock_val, val, size);
-      break;
+      return sizeof(struct vsock_address);
     default:
-      __builtin_memcpy(out->val.bin_val, val, size);
-      break;
+      return var->size;
   }
+}
 
-  return 0;
+static inline struct bpfj_var __arena* bpfj_var_array_at(
+    const struct bpfj_var_array* vars,
+    __u32 idx) {
+  if (vars == NULL || idx >= vars->count || vars->vars == NULL) {
+    return NULL;
+  }
+  return vars->vars + idx;
+}
+
+static inline const void __arena* bpfj_var_value_ptr(
+    const struct bpfj_var* var) {
+  if (var == NULL) {
+    return NULL;
+  }
+  return var->val;
 }
 
 // Get a variable value as a string
@@ -111,8 +105,7 @@ bpfj_var_get_str(const struct bpfj_var* var, char* dest, __u8* size) {
   }
 
   __builtin_memset(dest, 0, BPFJ_VAR_VAL_LEN);
-  __builtin_memcpy(
-      dest, var->val.str_val, var->size + 1); // Include null terminator
+  __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size + 1);
 
   if (size) {
     *size = var->size;
@@ -130,7 +123,7 @@ inline int bpfj_var_get_vsock_addr(
   }
 
   __builtin_memset(dest, 0, sizeof(struct vsock_address));
-  __builtin_memcpy(dest, &var->val.vsock_val, sizeof(struct vsock_address));
+  __builtin_memcpy(dest, bpfj_var_value_ptr(var), sizeof(*dest));
 
   return 0;
 }
@@ -139,7 +132,7 @@ inline int bpfj_var_get_vsock_addr(
 inline int
 bpfj_var_get_bin(const struct bpfj_var* var, unsigned char* dest, __u8* size) {
   __builtin_memset(dest, 0, BPFJ_VAR_VAL_LEN);
-  __builtin_memcpy(dest, var->val.bin_val, var->size);
+  __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size);
 
   if (size) {
     *size = var->size;
@@ -153,25 +146,19 @@ static inline int
 bpfj_var_serialize(const struct bpfj_var* var, char* dest, size_t dest_size) {
   switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
-      __builtin_memcpy(dest, var->val.str_val, var->size + 1);
+      __builtin_memcpy(dest, bpfj_var_value_ptr(var), var->size + 1);
       return 0;
-    case BPFJ_VAR_TYPE_VSOCK_ADDR:
+    case BPFJ_VAR_TYPE_VSOCK_ADDR: {
+      struct vsock_address addr;
+      __builtin_memset(&addr, 0, sizeof(addr));
+      __builtin_memcpy(&addr, bpfj_var_value_ptr(var), sizeof(addr));
 #ifdef __cplusplus
-      snprintf(
-          dest,
-          dest_size,
-          "%u:%u",
-          var->val.vsock_val.cid,
-          var->val.vsock_val.port);
+      snprintf(dest, dest_size, "%u:%u", addr.cid, addr.port);
 #else
-      BPF_SNPRINTF(
-          dest,
-          dest_size,
-          "%u:%u",
-          var->val.vsock_val.cid,
-          var->val.vsock_val.port);
+      BPF_SNPRINTF(dest, dest_size, "%u:%u", addr.cid, addr.port);
 #endif
       return 0;
+    }
     default:
       return -EINVAL;
   }
@@ -183,29 +170,33 @@ bpfj_var_serialize(const struct bpfj_var* var, char* dest, size_t dest_size) {
 #ifdef __cplusplus
 static inline int
 bpfj_var_deserialize(const char* src, size_t src_size, struct bpfj_var* var) {
+  void __arena* dest = var->val;
+  if (dest == NULL) {
+    return -EINVAL;
+  }
+
   switch (var->type) {
     case BPFJ_VAR_TYPE_STR:
       if (src_size > BPFJ_VAR_VAL_LEN - 1) {
         return -ERANGE;
       }
 
-      __builtin_memcpy(var->val.str_val, src, src_size);
-      var->val.str_val[src_size] = '\0';
+      __builtin_memcpy(dest, src, src_size);
+      ((char*)dest)[src_size] = '\0';
       var->size = src_size;
 
       return 0;
-    case BPFJ_VAR_TYPE_VSOCK_ADDR:
-      if (sscanf(
-              src,
-              "%u:%u",
-              &var->val.vsock_val.cid,
-              &var->val.vsock_val.port) != 2) {
+    case BPFJ_VAR_TYPE_VSOCK_ADDR: {
+      struct vsock_address addr{};
+      if (sscanf(src, "%u:%u", &addr.cid, &addr.port) != 2) {
         return -EINVAL;
       }
 
-      var->size = sizeof(struct vsock_address);
+      __builtin_memcpy(dest, &addr, sizeof(addr));
+      var->size = sizeof(addr);
 
       return 0;
+    }
     default:
       return -EINVAL;
   }

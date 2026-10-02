@@ -58,12 +58,17 @@ err::Expected<> init(Skel& obj) {
   }
 
   auto* ctrl = reinterpret_cast<struct bpfj_heap_control*>(ret);
-  __u32 arenaSize = BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE;
-  memset(ret, 0, arenaSize);
-  bpfj_heap_init_arena(ret, arenaSize);
-  // Redundant after the memset, but this is where the lock becomes usable and
-  // bpfj_heap_init_arena() no-ops on an already-initialized arena.
-  lock::init(ctrl->lock);
+  if (ctrl->arena_size == 0) {
+    constexpr __u32 arenaSize = BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE;
+    // Only the initial-value extent is backed here. init_arena writes its
+    // control block and first free-block header inside that extent while
+    // recording the logical size that later allocations may grow into.
+    memset(ret, 0, size);
+    bpfj_heap_init_arena(ret, arenaSize);
+    // Redundant after the memset, but this is where the lock becomes usable
+    // and bpfj_heap_init_arena() no-ops on an already-initialized arena.
+    lock::init(ctrl->lock);
+  }
 
   obj->bss().bpfj_heap_ctrl = ctrl;
 
@@ -322,6 +327,15 @@ inline long free(void* base, __u32 offset) {
     return -EBUSY;
   }
   return bpfj_heap_free_impl(base, ctrl, offset);
+}
+
+// Free a previously allocated block by arena pointer. A nullptr is a no-op.
+template <typename T>
+inline long free(void* base, T* ptr) {
+  if (ptr == nullptr) {
+    return 0;
+  }
+  return free(base, ptrToOffset(base, ptr));
 }
 
 template <typename Skel>

@@ -1,10 +1,14 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include "tests/Enforce.h"
 #include "tests/Harness.h"
 
 #include <cstdint>
 #include <vector>
 
+#include "bpfj/enforce/ArenaMap.h"
+#include "bpfj/enforce/Jailer.h"
+#include "bpfj/enforce/Pins.h"
 #include "bpfj/lib/Heap.h"
 
 namespace heap = bpfjailer::heap;
@@ -73,4 +77,25 @@ TEST(Heap, UserspaceGrowMakesLaterAllocsSucceed) {
     ASSERT_EQ(heap::free(arena.base, off), 0);
   }
   ASSERT_EQ(arena.ctrl->current_used, 0U);
+}
+
+TEST(ArenaMap, IndependentPinTreesUseDifferentSlots) {
+  const auto policy = bpfjailer::test::policyOf("roles:\n  svc:\n");
+  const auto first = bpfjailer::test::testPins();
+  ASSERT_OK(bpfjailer::Jailer::load(first, policy));
+
+  auto second = first;
+  second.pinDir += "-independent";
+  ASSERT_OK(bpfjailer::Jailer::load(second, policy));
+
+  auto firstMap = bpfjailer::pins::openPinnedMap(first, "bpfj_heap_arena");
+  ASSERT(firstMap);
+  auto secondMap = bpfjailer::pins::openPinnedMap(second, "bpfj_heap_arena");
+  ASSERT(secondMap);
+
+  auto firstExtra = bpfjailer::arena::pinnedMapExtra(*firstMap);
+  ASSERT_OK(firstExtra);
+  auto secondExtra = bpfjailer::arena::pinnedMapExtra(*secondMap);
+  ASSERT_OK(secondExtra);
+  ASSERT(*firstExtra != *secondExtra);
 }

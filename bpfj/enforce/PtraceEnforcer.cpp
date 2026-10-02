@@ -8,6 +8,7 @@
 #include "bpfj/enforce/RoleGate.h"
 
 #include "bpfj/enforce/bpf/ptrace_enforce.skel.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 
 namespace bpfjailer {
@@ -47,6 +48,10 @@ Expected<> PtraceEnforcer::load(
   }
 
   if (auto res = skel.load(); !res) {
+    return res;
+  }
+
+  if (auto res = heap::init(created.value()); !res) {
     return res;
   }
 

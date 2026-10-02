@@ -168,6 +168,7 @@ int BPF_PROG(
   }
 
   __builtin_memset(pod, 0, sizeof(*pod));
+  bpfj_var_array_init(&pod->var_array);
 
   struct bpf_dynptr role_id_ptr;
   bpf_dynptr_from_mem(&pod->role_id, sizeof(pod->role_id), 0, &role_id_ptr);

@@ -73,10 +73,11 @@ int showRun(int argc, char** argv) {
   }
 
   const auto varNames = jailVarNames(args.pin);
+  auto arena = PodArena::open(args.pin);
   std::cout << "pid " << *pid << " is in " << pods->size() << " pod(s)"
             << std::endl;
   for (const auto& pod : *pods) {
-    printPod(std::cout, pod, *nowNs, varNames);
+    printPod(std::cout, pod, *nowNs, varNames, arena ? arena->base() : nullptr);
   }
 
   return 0;

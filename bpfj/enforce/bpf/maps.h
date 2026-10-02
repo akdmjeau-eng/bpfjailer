@@ -3,6 +3,7 @@
 #pragma once
 
 #include "bpfj/enforce/bpf/types.h"
+#include "bpfj/lib/bpf/heap.h"
 #include "bpfj/var/bpf/var.h"
 
 // The jail membership maps, shared by every BPF object in the open source
@@ -81,9 +82,10 @@ struct {
   __uint(max_entries, 1);
 } bpfj_event_map SEC(".maps");
 
-// bpfj_var_map comes in from bpfj/var/bpf/var.h above, but belongs in this
-// header's list: a bpfj_var carries a numeric id rather than its name, so the
-// pod variables in bpfj_pod_map only mean anything next to it.
+// bpfj_var_map comes in from bpfj/var/bpf/var.h above, and bpfj_heap_arena /
+// bpfj_heap_ctrl from bpfj/lib/bpf/heap.h. A bpfj_var carries a numeric id and
+// a shared-arena pointer rather than its name and inline value bytes, so the
+// pod variables in bpfj_pod_map only mean anything next to those two objects.
 
 // A pod is owned by the task-map entries that name it, one reference per uuid,
 // so it outlives its enroller for as long as some descendant is still jailed.
@@ -97,6 +99,17 @@ static __always_inline void bpfj_pod_refs_dec(struct bpfj_pod* pod) {
   // The pre-subtraction value, so 1 is the last reference; re-reading
   // pod->refs would let two concurrent putters both decide they were last.
   if (__sync_fetch_and_sub(&pod->refs, 1) <= 1) {
+    if (pod->var_array.count != 0 && bpfj_heap_enabled) {
+      bpfj_heap_use_arena();
+      struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
+      BPFJ_LOCK_GUARD(heap_lock, &ctrl->lock);
+      if (BPFJ_LOCK_IS_ACQUIRED(heap_lock)) {
+        BPFJ_HEAP_FREE(pod->var_array.vars);
+      } else {
+        BPFJ_LOG_ERR(
+            EBUSY, "Leaking pod variables after arena lock contention");
+      }
+    }
     bpf_map_delete_elem(&bpfj_pod_map, &pod->uuid);
   }
 }

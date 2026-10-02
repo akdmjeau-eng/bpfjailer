@@ -19,6 +19,7 @@
 #include "bpfj/enforce/VerityEnforcer.h"
 
 #include "bpfj/enforce/bpf/jailer.skel.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -80,6 +81,7 @@ constexpr RoleGate kEnrollGate{
   pod.uuid = uuid;
   pod.refs = 1;
   pod.enrollment_source = BPFJ_ENROLL_BASE_ROLE;
+  bpfj_var_array_init(&pod.var_array);
 
   // CLOCK_MONOTONIC, matching the bpf_ktime_get_ns() BPF stamps with.
   struct timespec ts{};
@@ -166,6 +168,10 @@ Expected<> Jailer::load(const PinConfig& cfg, const Policy& policy) noexcept {
   }
 
   if (auto res = skel.load(); !res) {
+    return res;
+  }
+
+  if (auto res = heap::init(created.value()); !res) {
     return res;
   }
 

@@ -14,9 +14,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <optional>
 
 #include "bpfj/enforce/bpf/enroll.skel.h"
 #include "bpfj/lib/Fd.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -35,6 +37,11 @@ using pins::openPinnedMap;
 struct ActiveEnroll {
   Fd map;
   std::uint32_t pid = 0;
+};
+
+struct ResolvedPodVar {
+  std::uint32_t id = 0;
+  std::string_view value;
 };
 
 // Task storage is keyed by pidfd at the syscall boundary, and pidfd_open() only
@@ -164,6 +171,10 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
     return makeUnexpected(res.error());
   }
 
+  if (auto res = heap::init(created.value()); !res) {
+    return makeUnexpected(res.error());
+  }
+
   // By hand rather than skel.attach(), so the link can carry a link_info with
   // task.pid set and the kernel walks only that process's threads.
   auto prog = skel.getProg("bpfj_enroll_threads");
@@ -195,8 +206,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 /// @brief Resolve `vars` against `varMap` and write them into `dst`, all of
 /// them before any is written, so a request naming one unpublished variable
 /// is refused whole.
-[[nodiscard]] Expected<> setVars(
-    bpfj_var_array& dst,
+[[nodiscard]] Expected<std::vector<ResolvedPodVar>> resolveVars(
     std::span<const PodVar> vars,
     const Fd& varMap) noexcept {
   if (vars.size() > BPFJ_VAR_MAX) {
@@ -208,15 +218,16 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
         std::to_string(vars.size())));
   }
 
-  bpfj_var_array staged{};
+  std::vector<ResolvedPodVar> resolved;
+  resolved.reserve(vars.size());
   for (const PodVar& var : vars) {
     auto id = lookupVarId(varMap, var.name);
     if (!id) {
       return makeUnexpected(id.error());
     }
 
-    for (std::uint8_t i = 0; i < staged.count; ++i) {
-      if (staged.vars[i].id == *id) {
+    for (const auto& existing : resolved) {
+      if (existing.id == *id) {
         return makeUnexpected(makeError(
             std::errc::invalid_argument,
             "variable ",
@@ -237,21 +248,56 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
           " characters"));
     }
 
-    const int res = bpfj_var_set(
-        &staged.vars[staged.count],
-        *id,
-        BPFJ_VAR_TYPE_STR,
-        var.value.data(),
-        static_cast<__u8>(var.value.size()));
-    if (res != 0) {
-      return makeUnexpected(
-          makeError(std::errc(-res), "failed to set variable ", var.name));
-    }
-
-    staged.count++;
+    resolved.push_back(ResolvedPodVar{.id = *id, .value = var.value});
   }
 
-  dst = staged;
+  return resolved;
+}
+
+[[nodiscard]] std::uint32_t podVarBlobSize(
+    std::span<const ResolvedPodVar> vars) noexcept {
+  std::uint32_t size = bpfj_var_align_up(sizeof(struct bpfj_var) * vars.size());
+  for (const auto& var : vars) {
+    size += bpfj_var_align_up(static_cast<__u32>(var.value.size()) + 1);
+  }
+  return size;
+}
+
+[[nodiscard]] Expected<> setVars(
+    bpfj_var_array& dst,
+    std::span<const ResolvedPodVar> vars,
+    PodArena& arena) noexcept {
+  bpfj_var_array_init(&dst);
+  if (vars.empty()) {
+    return unit;
+  }
+
+  auto blob = arena.alloc(podVarBlobSize(vars));
+  if (!blob) {
+    return makeUnexpected(blob.error());
+  }
+
+  auto* staged = static_cast<struct bpfj_var*>(*blob);
+  std::uint32_t valueOff =
+      bpfj_var_align_up(sizeof(struct bpfj_var) * vars.size());
+  for (std::size_t i = 0; i < vars.size(); ++i) {
+    const auto& var = vars[i];
+    staged[i] = {
+        .id = var.id,
+        .type = BPFJ_VAR_TYPE_STR,
+        .size = static_cast<__u8>(var.value.size()),
+        .reserved = 0,
+        .val = static_cast<unsigned char*>(*blob) + valueOff,
+    };
+
+    auto* value = static_cast<unsigned char*>(staged[i].val);
+    std::memcpy(value, var.value.data(), var.value.size());
+    value[var.value.size()] = '\0';
+    valueOff += bpfj_var_align_up(static_cast<__u32>(var.value.size()) + 1);
+  }
+
+  dst.vars = staged;
+  dst.count = static_cast<__u8>(vars.size());
   return unit;
 }
 
@@ -281,6 +327,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   pod.creation_time_ns = *now;
 
   pod.enrollment_source = BPFJ_ENROLL_CLIENT;
+  bpfj_var_array_init(&pod.var_array);
 
   return pod;
 }
@@ -399,16 +446,26 @@ Expected<bpfj_uuid> enrollPod(
   // owned by nobody if it reaches none.
   pod->refs = 0;
 
-  // Opened only when there is something to resolve, so enrolling without
-  // variables still works against a jail attached before bpfj_var_map was
-  // part of the pin tree.
+  std::optional<PodArena> arena;
   if (!vars.empty()) {
     auto varMap = openVarMap(cfg);
     if (!varMap) {
       return makeUnexpected(varMap.error());
     }
 
-    if (auto res = setVars(pod->var_array, vars, *varMap); !res) {
+    auto resolved = resolveVars(vars, *varMap);
+    if (!resolved) {
+      return makeUnexpected(resolved.error());
+    }
+
+    arena.emplace();
+    auto openedArena = PodArena::open(cfg);
+    if (!openedArena) {
+      return makeUnexpected(openedArena.error());
+    }
+    *arena = std::move(*openedArena);
+
+    if (auto res = setVars(pod->var_array, *resolved, *arena); !res) {
       return makeUnexpected(res.error());
     }
   }
@@ -417,11 +474,17 @@ Expected<bpfj_uuid> enrollPod(
   const bpfj_pod& podValue = *pod;
   if (::bpf_map_update_elem(podMap->get(), &uuid, &podValue, BPF_NOEXIST) !=
       0) {
+    if (arena && pod->var_array.count != 0) {
+      (void)arena->free(pod->var_array.vars);
+    }
     return makeUnexpected(makeErrnoError("failed to create pod"));
   }
 
   // So a failed enrollment does not hold a bpfj_pod_map slot forever.
   const auto dropPod = [&] {
+    if (arena && pod->var_array.count != 0) {
+      (void)arena->free(pod->var_array.vars);
+    }
     (void)::bpf_map_delete_elem(podMap->get(), &uuid);
   };
 

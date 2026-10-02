@@ -151,6 +151,8 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
 // function has to. Called directly for a lock held across a return: the
 // release takes the same `flags`, kept in a frame that outlives the hold, and
 // both calls must fall within one global function.
+// Static BPF subprogram argument tags are rejected by the verifier, while the
+// address-space-qualified pointee preserves the arena cast here without one.
 static __noinline int bpfj_lock_acquire(
     struct bpfj_lock __arena* l,
     unsigned long* flags) {

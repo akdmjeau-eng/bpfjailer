@@ -28,6 +28,7 @@
 #include "bpfj/enforce/UnprivRoles.h"
 #include "bpfj/enforce/VerityEnforcer.h"
 #include "bpfj/enforce/bpf/replace.skel.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -84,36 +85,89 @@ struct VarNames {
   return names;
 }
 
-/// @brief Re-point `pod`'s variables from their ids in the old tree to the ids
-/// the new policy gives the same names. An id is a position in a policy's
-/// `vars`, so a new policy can renumber them, and a pod copied across as is
-/// would carry a different variable with nothing failing. A name the new
-/// policy dropped fails the replace rather than leave the pod without it.
-[[nodiscard]] Expected<> translateVars(
-    bpfj_pod& pod,
+[[nodiscard]] Expected<std::uint32_t> translatedVarId(
+    const struct bpfj_var* var,
     const VarNames& names) noexcept {
-  const auto count = std::min<std::size_t>(pod.var_array.count, BPFJ_VAR_MAX);
-  for (std::size_t i = 0; i < count; ++i) {
-    auto& var = pod.var_array.vars[i];
-    const std::string_view name = var.id < names.oldNames.size()
-        ? std::string_view(names.oldNames[var.id])
-        : std::string_view();
-
-    const auto found =
-        std::find(names.newNames.begin(), names.newNames.end(), name);
-    if (name.empty() || found == names.newNames.end()) {
-      return makeUnexpected(makeError(
-          std::errc::invalid_argument,
-          "pod ",
-          uuidToString(pod.uuid),
-          " carries variable '",
-          name,
-          "', which the new policy does not declare in vars"));
-    }
-
-    var.id = static_cast<__u32>(found - names.newNames.begin());
+  if (var == nullptr || var->id >= names.oldNames.size()) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument, "pod variable has no published name"));
   }
 
+  const std::string_view name = names.oldNames[var->id];
+  const auto found =
+      std::find(names.newNames.begin(), names.newNames.end(), name);
+  if (name.empty() || found == names.newNames.end()) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "pod carries variable '",
+        name,
+        "', which the new policy does not declare in vars"));
+  }
+
+  return static_cast<__u32>(found - names.newNames.begin());
+}
+
+/// @brief Copy `src`'s arena-backed vars into `dst`, translating ids by name
+/// so a new policy can renumber the allowlist without changing what a running
+/// pod means.
+[[nodiscard]] Expected<> translateVars(
+    bpfj_pod& dst,
+    const bpfj_pod& src,
+    PodArena& newArena,
+    const VarNames& names) noexcept {
+  bpfj_var_array_init(&dst.var_array);
+  const auto count = std::min<std::size_t>(src.var_array.count, BPFJ_VAR_MAX);
+  if (count == 0) {
+    return unit;
+  }
+
+  std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_var) * count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto* var = bpfj_var_array_at(&src.var_array, i);
+    if (var == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::bad_address,
+          "pod ",
+          uuidToString(src.uuid),
+          " has an unreadable variable blob"));
+    }
+    blobSize += bpfj_var_align_up(bpfj_var_payload_size(var));
+  }
+
+  auto blob = newArena.alloc(blobSize);
+  if (!blob) {
+    return makeUnexpected(blob.error());
+  }
+
+  auto* outVars = static_cast<struct bpfj_var*>(*blob);
+  std::uint32_t valueOff = bpfj_var_align_up(sizeof(struct bpfj_var) * count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto* oldVar = bpfj_var_array_at(&src.var_array, i);
+    auto newId = translatedVarId(oldVar, names);
+    if (!newId) {
+      (void)newArena.free(*blob);
+      return makeUnexpected(makeError(
+          newId.error().code(),
+          "pod ",
+          uuidToString(src.uuid),
+          ": ",
+          newId.error().message()));
+    }
+
+    const std::uint32_t payloadSize = bpfj_var_payload_size(oldVar);
+    outVars[i] = {
+        .id = *newId,
+        .type = oldVar->type,
+        .size = oldVar->size,
+        .reserved = oldVar->reserved,
+        .val = static_cast<unsigned char*>(*blob) + valueOff,
+    };
+    std::memcpy(outVars[i].val, bpfj_var_value_ptr(oldVar), payloadSize);
+    valueOff += bpfj_var_align_up(payloadSize);
+  }
+
+  dst.var_array.vars = outVars;
+  dst.var_array.count = static_cast<__u8>(count);
   return unit;
 }
 
@@ -142,6 +196,17 @@ struct VarNames {
   // Read only once a pod carries a variable, so a tree with none replaces
   // without either var map.
   std::optional<VarNames> varNames;
+  std::optional<PodArena> oldArena;
+  std::optional<PodArena> newArena;
+  std::vector<void*> newVarBlobs;
+  auto rollbackVars = makeGuard([&] {
+    if (!newArena) {
+      return;
+    }
+    for (void* const blob : newVarBlobs) {
+      (void)newArena->free(blob);
+    }
+  });
 
   std::size_t copied = 0;
   bpfj_uuid curr{};
@@ -166,9 +231,28 @@ struct VarNames {
           varNames = std::move(*read);
         }
 
-        if (auto res = translateVars(pod, *varNames); !res) {
+        if (!oldArena) {
+          auto opened = PodArena::open(oldCfg);
+          if (!opened) {
+            return makeUnexpected(opened.error());
+          }
+          oldArena = std::move(*opened);
+        }
+        if (!newArena) {
+          auto opened = PodArena::open(newCfg);
+          if (!opened) {
+            return makeUnexpected(opened.error());
+          }
+          newArena = std::move(*opened);
+        }
+
+        bpfj_pod translated = pod;
+        if (auto res = translateVars(translated, pod, *newArena, *varNames);
+            !res) {
           return makeUnexpected(res.error());
         }
+        pod = translated;
+        newVarBlobs.push_back(pod.var_array.vars);
       }
 
       if (::bpf_map_update_elem(newMap->get(), &next, &pod, BPF_ANY) != 0) {
@@ -181,6 +265,7 @@ struct VarNames {
     from = &curr;
   }
 
+  rollbackVars.dismiss();
   return copied;
 }
 
@@ -405,6 +490,10 @@ struct VarNames {
   }
 
   if (auto res = skel.load(); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = heap::init(created.value()); !res) {
     return makeUnexpected(res.error());
   }
 

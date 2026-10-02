@@ -8,6 +8,7 @@
 #include "bpfj/enforce/RoleId.h"
 
 #include "bpfj/enforce/bpf/bpf_enforce.skel.h"
+#include "bpfj/lib/Heap.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -165,6 +166,10 @@ Expected<> BpfEnforcer::load(
   }
 
   if (auto res = skel.load(); !res) {
+    return res;
+  }
+
+  if (auto res = heap::init(created.value()); !res) {
     return res;
   }
 

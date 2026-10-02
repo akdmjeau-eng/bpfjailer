@@ -51,21 +51,30 @@ std::string_view boundedId(const char* id, std::size_t size) {
 void printVars(
     std::ostream& os,
     const bpfj_var_array& vars,
-    std::span<const std::string> names) {
+    std::span<const std::string> names,
+    const void* arenaBase) {
   const auto count = std::min<std::size_t>(vars.count, BPFJ_VAR_MAX);
   for (std::size_t i = 0; i < count; ++i) {
-    const bpfj_var& var = vars.vars[i];
+    const auto* var = bpfj_var_array_at(&vars, static_cast<__u32>(i));
     os << (i == 0 ? "    vars:    " : "             ");
-    if (var.id < names.size() && !names[var.id].empty()) {
-      os << names[var.id];
-    } else {
-      os << "#" << var.id;
+    if (var == nullptr) {
+      os << "<unavailable>\n";
+      continue;
     }
-    os << "="
-       << boundedId(
-              var.val.str_val,
-              std::min<std::size_t>(var.size, sizeof(var.val.str_val)))
-       << "\n";
+    if (var->id < names.size() && !names[var->id].empty()) {
+      os << names[var->id];
+    } else {
+      os << "#" << var->id;
+    }
+    os << "=";
+
+    char value[BPFJ_VAR_VAL_LEN] = {};
+    if (arenaBase == nullptr ||
+        bpfj_var_serialize(var, value, sizeof(value)) != 0) {
+      os << "<unavailable>\n";
+      continue;
+    }
+    os << boundedId(value, sizeof(value)) << "\n";
   }
 }
 
@@ -85,7 +94,8 @@ void printPod(
     std::ostream& os,
     const bpfj_pod& pod,
     std::int64_t nowNs,
-    std::span<const std::string> varNames) {
+    std::span<const std::string> varNames,
+    const void* arenaBase) {
   os << "  pod " << uuidToString(pod.uuid) << "\n"
      << "    role:    " << boundedId(pod.role_id.id, ROLE_ID_LEN) << "\n"
      << "    user id: " << boundedId(pod.user_id.id, POD_USER_ID_LEN) << "\n"
@@ -93,7 +103,7 @@ void printPod(
      << "    refs:    " << pod.refs << "\n"
      << "    age:     " << (nowNs - pod.creation_time_ns) / 1'000'000'000
      << "s\n";
-  printVars(os, pod.var_array, varNames);
+  printVars(os, pod.var_array, varNames, arenaBase);
 }
 
 } // namespace bpfjailer::ctl
