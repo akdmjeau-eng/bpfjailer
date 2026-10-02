@@ -39,22 +39,28 @@ enum bpfj_var_type {
   BPFJ_VAR_TYPE_VSOCK_ADDR = 2,
 };
 
-// The running jail's variable allowlist, shared through the arena and named by
-// a pinned singleton map entry. ids stay 1-based, so names[0] is always NULL
-// and count is the largest valid id. Additional name slots are stored in the
-// trailing arena allocation and accessed via bpfj_var_catalog_names().
+// One policy variable name. Records are sized through the terminating NUL in
+// str, and ids are assigned afresh when a policy is loaded.
+struct bpfj_var_name {
+  __u32 id;
+  __u32 len;
+  char str[1];
+};
+
+// The running jail's variable allowlist. Additional name pointers and every
+// variable-sized bpfj_var_name record live in the same arena allocation.
 struct bpfj_var_catalog {
   __u32 count;
   __u32 reserved;
-  const char __arena* names[1];
+  const struct bpfj_var_name __arena* names[1];
 };
 
-BPFJ_VAR_INLINE const char __arena** bpfj_var_catalog_names_mut(
+BPFJ_VAR_INLINE const struct bpfj_var_name __arena** bpfj_var_catalog_names_mut(
     struct bpfj_var_catalog* catalog) {
   return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
 }
 
-BPFJ_VAR_INLINE const char __arena* const* bpfj_var_catalog_names(
+BPFJ_VAR_INLINE const struct bpfj_var_name __arena* const* bpfj_var_catalog_names(
     const struct bpfj_var_catalog* catalog) {
   return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
 }
@@ -68,8 +74,8 @@ struct bpfj_var {
   // Size of the value
   __u8 size;
   __u16 reserved;
-  // Shared allowlist string for this variable's name.
-  const char __arena* name;
+  // Shared allowlist record for this variable's name and current policy id.
+  const struct bpfj_var_name __arena* name;
   // Value bytes for this variable, stored in the shared arena.
   void __arena* val;
 };
@@ -123,10 +129,15 @@ BPFJ_VAR_INLINE const void __arena* bpfj_var_value_ptr(
 
 BPFJ_VAR_INLINE const char __arena* bpfj_var_name_ptr(
     const struct bpfj_var* var) {
-  if (var == BPFJ_VAR_NULL) {
+  if (var == BPFJ_VAR_NULL || var->name == BPFJ_VAR_NULL) {
     return BPFJ_VAR_NULL;
   }
-  return var->name;
+  return var->name->str;
+}
+
+BPFJ_VAR_INLINE __u32 bpfj_var_name_len(const struct bpfj_var* var) {
+  return var == BPFJ_VAR_NULL || var->name == BPFJ_VAR_NULL ? 0
+                                                            : var->name->len;
 }
 
 // Get a variable value as a string

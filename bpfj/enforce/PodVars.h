@@ -27,12 +27,12 @@ struct PodVar {
 /// @brief A policy variable resolved against the running jail's allowlist.
 struct ResolvedPolicyVar {
   std::uint32_t id = 0;
-  const char* name = nullptr;
+  const struct bpfj_var_name* name = nullptr;
 };
 
-/// @brief Publish the policy's `vars` as one arena-backed allowlist blob and
-/// point the running jail's pinned locator map at it. A name's id is its
-/// 1-based position in `names`, so an enrollment naming anything else fails.
+/// @brief Publish the policy's `vars` as one arena-backed allowlist blob. A
+/// name's id is its 1-based policy position, so an enrollment naming anything
+/// else fails.
 [[nodiscard]] Expected<> publishVarNames(
     const PinConfig& cfg,
     std::span<const std::string> names) noexcept;
@@ -40,7 +40,6 @@ struct ResolvedPolicyVar {
 /// @brief The running jail's shared variable allowlist, or null when the
 /// policy published no variables.
 [[nodiscard]] Expected<const struct bpfj_var_catalog*> readVarCatalog(
-    const PinConfig& cfg,
     const PodArena& arena) noexcept;
 
 /// @brief The id and shared name pointer `name` was published under in
@@ -66,6 +65,9 @@ class PodArena {
   [[nodiscard]] void* base() const noexcept {
     return base_;
   }
+
+  [[nodiscard]] struct bpfj_heap_control* ctrl() noexcept;
+  [[nodiscard]] const struct bpfj_heap_control* ctrl() const noexcept;
 
   [[nodiscard]] bool valid() const noexcept {
     return base_ != nullptr;

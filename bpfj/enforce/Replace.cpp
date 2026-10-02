@@ -70,7 +70,7 @@ struct ReplacePodKey {
         std::errc::invalid_argument, "pod variable has no published name"));
   }
 
-  const std::string_view name = bpfj_var_name_ptr(var);
+  const std::string_view name(bpfj_var_name_ptr(var), bpfj_var_name_len(var));
   auto translated = lookupVar(catalog, name);
   if (!translated) {
     return makeUnexpected(makeError(
@@ -260,7 +260,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
       }
 
       if (pod->var_array.count != 0 && !newCatalog) {
-        auto read = readVarCatalog(newCfg, *newArena);
+        auto read = readVarCatalog(*newArena);
         if (!read) {
           return makeUnexpected(read.error());
         }

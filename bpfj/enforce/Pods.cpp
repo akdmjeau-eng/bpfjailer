@@ -40,7 +40,7 @@ struct ActiveEnroll {
 
 struct ResolvedPodVar {
   std::uint32_t id = 0;
-  const char* name = nullptr;
+  const struct bpfj_var_name* name = nullptr;
   std::string_view value;
 };
 
@@ -441,7 +441,7 @@ Expected<bpfj_uuid> enrollPod(
 
   std::vector<ResolvedPodVar> resolved;
   if (!vars.empty()) {
-    auto catalog = readVarCatalog(cfg, arena);
+    auto catalog = readVarCatalog(arena);
     if (!catalog) {
       return makeUnexpected(catalog.error());
     }

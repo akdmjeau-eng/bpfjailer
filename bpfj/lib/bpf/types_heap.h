@@ -87,6 +87,8 @@ struct bpfj_heap_control {
   __u64 current_used; // stats: bytes in use
   struct bpfj_lock lock; // guards every field above and the free lists
   __u32 grow_gen; // bumped by whichever side grows the arena
+  __u32 metadata_reserved;
+  void __arena* var_catalog;
 };
 
 enum bpfj_heap_syscall_op {
@@ -502,6 +504,8 @@ static __always_inline void bpfj_heap_init_arena(
 
   ctrl->arena_size = arena_size;
   ctrl->grow_gen = 0;
+  ctrl->metadata_reserved = 0;
+  ctrl->var_catalog = NULL;
   ctrl->total_alloc = 0;
   ctrl->total_free = 0;
   ctrl->current_used = 0;
