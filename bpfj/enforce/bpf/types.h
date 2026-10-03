@@ -24,6 +24,10 @@
 // Versioning
 #define BPFJ_PID_DATA_VERSION 3
 
+// The persisted task-storage and arena-pod layouts replaced as one unit.
+// Bump this whenever either bpfj_pid_data or bpfj_pod changes shape.
+#define BPFJ_MEMBERSHIP_VERSION 1
+
 // The layout of the bpfj_bpf_owner records below, which a replace reads
 // through the running tree's pin to decide whether it can carry them across;
 // bump it whenever bpfj_bpf_owner changes shape. Pin adoption does not cover
@@ -40,18 +44,20 @@
 #define BPFJ_SHM_OWNER_VERSION 2
 
 #if BPFJ_BPF_OWNER_VERSION > 255 || BPFJ_MQ_OWNER_VERSION > 255 || \
-    BPFJ_SHM_OWNER_VERSION > 255
-#error "arena runtime owner versions are packed into 8-bit fields"
+    BPFJ_SHM_OWNER_VERSION > 255 || BPFJ_MEMBERSHIP_VERSION > 255
+#error "arena runtime versions are packed into 8-bit fields"
 #endif
 
 #define BPFJ_BPF_OWNER_VERSION_SHIFT 0
 #define BPFJ_MQ_OWNER_VERSION_SHIFT 8
 #define BPFJ_SHM_OWNER_VERSION_SHIFT 16
-#define BPFJ_OWNER_VERSION_MASK 0xffU
-#define BPFJ_RUNTIME_OWNER_VERSIONS                                  \
+#define BPFJ_MEMBERSHIP_VERSION_SHIFT 24
+#define BPFJ_RUNTIME_VERSION_MASK 0xffU
+#define BPFJ_RUNTIME_VERSIONS                                        \
   (((__u32)BPFJ_BPF_OWNER_VERSION << BPFJ_BPF_OWNER_VERSION_SHIFT) | \
    ((__u32)BPFJ_MQ_OWNER_VERSION << BPFJ_MQ_OWNER_VERSION_SHIFT) |   \
-   ((__u32)BPFJ_SHM_OWNER_VERSION << BPFJ_SHM_OWNER_VERSION_SHIFT))
+   ((__u32)BPFJ_SHM_OWNER_VERSION << BPFJ_SHM_OWNER_VERSION_SHIFT) | \
+   ((__u32)BPFJ_MEMBERSHIP_VERSION << BPFJ_MEMBERSHIP_VERSION_SHIFT))
 
 #define BPFJ_EXEC_POLICY_XATTR "user.bpfj.policy.exec"
 
@@ -147,9 +153,10 @@ struct bpfj_role_policy {
 // the variable catalog and each configured role set are separate allocations.
 struct bpfj_policy_catalog {
   __u32 count;
-  // Packed BPF/MQ/SHM runtime-map value layout versions. This occupies the
-  // catalog's original reserved word, preserving the policy-array offset.
-  __u32 runtime_owner_versions;
+  // Packed persisted runtime-state layout versions. This occupies the
+  // catalog's original reserved word, preserving the policy-array offset;
+  // the policy graph itself is rebuilt rather than persisted.
+  __u32 runtime_versions;
   const struct bpfj_var_catalog __arena* vars;
   struct bpfj_role_policy policies[1];
 };

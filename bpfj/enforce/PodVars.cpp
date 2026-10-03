@@ -147,7 +147,7 @@ Expected<> publishPolicyCatalog(
   auto* catalog = static_cast<struct bpfj_policy_catalog*>(*rootBlob);
   std::memset(catalog, 0, catalogSize);
   catalog->count = static_cast<__u32>(policy.roles.size());
-  catalog->runtime_owner_versions = BPFJ_RUNTIME_OWNER_VERSIONS;
+  catalog->runtime_versions = BPFJ_RUNTIME_VERSIONS;
 
   auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
   if (!rolePolicies) {

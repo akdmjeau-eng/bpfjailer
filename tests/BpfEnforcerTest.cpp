@@ -647,10 +647,29 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheOwnerLayoutIsUnknown) {
   ASSERT(*catalog);
 
   auto* mutableCatalog = const_cast<struct bpfj_policy_catalog*>(*catalog);
-  mutableCatalog->runtime_owner_versions &=
-      ~(BPFJ_OWNER_VERSION_MASK << BPFJ_BPF_OWNER_VERSION_SHIFT);
-  mutableCatalog->runtime_owner_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
+  mutableCatalog->runtime_versions &=
+      ~(BPFJ_RUNTIME_VERSION_MASK << BPFJ_BPF_OWNER_VERSION_SHIFT);
+  mutableCatalog->runtime_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
       << BPFJ_BPF_OWNER_VERSION_SHIFT;
+
+  ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
+}
+
+TEST(BpfEnforcer, AReplaceIsRefusedWhenTheMembershipLayoutIsUnknown) {
+  const std::string yaml = "roles:\n  carried:\n";
+  attach(yaml);
+
+  auto arena = PodArena::open(testPins());
+  ASSERT(arena);
+  auto catalog = readPolicyCatalog(*arena);
+  ASSERT_OK(catalog);
+  ASSERT(*catalog);
+
+  auto* mutableCatalog = const_cast<struct bpfj_policy_catalog*>(*catalog);
+  mutableCatalog->runtime_versions &=
+      ~(BPFJ_RUNTIME_VERSION_MASK << BPFJ_MEMBERSHIP_VERSION_SHIFT);
+  mutableCatalog->runtime_versions |= (BPFJ_MEMBERSHIP_VERSION + 1)
+      << BPFJ_MEMBERSHIP_VERSION_SHIFT;
 
   ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
 }

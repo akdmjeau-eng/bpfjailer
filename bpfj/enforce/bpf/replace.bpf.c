@@ -58,6 +58,22 @@ struct {
   __type(value, __u64);
 } bpfj_replace_failed SEC(".maps");
 
+// Persisted pod references for which userspace supplied no translation.
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, __u64);
+} bpfj_replace_unmapped SEC(".maps");
+
+// Task-storage entries whose persisted value layout this build cannot read.
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, __u64);
+} bpfj_replace_incompatible SEC(".maps");
+
 static __always_inline void bpfj_replace_count(void* counter) {
   const __u32 zero = 0;
   __u64* n = bpf_map_lookup_elem(counter, &zero);
@@ -125,6 +141,12 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
     return 0;
   }
 
+  if (old->version != BPFJ_PID_DATA_VERSION) {
+    bpfj_replace_count(&bpfj_replace_incompatible);
+    bpfj_replace_count(&bpfj_replace_failed);
+    return 0;
+  }
+
   // Usually already there holding the base role this tree seeded, and
   // created empty for a task the new base role does not cover.
   struct bpfj_pid_data* new_data =
@@ -154,7 +176,14 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
     struct bpfj_replace_pod_key key = {.old_pod = old_pod};
     struct bpfj_replace_pod* translated =
         bpf_map_lookup_elem(&bpfj_replace_pods, &key);
-    if (!translated || !translated->pod) {
+    if (!translated) {
+      bpfj_replace_count(&bpfj_replace_unmapped);
+      lost = true;
+      continue;
+    }
+    // Userspace records the old base-role pod as an intentional tombstone:
+    // the new tree has already seeded its replacement.
+    if (!translated->pod) {
       continue;
     }
 

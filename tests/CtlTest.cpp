@@ -3,6 +3,8 @@
 #include "tests/CtlCommand.h"
 #include "tests/Harness.h"
 
+#include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <fstream>
@@ -183,6 +185,20 @@ TEST(Ctl, ReplaceWithNothingAttachedActsLikeAttach) {
   ASSERT(exists(pinRoot() + "/maps/bpfj_heap_arena"));
   ASSERT(exists(pinRoot() + "/links/bpfj_jailer_fork"));
   ASSERT(!exists(pinRoot() + "-new"));
+}
+
+TEST(Ctl, ConcurrentReplaceIsRefused) {
+  attach();
+
+  const int lock = ::open(bpffsPath().c_str(), O_RDONLY | O_DIRECTORY);
+  ASSERT(lock >= 0);
+  ASSERT_EQ(::flock(lock, LOCK_EX | LOCK_NB), 0);
+
+  const CommandResult res = ctl({"replace", writePolicy(kDefaultPolicy)});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("another jailer replacement is already running"));
+
+  ::close(lock);
 }
 
 TEST(Ctl, ReplaceKeepsAnEnrolledPod) {

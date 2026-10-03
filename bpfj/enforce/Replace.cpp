@@ -4,7 +4,9 @@
 
 #include <bpf/bpf.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/syscall.h>
 
 #include <algorithm>
@@ -68,6 +70,26 @@ constexpr std::string_view kShmPosixDevices = "bpfj_shm_posix_devices";
 
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
+
+[[nodiscard]] Expected<Fd> acquireReplaceLease(const PinConfig& cfg) noexcept {
+  Fd fd(::open(cfg.bpffsPath.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  if (!fd.hasFd()) {
+    return makeUnexpected(
+        makeErrnoError("failed to open bpffs for replacement locking"));
+  }
+
+  if (::flock(fd.get(), LOCK_EX | LOCK_NB) == 0) {
+    return fd;
+  }
+  if (errno == EWOULDBLOCK) {
+    return makeUnexpected(makeError(
+        std::errc::device_or_resource_busy,
+        "another jailer replacement is already running on ",
+        cfg.bpffsPath));
+  }
+  return makeUnexpected(
+      makeErrnoError("failed to lock bpffs for jailer replacement"));
+}
 
 struct ReplacePodValue {
   struct bpfj_pod* pod = nullptr;
@@ -301,25 +323,30 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
     for (std::uint8_t i = 0; i < count; ++i) {
       const auto* pod = pidData->pods[i];
       if (pod == nullptr ||
-          !seen.insert(reinterpret_cast<std::uintptr_t>(pod)).second ||
-          pod->enrollment_source == BPFJ_ENROLL_BASE_ROLE) {
+          !seen.insert(reinterpret_cast<std::uintptr_t>(pod)).second) {
         continue;
       }
 
-      auto translated =
-          translatePod(*pod, *newArena, *rolePolicies, *newCatalog);
-      if (!translated) {
-        return makeUnexpected(translated.error());
+      struct bpfj_pod* newPod = nullptr;
+      if (pod->enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
+        auto translated =
+            translatePod(*pod, *newArena, *rolePolicies, *newCatalog);
+        if (!translated) {
+          return makeUnexpected(translated.error());
+        }
+        newPod = *translated;
+        newPods.push_back(newPod);
       }
-      newPods.push_back(*translated);
 
       const ReplacePodKey key{.oldPod = const_cast<struct bpfj_pod*>(pod)};
-      const ReplacePodValue entry{.pod = *translated};
+      const ReplacePodValue entry{.pod = newPod};
       if (::bpf_map_update_elem(replacePodsMapFd, &key, &entry, BPF_ANY) != 0) {
         return makeUnexpected(
             makeErrnoError("failed to record a carried pod for backfill"));
       }
-      ++copied;
+      if (newPod != nullptr) {
+        ++copied;
+      }
     }
   }
 
@@ -439,7 +466,7 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
   return false;
 }
 
-[[nodiscard]] Expected<std::uint32_t> readOwnerVersions(
+[[nodiscard]] Expected<std::uint32_t> readRuntimeVersions(
     const PinConfig& cfg) noexcept {
   auto arena = PodArena::open(cfg);
   if (!arena) {
@@ -454,7 +481,34 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
         std::errc::bad_address,
         "the running jailer has no arena policy catalog"));
   }
-  return (*catalog)->runtime_owner_versions;
+  return (*catalog)->runtime_versions;
+}
+
+/// Refuse task-storage or pod records this build cannot read. Zero denotes the
+/// immediate predecessor, which used these layouts but had not published a
+/// membership version in the remaining byte of the runtime-version word.
+[[nodiscard]] Expected<> checkMembershipVersion(
+    const PinConfig& cfg,
+    std::uint32_t versions) noexcept {
+  if (!hasPinnedMap(cfg, kTaskMap)) {
+    return unit;
+  }
+
+  std::uint32_t version =
+      (versions >> BPFJ_MEMBERSHIP_VERSION_SHIFT) & BPFJ_RUNTIME_VERSION_MASK;
+  if (version == 0) {
+    version = BPFJ_MEMBERSHIP_VERSION;
+  }
+  if (version != BPFJ_MEMBERSHIP_VERSION) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer persists task membership in layout v",
+        std::to_string(version),
+        ", and this build reads v",
+        std::to_string(BPFJ_MEMBERSHIP_VERSION),
+        "; detach and attach to upgrade"));
+  }
+  return unit;
 }
 
 [[nodiscard]] Expected<std::uint32_t> readLegacyOwnerVersion(
@@ -495,7 +549,7 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
     return unit;
   }
 
-  std::uint32_t version = (versions >> shift) & BPFJ_OWNER_VERSION_MASK;
+  std::uint32_t version = (versions >> shift) & BPFJ_RUNTIME_VERSION_MASK;
   if (version == 0) {
     auto legacy = readLegacyOwnerVersion(cfg, versionMap, what);
     if (!legacy) {
@@ -790,6 +844,31 @@ struct BackfillStats {
     return makeUnexpected(failed.error());
   }
 
+  auto incompatible =
+      readCounter(skel.maps().bpfj_replace_incompatible, "incompatible");
+  if (!incompatible) {
+    return makeUnexpected(incompatible.error());
+  }
+  if (*incompatible != 0) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "backfill found ",
+        std::to_string(*incompatible),
+        " task-storage entry or entries with an incompatible layout"));
+  }
+
+  auto unmapped = readCounter(skel.maps().bpfj_replace_unmapped, "unmapped");
+  if (!unmapped) {
+    return makeUnexpected(unmapped.error());
+  }
+  if (*unmapped != 0) {
+    return makeUnexpected(makeError(
+        std::errc::state_not_recoverable,
+        "backfill found ",
+        std::to_string(*unmapped),
+        " persisted pod reference(s) without a translation"));
+  }
+
   if (*failed != 0) {
     // Swapping now would promote a jailer that silently lost part of the jail,
     // leaving those tasks running unjailed.
@@ -819,9 +898,12 @@ struct BackfillStats {
 
   // Before anything is built, so the only cost of refusing is the parse.
   if (hasOld && hasVersionedOwnerState(cfg)) {
-    auto versions = readOwnerVersions(cfg);
+    auto versions = readRuntimeVersions(cfg);
     if (!versions) {
       return makeUnexpected(versions.error());
+    }
+    if (auto res = checkMembershipVersion(cfg, *versions); !res) {
+      return makeUnexpected(res.error());
     }
     if (auto res = checkOwnerVersion(
             cfg,
@@ -990,6 +1072,11 @@ struct BackfillStats {
 Expected<ReplaceStats> replaceJailer(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
+  auto lease = acquireReplaceLease(cfg);
+  if (!lease) {
+    return makeUnexpected(lease.error());
+  }
+
   PinConfig newCfg = cfg;
   newCfg.pinDir = cfg.pinDir + std::string(kNewSuffix);
 
