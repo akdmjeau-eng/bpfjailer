@@ -1,7 +1,9 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include <sys/resource.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -21,18 +23,30 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  constexpr struct rlimit kUnlimited = {
+      .rlim_cur = RLIM_INFINITY,
+      .rlim_max = RLIM_INFINITY,
+  };
+  if (::setrlimit(RLIMIT_MEMLOCK, &kUnlimited) != 0) {
+    std::cerr << "bpfjtest could not remove its memlock limit: "
+              << std::strerror(errno) << std::endl;
+    return 1;
+  }
+
   int jobs = bpfjailer::test::defaultJobs();
+  std::string_view selection;
   for (int at = 1; at < argc; ++at) {
     const std::string_view arg = argv[at];
     if (arg == "-j" && at + 1 < argc) {
       jobs = std::atoi(argv[++at]);
     } else if (arg.substr(0, 2) == "-j") {
       jobs = std::atoi(argv[at] + 2);
+    } else if (!arg.empty() && arg.front() != '-' && selection.empty()) {
+      selection = arg;
     } else {
-      std::cerr << "usage: bpfjtest [-j jobs]\n"
+      std::cerr << "usage: bpfjtest [-j jobs] [Suite[.Test]]\n"
                    "  -j   tests to run at once, BPFJTEST_JOBS otherwise.\n"
-                   "       -j1 for the serial order, which is what to reach\n"
-                   "       for when a failure might be cross-talk.\n";
+                   "       The default is 1; use wider runs only in a VM.\n";
       return 1;
     }
   }
@@ -42,5 +56,5 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  return bpfjailer::test::runAll(jobs);
+  return bpfjailer::test::runAll(jobs, selection);
 }

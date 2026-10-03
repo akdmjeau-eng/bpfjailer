@@ -658,9 +658,10 @@ $(TEST_BIN): $(COMMON_OBJS) $(TEST_OBJS) $(LINKMODE)
 # the binary is escalated. Set SUDO= to skip it when already privileged by
 # other means, or SUDO="sudo -n" to fail rather than prompt.
 SUDO ?= $(if $(filter 0,$(shell id -u)),,sudo)
+TEST_ARGS ?=
 
 test: $(TEST_BIN) $(LOG_BIN)
-	$(SUDO) $(TEST_BIN)
+	$(SUDO) $(TEST_BIN) $(TEST_ARGS)
 
 signed:
 	$(call sign-preflight)

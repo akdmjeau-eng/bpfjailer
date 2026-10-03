@@ -14,12 +14,11 @@
 // Running the tests needs root: mounting a bpffs is not permitted in an
 // unprivileged user namespace.
 //
-// Tests run several at a time, `-j N` or BPFJTEST_JOBS wide. What makes that
-// safe is not the namespaces -- BPF LSM programs are attached host-wide and
-// see every task on the box, whichever namespace it is in -- but that a task
-// no tree enrolled has no task-storage entry, so no policy applies. One test's
-// enforcers therefore ignore another's processes, because enroll() names a pid
-// and each tree has pod maps of its own.
+// Tests run one at a time by default because repeatedly detaching several BPF
+// trees at once can trigger kernel bugs. `-j N` or BPFJTEST_JOBS opts into
+// parallel execution on a disposable VM. A task no tree enrolled has no
+// task-storage entry, so one test's enforcers normally ignore another's
+// processes when parallel execution is enabled.
 //
 // TEST_EXCLUSIVE is the way out for a test where that does not hold. Exec time
 // enrollment is the case that breaks it: bpfj_enroll_from_xattr makes *every*
@@ -73,9 +72,11 @@ void noteDiagnostic(std::string text);
     std::string_view expression,
     std::string_view detail = {});
 
-/// @brief Run every registered test, `jobs` of the shared ones at a time.
+/// @brief Run the selected registered tests, `jobs` of the shared ones at a
+/// time. An empty selection runs all tests; otherwise it names a suite or a
+/// suite and test separated by a dot.
 /// @return the process exit status.
-int runAll(int jobs);
+int runAll(int jobs, std::string_view selection = {});
 
 /// @brief How many tests to run at once, from BPFJTEST_JOBS or a default.
 [[nodiscard]] int defaultJobs();

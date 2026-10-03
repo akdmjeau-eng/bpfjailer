@@ -2,9 +2,11 @@
 
 #include "tests/Harness.h"
 
+#include "bpfj/enforce/Jailer.h"
 #include "bpfj/fsverity/Keyctl.h"
 #include "bpfj/fsverity/Keyring.h"
 
+#include <bpf/bpf.h>
 #include <fcntl.h>
 #include <linux/loop.h>
 #include <sched.h>
@@ -18,6 +20,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -86,6 +89,14 @@ std::string& mountPath() {
   static std::string path;
   return path;
 }
+
+void unloadTestJailer() noexcept {
+  if (!mountPath().empty()) {
+    (void)Jailer::unload(PinConfig{.bpffsPath = mountPath()});
+  }
+}
+
+[[nodiscard]] bool waitForBpfPolicyDetach();
 
 constexpr int kFailExit = 1;
 constexpr int kSetupExit = 2;
@@ -216,6 +227,15 @@ void captureOutput(const std::string& log) {
     failSetup("put the test in its own process group");
   }
 
+  // A retiring LSM fork hook can enroll this freshly forked process even
+  // after the preceding test has closed its links. Probe from the child that
+  // will actually run the test, and do not begin until that inherited policy
+  // has stopped denying bpf(2).
+  if (!waitForBpfPolicyDetach()) {
+    errno = EPERM;
+    failSetup("wait for the previous BPF policy to detach");
+  }
+
   if (::unshare(CLONE_NEWNS) != 0) {
     failSetup("unshare a mount namespace");
   }
@@ -265,6 +285,7 @@ void captureOutput(const std::string& log) {
 
   mountPath() = dir;
   test.body();
+  unloadTestJailer();
   exitChild(0);
 }
 
@@ -413,6 +434,113 @@ void drainGroup(pid_t pgid) {
   }
 }
 
+[[nodiscard]] bool waitForBpfPolicyDetach() {
+  constexpr auto kDeadline = std::chrono::seconds(10);
+  constexpr auto kPoll = std::chrono::milliseconds(1);
+
+  const auto giveUp = std::chrono::steady_clock::now() + kDeadline;
+  while (std::chrono::steady_clock::now() < giveUp) {
+    const int fd = ::bpf_map_create(
+        BPF_MAP_TYPE_HASH,
+        "bpfj_teardown",
+        sizeof(std::uint32_t),
+        sizeof(std::uint32_t),
+        1,
+        nullptr);
+    if (fd >= 0) {
+      ::close(fd);
+      // A closed LSM link has stopped denying bpf(2) by here. Leave one short
+      // grace period so its fork hook cannot seed work while the kernel
+      // finishes detaching the link set.
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      return true;
+    }
+    if (errno != EPERM) {
+      return true;
+    }
+    std::this_thread::sleep_for(kPoll);
+  }
+
+  std::cerr << "      harness timed out waiting for BPF policy teardown\n";
+  return false;
+}
+
+[[nodiscard]] std::vector<std::uint32_t> bpfjProgramIds() {
+  std::vector<std::uint32_t> ids;
+  std::uint32_t id = 0;
+  std::uint32_t next = 0;
+  while (::bpf_prog_get_next_id(id, &next) == 0) {
+    const int fd = ::bpf_prog_get_fd_by_id(next);
+    if (fd >= 0) {
+      struct bpf_prog_info info{};
+      std::uint32_t size = sizeof(info);
+      if (::bpf_obj_get_info_by_fd(fd, &info, &size) == 0 &&
+          std::string_view(info.name).starts_with("bpfj_")) {
+        ids.push_back(next);
+      }
+      ::close(fd);
+    }
+    id = next;
+  }
+  return ids;
+}
+
+[[nodiscard]] std::vector<std::uint32_t> bpfjMapIds() {
+  std::vector<std::uint32_t> ids;
+  std::uint32_t id = 0;
+  std::uint32_t next = 0;
+  while (::bpf_map_get_next_id(id, &next) == 0) {
+    const int fd = ::bpf_map_get_fd_by_id(next);
+    if (fd >= 0) {
+      struct bpf_map_info info{};
+      std::uint32_t size = sizeof(info);
+      if (::bpf_obj_get_info_by_fd(fd, &info, &size) == 0 &&
+          std::string_view(info.name).starts_with("bpfj_")) {
+        ids.push_back(next);
+      }
+      ::close(fd);
+    }
+    id = next;
+  }
+  return ids;
+}
+
+template <typename ListIds, typename OpenById>
+void waitForBpfObjectsGone(
+    const std::vector<std::uint32_t>& baseline,
+    ListIds listIds,
+    OpenById openById,
+    std::string_view kind) {
+  std::vector<std::uint32_t> created;
+  for (const std::uint32_t id : listIds()) {
+    if (std::find(baseline.begin(), baseline.end(), id) == baseline.end()) {
+      created.push_back(id);
+    }
+  }
+
+  constexpr auto kDeadline = std::chrono::seconds(10);
+  constexpr auto kPoll = std::chrono::milliseconds(1);
+  const auto giveUp = std::chrono::steady_clock::now() + kDeadline;
+  while (!created.empty() && std::chrono::steady_clock::now() < giveUp) {
+    std::erase_if(created, [openById](std::uint32_t id) {
+      const int fd = openById(id);
+      if (fd >= 0) {
+        ::close(fd);
+        return false;
+      }
+      return errno == ENOENT;
+    });
+    if (!created.empty()) {
+      std::this_thread::sleep_for(kPoll);
+    }
+  }
+
+  if (!created.empty()) {
+    std::cerr << "      harness timed out waiting for " << created.size()
+              << " BPF " << kind << "(s) to detach\n";
+  }
+}
+
 /// @brief A test that has been forked and not yet reaped.
 struct Running {
   const RegisteredTest* test = nullptr;
@@ -423,6 +551,8 @@ struct Running {
   // hold the log, which a mount over it would hide.
   std::string mnt;
   std::string log;
+  std::vector<std::uint32_t> baselinePrograms;
+  std::vector<std::uint32_t> baselineMaps;
   std::chrono::steady_clock::time_point started;
 };
 
@@ -444,6 +574,8 @@ struct Running {
   }
 
   const std::string log = dir + "/out";
+  auto baselinePrograms = bpfjProgramIds();
+  auto baselineMaps = bpfjMapIds();
 
   std::cout << std::flush;
   std::cerr << std::flush;
@@ -461,7 +593,15 @@ struct Running {
     runChild(test, mnt, log);
   }
 
-  return Running{&test, pid, dir, mnt, log, std::chrono::steady_clock::now()};
+  return Running{
+      &test,
+      pid,
+      dir,
+      mnt,
+      log,
+      std::move(baselinePrograms),
+      std::move(baselineMaps),
+      std::chrono::steady_clock::now()};
 }
 
 void printLog(const std::string& path) {
@@ -480,6 +620,11 @@ void printLog(const std::string& path) {
   // past the test; ESRCH is the ordinary answer.
   (void)::killpg(run.pid, SIGKILL);
   drainGroup(run.pid);
+  waitForBpfObjectsGone(
+      run.baselinePrograms, bpfjProgramIds, ::bpf_prog_get_fd_by_id, "program");
+  waitForBpfObjectsGone(
+      run.baselineMaps, bpfjMapIds, ::bpf_map_get_fd_by_id, "map");
+  (void)waitForBpfPolicyDetach();
 
   const std::string name = run.test->fullName();
   std::string problem = diagnose(status);
@@ -586,11 +731,7 @@ int defaultJobs() {
     }
   }
 
-  // Half the cores, capped: a test spends most of its time loading BPF
-  // programs and setting up processes rather than on a CPU, and the host this
-  // runs on is usually shared.
-  const unsigned cores = std::thread::hardware_concurrency();
-  return static_cast<int>(std::clamp(cores != 0 ? cores / 2 : 1u, 1u, 8u));
+  return 1;
 }
 
 const std::string& scratchFsPath() {
@@ -619,6 +760,7 @@ void fail(
     std::cerr << lastDiagnostic();
   }
 
+  unloadTestJailer();
   exitChild(kFailExit);
 }
 
@@ -626,9 +768,7 @@ void noteDiagnostic(std::string text) {
   lastDiagnostic() = std::move(text);
 }
 
-int runAll(int jobs) {
-  setUpRunRoot();
-
+int runAll(int jobs, std::string_view selection) {
   if (jobs < 1) {
     jobs = 1;
   }
@@ -638,10 +778,22 @@ int runAll(int jobs) {
   std::vector<const RegisteredTest*> shared;
   std::vector<const RegisteredTest*> exclusive;
   for (const auto& test : tests) {
+    if (!selection.empty() && selection != test.suite &&
+        selection != test.fullName()) {
+      continue;
+    }
     (test.exclusive ? exclusive : shared).push_back(&test);
   }
 
-  std::cout << "[==========] Running " << tests.size() << " test(s), " << jobs
+  const std::size_t selected = shared.size() + exclusive.size();
+  if (selected == 0) {
+    std::cerr << "bpfjtest: no suite or test named '" << selection << "'\n";
+    return 1;
+  }
+
+  setUpRunRoot();
+
+  std::cout << "[==========] Running " << selected << " test(s), " << jobs
             << " at a time";
   if (!exclusive.empty()) {
     std::cout << ", then " << exclusive.size() << " on their own";
@@ -655,8 +807,8 @@ int runAll(int jobs) {
   // test's enforcement, and the shared phase is what would supply it.
   runPhase(exclusive, 1, failed);
 
-  std::cout << "[==========] " << tests.size() - failed.size() << "/"
-            << tests.size() << " passed" << std::endl;
+  std::cout << "[==========] " << selected - failed.size() << "/" << selected
+            << " passed" << std::endl;
   for (const auto& name : failed) {
     std::cout << "[  FAILED  ] " << name << std::endl;
   }
