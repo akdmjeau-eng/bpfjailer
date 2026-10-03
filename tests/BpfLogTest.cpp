@@ -16,6 +16,7 @@
 
 #include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/KillEnforcer.h"
+#include "bpfj/enforce/Replace.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging.h"
 #include "log/BpfLog.h"
@@ -26,6 +27,7 @@ namespace {
 using bpfjailer::FsEnforcer;
 using bpfjailer::KillEnforcer;
 using bpfjailer::Policy;
+using bpfjailer::replaceJailer;
 using bpfjailer::test::bpffsPath;
 using bpfjailer::test::Child;
 using bpfjailer::test::enroll;
@@ -298,6 +300,33 @@ TEST(BpfLog, BpfjlogPrintsDeniedKillToStdoutAndStderr) {
   waitForOutput(proc, "role=svc", true);
   waitForOutput(proc, "Denied signal 0 to pid", false);
   waitForOutput(proc, "kill_enforce.bpf.c", false);
+  ASSERT_EQ(proc.stop(), 0);
+}
+
+TEST(BpfLog, BpfjlogReattachesAfterReplace) {
+  const std::string yaml = "roles:\n  svc:\n    kill-roles:\n";
+  attachKill(yaml);
+  Child before;
+  Child after;
+  Child beforeActor([pid = before.pid()] { return signalErrno(pid); });
+  Child afterActor([pid = after.pid()] { return signalErrno(pid); });
+  enroll("svc", beforeActor.pid());
+  enroll("svc", afterActor.pid());
+  auto proc = spawnBpfjlog({"--bpffs-path", bpffsPath()});
+
+  const std::string beforeNeedle =
+      "Denied signal 0 to pid " + std::to_string(before.pid());
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  ASSERT_EQ(beforeActor.run(), EPERM);
+  waitForOutput(proc, beforeNeedle, false);
+
+  ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
+
+  const std::string afterNeedle =
+      "Denied signal 0 to pid " + std::to_string(after.pid());
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  ASSERT_EQ(afterActor.run(), EPERM);
+  waitForOutput(proc, afterNeedle, false);
   ASSERT_EQ(proc.stop(), 0);
 }
 

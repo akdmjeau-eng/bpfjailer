@@ -4,6 +4,7 @@
 #include "tests/Harness.h"
 
 #include <bpf/bpf.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -203,6 +204,28 @@ TEST(BpfEnforcer, EnrollIsRefusedWhileAReplaceHasFrozenTheTree) {
   ASSERT_EQ(
       uuid.error().code(),
       std::make_error_code(std::errc::device_or_resource_busy));
+}
+
+TEST(BpfEnforcer, ForkIsRefusedWhileAReplaceHasFrozenTheTree) {
+  attach("roles:\n  svc:\n    bpf-any: true\n");
+
+  auto frozen = pins::openPinnedMap(testPins(), "bpfj_replace_frozen");
+  ASSERT(frozen);
+  enroll("svc", ::getpid());
+  const std::uint32_t slot = 0;
+  const std::uint8_t yes = 1;
+  ASSERT_EQ(::bpf_map_update_elem(frozen->get(), &slot, &yes, BPF_ANY), 0);
+
+  errno = 0;
+  const pid_t child = ::fork();
+  if (child == 0) {
+    ::_exit(0);
+  }
+  if (child > 0) {
+    (void)::waitpid(child, nullptr, 0);
+  }
+  ASSERT_EQ(child, -1);
+  ASSERT_EQ(errno, EBUSY);
 }
 
 TEST(BpfEnforcer, ADefaultRoleMayNotCallBpf) {

@@ -64,6 +64,11 @@ int BPF_PROG(
     return 0;
   }
 
+  if (bpfj_replacement_is_frozen()) {
+    BPFJ_LOG_ERR(EBUSY, "Fork blocked while replacing the jailer");
+    return -EBUSY;
+  }
+
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
     num_pods = BPFJ_MAX_POD_PER_PID;

@@ -1,14 +1,17 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include <argp.h>
+#include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <system_error>
+#include <thread>
+#include <utility>
 
 #include "bpfj/enforce/Pins.h"
 #include "bpfj/err/Error.h"
@@ -41,6 +44,42 @@ enum class RecordKind {
 struct CallbackContext {
   RecordKind kind;
   std::string_view mapName;
+};
+
+struct RingBuffers {
+  bpfjailer::Fd logMap;
+  bpfjailer::Fd eventMap;
+  struct ring_buffer* consumer = nullptr;
+  std::uint32_t logMapId = 0;
+  std::uint32_t eventMapId = 0;
+
+  RingBuffers(
+      bpfjailer::Fd log,
+      bpfjailer::Fd event,
+      struct ring_buffer* ringBuffer,
+      std::uint32_t logId,
+      std::uint32_t eventId) noexcept
+      : logMap(std::move(log)),
+        eventMap(std::move(event)),
+        consumer(ringBuffer),
+        logMapId(logId),
+        eventMapId(eventId) {}
+
+  RingBuffers(const RingBuffers&) = delete;
+  RingBuffers& operator=(const RingBuffers&) = delete;
+
+  RingBuffers(RingBuffers&& other) noexcept
+      : logMap(std::move(other.logMap)),
+        eventMap(std::move(other.eventMap)),
+        consumer(std::exchange(other.consumer, nullptr)),
+        logMapId(other.logMapId),
+        eventMapId(other.eventMapId) {}
+
+  ~RingBuffers() {
+    if (consumer != nullptr) {
+      ::ring_buffer__free(consumer);
+    }
+  }
 };
 
 void handleStopSignal(int /* signum */) {
@@ -79,43 +118,91 @@ int handleEvent(void* ctx, void* data, std::size_t size) noexcept {
   return 0;
 }
 
-int pollLoop(struct ring_buffer* ringBuffer) {
-  while (gRunning != 0) {
-    const int ret = ::ring_buffer__poll(ringBuffer, 1000);
-    if (ret >= 0) {
-      continue;
-    }
-
-    if (ret == -EINTR) {
-      continue;
-    }
-
-    const auto err = std::error_code(-ret, std::generic_category());
-    std::cerr << "bpfjlog: failed to poll ring buffers: " << err.message()
-              << std::endl;
-    return 1;
-  }
-
-  return 0;
-}
-
 bool installSignalHandlers() {
   return std::signal(SIGINT, handleStopSignal) != SIG_ERR &&
       std::signal(SIGTERM, handleStopSignal) != SIG_ERR;
 }
 
-bool addMap(
+[[nodiscard]] bpfjailer::Expected<std::uint32_t> mapId(
+    int fd,
+    std::string_view name) {
+  struct bpf_map_info info{};
+  std::uint32_t size = sizeof(info);
+  if (::bpf_obj_get_info_by_fd(fd, &info, &size) != 0) {
+    return bpfjailer::makeUnexpected(
+        bpfjailer::makeErrnoError("failed to inspect ", name));
+  }
+  return info.id;
+}
+
+[[nodiscard]] bpfjailer::Expected<> addMap(
     struct ring_buffer* ringBuffer,
     int fd,
     CallbackContext* ctx,
     std::string_view mapName) {
   if (::ring_buffer__add(ringBuffer, fd, handleEvent, ctx) == 0) {
-    return true;
+    return bpfjailer::unit;
   }
 
-  std::cerr << "bpfjlog: failed to attach to " << mapName << ": "
-            << std::strerror(errno) << std::endl;
-  return false;
+  return bpfjailer::makeUnexpected(
+      bpfjailer::makeErrnoError("failed to attach to ", mapName));
+}
+
+[[nodiscard]] bpfjailer::Expected<RingBuffers> openRingBuffers(
+    const PinConfig& cfg,
+    CallbackContext& logCtx,
+    CallbackContext& eventCtx) {
+  auto logMap = openPinnedMap(cfg, kLogMapName);
+  if (!logMap) {
+    return bpfjailer::makeUnexpected(logMap.error());
+  }
+  auto eventMap = openPinnedMap(cfg, kEventMapName);
+  if (!eventMap) {
+    return bpfjailer::makeUnexpected(eventMap.error());
+  }
+  auto logId = mapId(logMap->get(), kLogMapName);
+  if (!logId) {
+    return bpfjailer::makeUnexpected(logId.error());
+  }
+  auto eventId = mapId(eventMap->get(), kEventMapName);
+  if (!eventId) {
+    return bpfjailer::makeUnexpected(eventId.error());
+  }
+
+  struct ring_buffer* consumer =
+      ::ring_buffer__new(logMap->get(), handleEvent, &logCtx, nullptr);
+  if (consumer == nullptr) {
+    return bpfjailer::makeUnexpected(
+        bpfjailer::makeErrnoError("failed to attach to ", kLogMapName));
+  }
+  if (auto added = addMap(consumer, eventMap->get(), &eventCtx, kEventMapName);
+      !added) {
+    ::ring_buffer__free(consumer);
+    return bpfjailer::makeUnexpected(added.error());
+  }
+
+  return RingBuffers{
+      std::move(*logMap), std::move(*eventMap), consumer, *logId, *eventId};
+}
+
+[[nodiscard]] bool pinsChanged(
+    const PinConfig& cfg,
+    const RingBuffers& current) {
+  auto logMap = openPinnedMap(cfg, kLogMapName);
+  auto eventMap = openPinnedMap(cfg, kEventMapName);
+  if (!logMap || !eventMap) {
+    return false;
+  }
+
+  auto logId = mapId(logMap->get(), kLogMapName);
+  auto eventId = mapId(eventMap->get(), kEventMapName);
+  return logId && eventId &&
+      (*logId != current.logMapId || *eventId != current.eventMapId);
+}
+
+void drainRingBuffers(struct ring_buffer* consumer) {
+  while (gRunning != 0 && ::ring_buffer__poll(consumer, 0) > 0) {
+  }
 }
 
 } // namespace
@@ -130,35 +217,44 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto logMap = openPinnedMap(cfg, kLogMapName);
-  if (!logMap) {
-    std::cerr << "bpfjlog: " << logMap.error() << std::endl;
-    return 1;
-  }
-
-  auto eventMap = openPinnedMap(cfg, kEventMapName);
-  if (!eventMap) {
-    std::cerr << "bpfjlog: " << eventMap.error() << std::endl;
-    return 1;
-  }
-
   CallbackContext logCtx{RecordKind::BpfLog, kLogMapName};
   CallbackContext eventCtx{RecordKind::Event, kEventMapName};
+  bool connected = false;
+  while (gRunning != 0) {
+    auto buffers = openRingBuffers(cfg, logCtx, eventCtx);
+    if (!buffers) {
+      if (!connected) {
+        std::cerr << "bpfjlog: " << buffers.error() << std::endl;
+        return 1;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue;
+    }
+    connected = true;
 
-  struct ring_buffer* ringBuffer =
-      ::ring_buffer__new(logMap->get(), handleEvent, &logCtx, nullptr);
-  if (!ringBuffer) {
-    std::cerr << "bpfjlog: failed to attach to " << kLogMapName << ": "
-              << std::strerror(errno) << std::endl;
-    return 1;
+    auto nextPinCheck =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    bool pollFailed = false;
+    while (gRunning != 0) {
+      const int ret = ::ring_buffer__poll(buffers->consumer, 250);
+      if (ret < 0 && ret != -EINTR) {
+        std::cerr << "bpfjlog: ring buffer poll failed: " << std::strerror(-ret)
+                  << std::endl;
+        pollFailed = true;
+        break;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= nextPinCheck) {
+        nextPinCheck = now + std::chrono::milliseconds(250);
+        if (pinsChanged(cfg, *buffers)) {
+          drainRingBuffers(buffers->consumer);
+          break;
+        }
+      }
+    }
+    if (pollFailed) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
   }
-
-  if (!addMap(ringBuffer, eventMap->get(), &eventCtx, kEventMapName)) {
-    ::ring_buffer__free(ringBuffer);
-    return 1;
-  }
-
-  const int rc = pollLoop(ringBuffer);
-  ::ring_buffer__free(ringBuffer);
-  return rc;
+  return 0;
 }
