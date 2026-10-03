@@ -156,6 +156,9 @@ static __always_inline int bpfj_mount_enforce_path(
       if (count > 0 && !bpfj_mount_match_allowed(state, count, scratch)) {
         return bpfj_mount_deny(pod, task, &scratch->role, "mount");
       }
+      if (count == -E2BIG) {
+        return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+      }
       if (count < 0 && count != -EXDEV) {
         BPFJ_LOG_ERR(-count, "mount destination path match failed");
       }

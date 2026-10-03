@@ -197,6 +197,9 @@ static __always_inline int bpfj_unix_enforce_path(
       if (count > 0 && !bpfj_unix_path_allowed(state, operation, count)) {
         return bpfj_unix_deny(pod, task, &role);
       }
+      if (count == -E2BIG) {
+        return bpfj_unix_deny(pod, task, &role);
+      }
       if (count < 0 && count != -EXDEV) {
         BPFJ_LOG_ERR(-count, "Unix socket path match failed");
       }

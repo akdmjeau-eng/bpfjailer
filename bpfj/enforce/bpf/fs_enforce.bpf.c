@@ -111,6 +111,12 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
           &uuid,
           bpfj_file_match_cached_bind_var_array,
           &pod->var_array);
+      if (count == -E2BIG) {
+        struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
+        bpfj_event_submit(event);
+        BPFJ_LOG("Denied filesystem access: path exceeds matcher limit");
+        return -EACCES;
+      }
       allowed = count > 0 && bpfj_fs_match_allowed(state, wanted, count);
       if (count < 0 && count != -EXDEV) {
         BPFJ_LOG_ERR(-count, "filesystem path match failed");
@@ -132,6 +138,11 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
 #define BPFJ_FS_CHECK(_dentry, _mode) \
   bpfj_fs_enforce((uintptr_t)(_dentry), _mode)
 
+static __always_inline bool bpfj_fs_current_enrolled(void) {
+  struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
+  return pid_data && pid_data->num_pods != 0;
+}
+
 SEC("lsm/file_open")
 int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
   if (lsm_ret) {
@@ -148,7 +159,17 @@ int BPF_PROG(
     struct inode* dir,
     struct dentry* dentry,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  if (ret) {
+    return ret;
+  }
+  if (bpfj_fs_current_enrolled()) {
+    BPFJ_FILE_MATCH_CACHED_INVALIDATE(bpfj_fs_match_lru, dentry);
+  }
+  return 0;
 }
 
 SEC("lsm/inode_link")
@@ -161,7 +182,14 @@ int BPF_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  return BPFJ_FS_CHECK(new_dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(new_dentry, FMODE_WRITE);
+  if (ret) {
+    return ret;
+  }
+  if (bpfj_fs_current_enrolled()) {
+    BPFJ_FILE_MATCH_CACHED_INVALIDATE(bpfj_fs_match_lru, old_dentry);
+  }
+  return 0;
 }
 
 SEC("lsm/inode_link")
@@ -240,7 +268,17 @@ int BPF_PROG(
     struct inode* dir,
     struct dentry* dentry,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  if (ret) {
+    return ret;
+  }
+  if (bpfj_fs_current_enrolled()) {
+    BPFJ_FILE_MATCH_CACHED_INVALIDATE(bpfj_fs_match_lru, dentry);
+  }
+  return 0;
 }
 
 SEC("lsm/inode_mkdir")

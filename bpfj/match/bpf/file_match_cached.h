@@ -11,7 +11,9 @@
 #include "bpfj/match/bpf/types_file_match.h"
 #include "bpfj/match/bpf/types_file_match_cached.h"
 
-#define BPFJ_FILE_MATCH_CACHED_MAX_RECURSION 2048
+#ifndef BPFJ_FILE_MATCH_CACHED_MAX_RECURSION
+#define BPFJ_FILE_MATCH_CACHED_MAX_RECURSION 16384
+#endif
 #define BPFJ_FILE_MATCH_CACHED_BUF_SIZE 4096
 #define BPFJ_FILE_MATCH_CACHED_MAX_SAVED_DENTRIES 64
 #define BPFJ_FILE_MATCH_CACHED_MAX_DIR_DESCENDANTS 128
@@ -34,9 +36,9 @@ static __always_inline u32 bpfj_file_hashlen_len(u64 hashlen) {
           _inode, const struct btrfs_inode, vfs_inode))
 
 #define BTRFS_FIRST_FREE_OBJECTID 256ULL
+#define BPFJ_BTRFS_SUPER_MAGIC 0x9123683E
 
 extern const void rename_lock __ksym;
-extern const void btrfs_file_inode_operations __ksym;
 extern const void btrfs_dir_inode_operations __ksym;
 
 volatile __u64 bpfj_file_match_cached_cache_hit_counter;
@@ -113,16 +115,19 @@ volatile __u64 bpfj_file_match_cached_cache_miss_counter;
     _ret;                                                                   \
   })
 
-// Rename is uncommon for enrolled tasks, and correctness matters more than
-// preserving unrelated cache entries. Retire the whole generation instead of
-// allocating and contending on the LRU from the rename hook.
-#define BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(_lru, _dentry)   \
+// Topology changes are uncommon, and correctness matters more than preserving
+// unrelated cache entries. Retire the whole generation instead of allocating
+// and contending on the LRU from mutation hooks.
+#define BPFJ_FILE_MATCH_CACHED_INVALIDATE(_lru, _dentry)             \
   ({                                                                 \
     (void)(_lru);                                                    \
     (void)(_dentry);                                                 \
     __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1); \
     0L;                                                              \
   })
+
+#define BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(_lru, _dentry) \
+  BPFJ_FILE_MATCH_CACHED_INVALIDATE(_lru, _dentry)
 
 // IMPLEMENTATION
 
@@ -203,6 +208,26 @@ bpfj_file_match_cached_iter_at(
 static __always_inline bool bpfj_file_match_cached_caches(
     struct bpfj_file_match_cached_state __arena* state) {
   return state->matcher != NULL && state->matcher->lru != NULL;
+}
+
+static __always_inline bool bpfj_file_match_cached_leaf_cacheable(
+    struct bpfj_file_match_cached_state __arena* state) {
+  if (!bpfj_file_match_cached_caches(state)) {
+    return false;
+  }
+
+  struct dentry* leaf = state->leaf;
+  struct inode* inode = BPF_CORE_READ(leaf, d_inode);
+  if (inode == NULL) {
+    return false;
+  }
+
+  // Directories use i_nlink for `.` and child directories, not hard-link
+  // aliases. Non-directories with any count other than one have no unique path
+  // identity, so an inode-based cache key cannot safely represent them.
+  umode_t mode = BPF_CORE_READ(inode, i_mode);
+  bool is_dir = (mode & 00170000) == 0040000;
+  return is_dir || BPF_CORE_READ(inode, i_nlink) == 1;
 }
 
 // The position the iter at `index` reached, or -1 if there is no such iter.
@@ -574,7 +599,7 @@ __noinline long bpfj_file_match_cached_move_up(
   if (dentry == root) {
     BPFJ_DBG_LOG("file_match_cached: Reached root");
     *out = 0;
-    return 0;
+    return 1;
   }
 
   struct dentry* parent = BPF_CORE_READ((struct dentry*)dentry, d_parent);
@@ -596,7 +621,7 @@ __noinline long bpfj_file_match_cached_move_up(
       if (mountpoint == (uintptr_t)parent) {
         BPFJ_DBG_LOG("file_match_cached: Reached root mount");
         *out = 0;
-        return 0;
+        return mountpoint == root ? 1 : 0;
       }
 
       bool parent_is_subvol_root =
@@ -607,7 +632,7 @@ __noinline long bpfj_file_match_cached_move_up(
         if (mountpoint == root) {
           BPFJ_DBG_LOG("file_match_cached: Reached parent root mount");
           *out = 0;
-          return 0;
+          return 1;
         }
         *out = mountpoint;
         BPFJ_DBG_LOG("file_match_cached: Found mount, moving up to %p", *out);
@@ -619,7 +644,7 @@ __noinline long bpfj_file_match_cached_move_up(
         if (mountpoint == root) {
           BPFJ_DBG_LOG("file_match_cached: Reached parent root mount");
           *out = 0;
-          return 0;
+          return 1;
         }
         if (mountpoint == (uintptr_t)parent) {
           BPFJ_DBG_LOG("file_match_cached: Reached root mount");
@@ -642,7 +667,7 @@ __noinline long bpfj_file_match_cached_move_up(
     if ((uintptr_t)parent == root) {
       BPFJ_DBG_LOG("file_match_cached: Dentry root is target root, stopping");
       *out = 0;
-      return 0;
+      return 1;
     }
     long ret = bpfj_mount_find_parent(
         state->mount_snapshot.buf, (uintptr_t)parent, &state->mount_fallback);
@@ -651,7 +676,7 @@ __noinline long bpfj_file_match_cached_move_up(
       state->mount = state->mount_fallback.parent_vfsmount;
       if (mountpoint == root || mountpoint == (uintptr_t)parent) {
         *out = 0;
-        return 0;
+        return mountpoint == root ? 1 : 0;
       }
       *out = mountpoint;
       return 0;
@@ -666,7 +691,7 @@ __noinline long bpfj_file_match_cached_move_up(
     if ((uintptr_t)parent == root) {
       BPFJ_DBG_LOG("file_match_cached: Parent is root, stopping");
       *out = 0;
-      return 0;
+      return 1;
     }
     bool parent_is_subvol_root =
         BPF_CORE_READ(parent, d_inode, i_op) == &btrfs_dir_inode_operations &&
@@ -679,7 +704,7 @@ __noinline long bpfj_file_match_cached_move_up(
         state->mount = state->mount_fallback.parent_vfsmount;
         if (mountpoint == root) {
           *out = 0;
-          return 0;
+          return 1;
         }
         if (mountpoint != 0 && mountpoint != (uintptr_t)parent) {
           *out = mountpoint;
@@ -851,7 +876,11 @@ static __noinline void bpfj_file_match_cached_bind(
   }
 
 static u64 bpfj_file_match_cached_subvol(struct inode* inode) {
-  if (BPF_CORE_READ(inode, i_op) != &btrfs_file_inode_operations) {
+  if (inode == NULL) {
+    return 0;
+  }
+  struct super_block* sb = BPF_CORE_READ(inode, i_sb);
+  if (sb == NULL || BPF_CORE_READ(sb, s_magic) != BPFJ_BTRFS_SUPER_MAGIC) {
     return 0;
   }
 
@@ -920,6 +949,10 @@ __noinline long bpfj_file_match_cached_log_key(
 
 long bpfj_file_match_cached_check_file_cache(
     struct bpfj_file_match_cached_state __arena* state __arg_arena) {
+  if (!bpfj_file_match_cached_leaf_cacheable(state)) {
+    return -ENOENT;
+  }
+
   BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_key, key);
   if (!key) {
     return -ENOMEM;
@@ -978,6 +1011,10 @@ long bpfj_file_match_cached_check_file_cache(
 
 long bpfj_file_match_cached_save_file_cache(
     struct bpfj_file_match_cached_state __arena* state __arg_arena) {
+  if (!bpfj_file_match_cached_leaf_cacheable(state)) {
+    return 0;
+  }
+
   BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_key, key);
   if (!key) {
     return -ENOMEM;
@@ -1150,6 +1187,7 @@ long file_match_cached_internal_loop(
   // same for every component. A NULL glob_map -- nothing compiled -- leaves the
   // run matching nothing, exactly as before.
   bpfj_glob_run_bind(run, matcher->glob_map, &state->bindings);
+  bool reached_root = false;
   u32 i = 0;
   bpf_for(i, 0, BPFJ_FILE_MATCH_CACHED_MAX_RECURSION) {
     // A self-parented dentry is a filesystem root, not a path component. A
@@ -1163,7 +1201,13 @@ long file_match_cached_internal_loop(
       if (ret < 0) {
         return ret;
       }
+      if (ret > 0) {
+        reached_root = true;
+        curr = 0;
+        break;
+      }
       if (out == 0) {
+        curr = 0;
         break;
       }
       curr = out;
@@ -1191,33 +1235,52 @@ long file_match_cached_internal_loop(
     if (ret < 0) {
       return ret;
     }
+    if (ret > 0) {
+      reached_root = true;
+      curr = 0;
+      break;
+    }
     if (out == 0) {
+      curr = 0;
       break;
     }
 
     curr = (uintptr_t)out;
   }
 
-  return 0;
+  if (curr != 0) {
+    return -E2BIG;
+  }
+  if (!reached_root) {
+    return 0;
+  }
+
+  // Add an explicit `/` policy only after reaching the selected namespace
+  // root, without finalizing the existing iterators: those are the
+  // more-specific matches completed by the child immediately below the root
+  // and must remain available for precedence. Do not glob-match an empty name:
+  // an unbound variable also resolves to empty and must match nothing.
+  if (matcher->has_root == 0) {
+    return 0;
+  }
+  return bpfj_file_match_cached_process_indexes(
+      matcher, state, matcher->root_indexes);
 }
 
 __noinline long file_match_cached(
     struct bpfj_file_matcher __arena* matcher __arg_arena,
     struct bpfj_file_match_cached_state __arena* state __arg_arena,
     struct bpfj_mount_cache __arena* mount_cache __arg_arena) {
-  // A negative dentry -- one with no inode yet, which is what the mknod-family
-  // hooks are handed -- contributes ino 0 to the cache key, so every negative
-  // dentry on a superblock would collide and alias to whichever path was
-  // matched there first. Match it, but neither read nor write the cache.
+  // Negative dentries and multiply-linked non-directories have no unique
+  // inode-based path identity. Match them, but neither read nor write the
+  // cache.
   //
   // The dentry is read back out of the run state, where bind put it, and it is
   // landed in a local before BPF_CORE_READ touches it: that macro relocates
   // every step of the chain it is given, and the run state is ours, not the
   // kernel's, so there is no BTF for it to relocate against. Same two-step as
   // bpfj_file_match_cached_build_key.
-  struct dentry* leaf = state->leaf;
-  bool cacheable = bpfj_file_match_cached_caches(state) &&
-      BPF_CORE_READ(leaf, d_inode) != NULL;
+  bool cacheable = bpfj_file_match_cached_leaf_cacheable(state);
 
   if (cacheable) {
     long count = bpfj_file_match_cached_check_file_cache(state);

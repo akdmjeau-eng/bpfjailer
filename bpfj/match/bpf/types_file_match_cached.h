@@ -40,6 +40,10 @@ struct bpfj_file_matcher {
   // back to a caller that knows what it is.
   __u32 data_entry_size;
   __u32 data_entry_count;
+  // Packed bpfj_file_match_indexes for an explicit `/` policy. Root matching
+  // bypasses the glob engine so an unbound variable cannot match as empty.
+  __u64 root_indexes;
+  __u32 has_root;
   struct bpfj_file_match_cached_pattern_str __arena*
       pattern_strs; // arena ptr to pattern_str[]
   __u32 num_pattern_strs;

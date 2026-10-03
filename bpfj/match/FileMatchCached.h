@@ -303,6 +303,11 @@ class FileMatchCached {
       values.emplace(pathId++, value);
     }
 
+    if (const auto root = patterns.find(""); root != patterns.end()) {
+      std::memcpy(&matcher_->root_indexes, &root->second, sizeof(root->second));
+      matcher_->has_root = 1;
+    }
+
     if (auto res = initGlob(std::move(resolveKey), patterns); !res) {
       return res.error();
     }
