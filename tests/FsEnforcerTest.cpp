@@ -86,7 +86,7 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_fs_inode_rename"));
   ASSERT(linkPinned("bpfj_fs_inode_rename_destination"));
   ASSERT(linkPinned("bpfj_fs_inode_link_source"));
-  ASSERT(linkPinned("bpfj_fs_file_ioctl"));
+  ASSERT(!linkPinned("bpfj_fs_file_ioctl"));
 }
 
 TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {

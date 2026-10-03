@@ -146,7 +146,6 @@ Expected<> FsEnforcer::load(
       {skel.links().bpfj_fs_inode_removexattr, "bpfj_fs_inode_removexattr"},
       {skel.links().bpfj_fs_file_truncate, "bpfj_fs_file_truncate"},
       {skel.links().bpfj_fs_inode_symlink, "bpfj_fs_inode_symlink"},
-      {skel.links().bpfj_fs_file_ioctl, "bpfj_fs_file_ioctl"},
   };
   for (const auto& [link, name] : links) {
     if (auto res = pins::pinLink(link, name, linkDir); !res) {

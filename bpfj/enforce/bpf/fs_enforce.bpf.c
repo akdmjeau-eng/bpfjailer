@@ -344,19 +344,4 @@ int BPF_PROG(
                  : BPFJ_FS_CHECK(BPF_CORE_READ(dentry, d_parent), FMODE_WRITE);
 }
 
-SEC("lsm/file_ioctl")
-int BPF_PROG(
-    bpfj_fs_file_ioctl,
-    struct file* file,
-    unsigned int cmd,
-    unsigned long arg,
-    int lsm_ret) {
-  if (lsm_ret) {
-    return lsm_ret;
-  }
-  __u32 mode = BPF_CORE_READ(file, f_mode);
-  mode = (mode & FMODE_WRITE) ? FMODE_WRITE : FMODE_READ;
-  return BPFJ_FS_CHECK(BPF_CORE_READ(file, f_path.dentry), mode);
-}
-
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
