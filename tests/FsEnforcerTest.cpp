@@ -87,6 +87,15 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_fs_inode_rename_destination"));
   ASSERT(linkPinned("bpfj_fs_inode_link_source"));
   ASSERT(!linkPinned("bpfj_fs_file_ioctl"));
+  ASSERT(!linkPinned("bpfj_fs_file_truncate"));
+
+  auto arena = bpfjailer::PodArena::open(testPins());
+  ASSERT(arena);
+  auto catalog = bpfjailer::readPolicyCatalog(*arena);
+  ASSERT_OK(catalog);
+  ASSERT(*catalog);
+  ASSERT_EQ((*catalog)->count, 1U);
+  ASSERT((*catalog)->policies[0].fs_matcher != nullptr);
 }
 
 TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {
@@ -215,7 +224,7 @@ TEST(FsEnforcer, CacheSeparatesPodsWithDifferentVariableBindings) {
 
   const Policy policy = policyOf(
       "vars:\n  - USER\nroles:\n  svc:\n    paths:\n      " +
-      std::string(root) + "/$USER/data: NONE\n");
+      std::string(root) + ": RDONLY\n      " + root + "/$USER/data: NONE\n");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 

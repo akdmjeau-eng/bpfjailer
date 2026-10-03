@@ -123,6 +123,7 @@ enum bpfj_policy_mode {
 #define BPFJ_POLICY_VERITY_ANY (1U << 6)
 
 struct bpfj_role_policy;
+struct bpfj_file_matcher;
 
 // A role list used only with BPFJ_POLICY_ROLES. An empty set permits the
 // actor's own pod but no additional role. Entries point directly at shared
@@ -132,9 +133,8 @@ struct bpfj_role_set {
   const struct bpfj_role_policy __arena* policies[1];
 };
 
-// Immutable policy shared by every pod carrying one role. Target lists are
-// sparse arena allocations so policy memory grows with what was configured,
-// not with the square of the number of roles.
+// Policy shared by every pod carrying one role, with sparse arena allocations
+// so memory grows with what was configured rather than the square of roles.
 struct bpfj_role_policy {
   struct bpfj_role_id role_id;
   __u32 flags;
@@ -151,6 +151,7 @@ struct bpfj_role_policy {
   __u8 enroll_mode;
   __u32 mq_posix_pattern_id;
   __u32 shm_posix_pattern_id;
+  struct bpfj_file_matcher __arena* fs_matcher;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };
 

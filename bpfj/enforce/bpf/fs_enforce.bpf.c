@@ -18,30 +18,10 @@
 #define FMODE_WRITE BPFJ_FS_MODE_WRITE
 #define FMODE_EXEC BPFJ_FS_MODE_EXEC
 
-// Role -> matcher, one shared inode cache, and one immutable snapshot of PID
-// 1's mount namespace. Userspace builds the first two before attaching; the
-// first lookup builds the mount snapshot and later lookups reuse it until the
-// mount generation changes.
-struct bpfj_str_map __arena* bpfj_fs_matchers;
+// Each role policy points directly at its matcher while all roles share the
+// inode cache and PID 1 mount snapshot.
 struct bpfj_dyn_lru __arena* bpfj_fs_match_lru;
 struct bpfj_mount_cache __arena bpfj_fs_mount_cache;
-
-static __noinline struct bpfj_file_matcher __arena* bpfj_fs_matcher_for(
-    const struct bpfj_role_id* role) {
-  char key[BPFJ_FILE_MATCH_ROLE_KEY_LEN] = {};
-  __u32 i;
-  bpf_for(i, 0, ROLE_ID_LEN) {
-    key[i & (ROLE_ID_LEN - 1)] = role->id[i & (ROLE_ID_LEN - 1)];
-  }
-  key[BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1] = '\0';
-
-  void __arena* out = NULL;
-  if (bpfj_str_map_lookup_strlen(
-          bpfj_fs_matchers, key, BPFJ_FILE_MATCH_ROLE_KEY_LEN, &out) != 0) {
-    return NULL;
-  }
-  return out;
-}
 
 static __always_inline bool bpfj_fs_mode_allowed(__u32 granted, __u32 wanted) {
   if ((wanted & FMODE_WRITE) && !(granted & FMODE_WRITE)) {
@@ -119,7 +99,8 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
     bpfj_pod_read_role_id(&role, pod);
     bpfj_pod_read_uuid(&uuid, pod);
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    struct bpfj_file_matcher __arena* matcher = bpfj_fs_matcher_for(&role);
+    struct bpfj_file_matcher __arena* matcher =
+        policy ? policy->fs_matcher : NULL;
     bool allowed = policy && (policy->flags & BPFJ_POLICY_FS_ANY);
     if (matcher) {
       long count = BPFJ_FILE_MATCH_CACHED(
@@ -324,13 +305,6 @@ int BPF_PROG(
     const char* name,
     int lsm_ret) {
   return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
-}
-
-SEC("lsm/file_truncate")
-int BPF_PROG(bpfj_fs_file_truncate, struct file* file, int lsm_ret) {
-  return lsm_ret
-      ? lsm_ret
-      : BPFJ_FS_CHECK(BPF_CORE_READ(file, f_path.dentry), FMODE_WRITE);
 }
 
 SEC("lsm/inode_symlink")

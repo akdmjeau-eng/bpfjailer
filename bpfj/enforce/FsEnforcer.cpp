@@ -2,7 +2,7 @@
 
 #include "bpfj/enforce/FsEnforcer.h"
 
-#include <deque>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -11,13 +11,13 @@
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/bpf/types.h" // @manual
 #include "bpfj/enforce/bpf/types_fs.h" // @manual
 #include "bpfj/match/bpf/types_mount.h" // @manual
 
 // The generated skeleton embeds bpfj_mount_cache by value.
 #include "bpfj/enforce/bpf/fs_enforce.skel.h"
 #include "bpfj/lib/Heap.h"
-#include "bpfj/lib/StrMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 #include "bpfj/match/FileMatchCached.h"
 
@@ -37,6 +37,22 @@ namespace {
       return 0;
   }
   return 0;
+}
+
+[[nodiscard]] struct bpfj_role_policy* findRolePolicy(
+    struct bpfj_policy_catalog* catalog,
+    std::string_view role) noexcept {
+  if (catalog == nullptr || role.size() >= ROLE_ID_LEN) {
+    return nullptr;
+  }
+  for (__u32 i = 0; i < catalog->count; ++i) {
+    auto& candidate = catalog->policies[i];
+    if (std::memcmp(candidate.role_id.id, role.data(), role.size()) == 0 &&
+        candidate.role_id.id[role.size()] == '\0') {
+      return &candidate;
+    }
+  }
+  return nullptr;
 }
 
 } // namespace
@@ -89,9 +105,9 @@ Expected<> FsEnforcer::load(
     }
     return found->second;
   };
-  std::deque<struct bpfj_file_matcher*> slots;
   std::vector<std::unique_ptr<Matcher>> matchers;
-  std::map<std::string, void*> roleMatchers;
+  auto* catalog = static_cast<struct bpfj_policy_catalog*>(
+      skel.bss().bpfj_heap_ctrl->var_catalog);
 
   for (const auto& [name, role] : policy.roles) {
     if (role.paths.empty()) {
@@ -102,25 +118,26 @@ Expected<> FsEnforcer::load(
       paths.emplace(path, bpfj_fs_path_entry{.mode = toMode(mode)});
     }
 
-    auto& slot = slots.emplace_back(nullptr);
+    auto* rolePolicy = findRolePolicy(catalog, name);
+    if (rolePolicy == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::invalid_argument,
+          "filesystem role is missing from the published policy catalog: ",
+          name));
+    }
     auto matcher = std::make_unique<Matcher>();
     if (auto res = matcher->init(
             obj,
             resolveVariable,
             Matcher::SharedMaps{.match = matchLru},
-            slot,
+            rolePolicy->fs_matcher,
             paths);
         !res) {
       return res.error();
     }
-    roleMatchers.emplace(name, slot);
     matchers.push_back(std::move(matcher));
   }
 
-  StrMap<Skel> matcherMap{obj, skel.bss().bpfj_fs_matchers, false};
-  if (auto res = matcherMap.init(roleMatchers); !res) {
-    return res.error();
-  }
   if (auto res = skel.attach(); !res) {
     return res;
   }
@@ -144,7 +161,6 @@ Expected<> FsEnforcer::load(
       {skel.links().bpfj_fs_inode_getxattr, "bpfj_fs_inode_getxattr"},
       {skel.links().bpfj_fs_inode_listxattr, "bpfj_fs_inode_listxattr"},
       {skel.links().bpfj_fs_inode_removexattr, "bpfj_fs_inode_removexattr"},
-      {skel.links().bpfj_fs_file_truncate, "bpfj_fs_file_truncate"},
       {skel.links().bpfj_fs_inode_symlink, "bpfj_fs_inode_symlink"},
   };
   for (const auto& [link, name] : links) {
