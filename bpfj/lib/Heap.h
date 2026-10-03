@@ -7,6 +7,7 @@
 // the TLSF control structure and publishes the base into the bpfj_heap_ctrl
 // BPF global, which is how both worlds find the arena.
 
+#include <sys/mman.h>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
@@ -45,6 +46,26 @@ err::Expected<> init(Skel& obj) {
   void* ret = bpf_map__initial_value(obj->maps().bpfj_heap_arena, &size);
   if (!ret) {
     return err::Error(std::errc::invalid_argument, "No arena mmap");
+  }
+
+  void* const arenaBase =
+      reinterpret_cast<void*>(bpf_map__map_extra(obj->maps().bpfj_heap_arena));
+  if (arenaBase != nullptr) {
+    // OSS assigns a fixed map_extra so pinned arenas can be reopened at the
+    // same address. Replace libbpf's staging mapping there with the map fd.
+    constexpr std::size_t kArenaMapSize =
+        BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE;
+    void* const mapped = ::mmap(
+        arenaBase,
+        kArenaMapSize,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_FIXED,
+        bpf_map__fd(obj->maps().bpfj_heap_arena),
+        0);
+    if (mapped == MAP_FAILED) {
+      return err::Error::fromErrno("Failed to mmap arena");
+    }
+    ret = mapped;
   }
 
   // For an arena map libbpf reports the size of the object's __arena globals,
@@ -252,7 +273,7 @@ inline long allocOffset(Skel&& skel, __u32 size) {
 
     long offset =
         runHeapSyscall(std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_ALLOC, size);
-    if (offset == -ENOMEM) {
+    if (offset == BPFJ_HEAP_NULL || offset == -ENOMEM) {
       __u32 expectedArenaSize = 0;
       long ret = prefaultGrowth(
           base(std::forward<Skel>(skel)), size, expectedArenaSize);

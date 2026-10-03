@@ -532,6 +532,32 @@ TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
   ASSERT(res.errHas("which is not in roles"));
 }
 
+TEST(Ctl, CheckAcceptsMessageQueuePosixPatterns) {
+  const std::string policy = writePolicy(
+      "vars:\n"
+      "  - UUID\n"
+      "roles:\n"
+      "  client:\n"
+      "    mq-posix-pattern:\n"
+      "      - service-*\n"
+      "      - service-${UUID}\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 0);
+}
+
+TEST(Ctl, CheckRejectsMessageQueuePatternAndOutrightDenialTogether) {
+  const std::string policy = writePolicy(
+      "roles:\n"
+      "  muddled:\n"
+      "    mq-posix-pattern: service-*\n"
+      "    no-mq-posix: true\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict"));
+}
+
 TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
   const std::string policy = writePolicy(
       "roles:\n"
@@ -562,6 +588,32 @@ TEST(Ctl, CheckRejectsUnknownSharedMemoryRole) {
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("which is not in roles"));
+}
+
+TEST(Ctl, CheckAcceptsSharedMemoryPosixPatterns) {
+  const std::string policy = writePolicy(
+      "vars:\n"
+      "  - UUID\n"
+      "roles:\n"
+      "  client:\n"
+      "    shm-posix-pattern:\n"
+      "      - service-?\n"
+      "      - service-${UUID}\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 0);
+}
+
+TEST(Ctl, CheckRejectsSharedMemoryPatternAndOutrightDenialTogether) {
+  const std::string policy = writePolicy(
+      "roles:\n"
+      "  muddled:\n"
+      "    shm-posix-pattern: service-*\n"
+      "    no-shm-posix: true\n");
+
+  const CommandResult res = runCtl({"check", policy});
+  ASSERT_EQ(res.status, 1);
+  ASSERT(res.errHas("contradict"));
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatIsNotAnInteger) {

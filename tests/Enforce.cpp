@@ -62,8 +62,12 @@ bool pinnedMapIsEmpty(std::string_view name) {
 }
 
 void enroll(std::string_view role, pid_t pid) {
+  enroll(role, pid, {});
+}
+
+void enroll(std::string_view role, pid_t pid, std::span<const PodVar> vars) {
   auto enrolled =
-      enrollPod(testPins(), role, "tester@meta", {}, pid, Threads::All);
+      enrollPod(testPins(), role, "tester@meta", vars, pid, Threads::All);
   ASSERT_OK(enrolled);
 }
 

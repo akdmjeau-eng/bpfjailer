@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/IpcGlob.h"
 #include "bpfj/enforce/bpf/shm_enforce.skel.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/Heap.h"
@@ -176,7 +177,6 @@ Expected<> registerPosixShmMount(const PinConfig& cfg, pid_t pid) noexcept {
 Expected<> ShmEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
-  (void)policy;
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }
@@ -211,7 +211,21 @@ Expected<> ShmEnforcer::load(
   if (auto res = skel.load(); !res) {
     return res;
   }
-  if (auto res = heap::init(created.value()); !res) {
+  auto patterns = compileIpcPatterns(
+      created.value(),
+      skel.bss().bpfj_shm_posix_patterns,
+      skel.bss().bpfj_ipc_glob_run0,
+      skel.bss().bpfj_ipc_glob_run1,
+      skel.bss().bpfj_ipc_glob_run2,
+      skel.bss().bpfj_ipc_glob_run3,
+      policy,
+      &RolePolicy::shmPosixPatterns);
+  if (!patterns) {
+    return makeUnexpected(patterns.error());
+  }
+  if (auto res = publishIpcPatternIds(
+          cfg, *patterns, &bpfj_role_policy::shm_posix_pattern_id);
+      !res) {
     return res;
   }
   if (auto res = writeVersion(skel, "bpfj_shm_sysv_owner_version"); !res) {

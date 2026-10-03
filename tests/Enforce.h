@@ -5,10 +5,12 @@
 #include <sys/types.h>
 
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/ScratchMapFds.h"
 #include "bpfj/policy/Policy.h"
 
@@ -46,6 +48,9 @@ void loadJailer(const Policy& policy);
 /// each call makes a *new* pod -- only fork shares one, which is what the
 /// own-pod tests turn on.
 void enroll(std::string_view role, pid_t pid);
+
+/// @brief The variable-carrying form of enroll().
+void enroll(std::string_view role, pid_t pid, std::span<const PodVar> vars);
 
 /// @brief A forked child the test drives, two ways: as a target left waiting
 /// for something else to signal, attach to or open, or as an actor released by

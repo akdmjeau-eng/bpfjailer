@@ -133,8 +133,12 @@ roles:
     bpf:                       # empty: only BPF objects its role owns
     mq-sysv:                   # empty: only SysV queues from its own pod
     mq-posix:                  # empty: only POSIX queues from its own pod
+    mq-posix-pattern:          # names allowed regardless of queue ownership
+      - service-${vm_uuid}-*
     shm-sysv:                  # empty: only SysV SHM from its own pod
     shm-posix:                 # empty: only POSIX SHM from its own pod
+    shm-posix-pattern:         # names allowed regardless of SHM ownership
+      - service-${vm_uuid}-*
     keyring:                   # empty: only its own role's keyring
   sandbox:
     no-bpf: true               # bpf(2) denied outright
@@ -177,6 +181,15 @@ POSIX queues are tracked by the mqueuefs superblock device and inode number;
 `mq_open` and descriptor receipt are checked. The device number distinguishes
 the separate mqueuefs instances used by IPC namespaces, so the IPC namespace
 inode is not part of the key.
+
+`mq-posix-pattern` and `shm-posix-pattern` are lists of POSIX object names that
+override the corresponding owner-role list. Patterns match the name without
+its leading slash and support literals, `?`, `*`, and `${NAME}` references to
+the acquiring pod's declared variables. Every referenced variable must be
+present on that pod or the pattern does not match. A pattern does not override
+`no-mq-posix` or `no-shm-posix`; combining either pair in one role is rejected.
+Patterns apply to opens, descriptor receipt, and the later queue or mapping
+operations checked by the enforcer. They do not apply to System V IPC.
 
 POSIX descriptors already held when a process is enrolled, or inherited by a
 fork inside a pod, are capabilities and are not revoked. Descriptor transfer

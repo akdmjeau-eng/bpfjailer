@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "bpfj/enforce/IpcGlob.h"
 #include "bpfj/enforce/bpf/mq_enforce.skel.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/Heap.h"
@@ -33,7 +34,6 @@ Expected<> writeVersion(
 Expected<> MqEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
-  (void)policy;
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }
@@ -62,7 +62,21 @@ Expected<> MqEnforcer::load(
   if (auto res = skel.load(); !res) {
     return res;
   }
-  if (auto res = heap::init(created.value()); !res) {
+  auto patterns = compileIpcPatterns(
+      created.value(),
+      skel.bss().bpfj_mq_posix_patterns,
+      skel.bss().bpfj_ipc_glob_run0,
+      skel.bss().bpfj_ipc_glob_run1,
+      skel.bss().bpfj_ipc_glob_run2,
+      skel.bss().bpfj_ipc_glob_run3,
+      policy,
+      &RolePolicy::mqPosixPatterns);
+  if (!patterns) {
+    return makeUnexpected(patterns.error());
+  }
+  if (auto res = publishIpcPatternIds(
+          cfg, *patterns, &bpfj_role_policy::mq_posix_pattern_id);
+      !res) {
     return res;
   }
   if (auto res = writeVersion(skel, "bpfj_mq_sysv_owner_version"); !res) {

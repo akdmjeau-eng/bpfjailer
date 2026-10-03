@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <string>
@@ -19,6 +20,7 @@
 #include "bpfj/enforce/Replace.h"
 
 using bpfjailer::MqEnforcer;
+using bpfjailer::PodVar;
 using bpfjailer::Policy;
 using bpfjailer::replaceJailer;
 using bpfjailer::test::Child;
@@ -323,6 +325,42 @@ TEST(MqEnforcer, PosixPolicyCanNameAnOwnerRole) {
   ASSERT_EQ(::mq_unlink(name.c_str()), 0);
 }
 
+TEST(MqEnforcer, PosixPatternOverridesUnknownOwnership) {
+  const std::string name = uniquePosixName();
+  const std::string serial = name.substr(name.rfind('-') + 1);
+  ASSERT_EQ(createPosix(name), 0);
+  attach(
+      "vars:\n"
+      "  - SERIAL\n"
+      "roles:\n"
+      "  client:\n"
+      "    mq-posix-pattern: bpfj-mq-?est-*-${SERIAL}\n");
+  const std::array vars{PodVar{.name = "SERIAL", .value = serial}};
+  enroll("client", ::getpid(), vars);
+
+  ASSERT_EQ(acquirePosix(name), 0);
+  ASSERT_EQ(::mq_unlink(name.c_str()), 0);
+}
+
+TEST(MqEnforcer, PosixPatternWithAMissingVariableDoesNotMatch) {
+  const std::string name = uniquePosixName();
+  ASSERT_EQ(createPosix(name), 0);
+  Child cleanup([name] {
+    errno = 0;
+    return ::mq_unlink(name.c_str()) == 0 ? 0 : errno;
+  });
+  attach(
+      "vars:\n"
+      "  - SERIAL\n"
+      "roles:\n"
+      "  client:\n"
+      "    mq-posix-pattern: bpfj-mq-test-*-${SERIAL}\n");
+  enroll("client", ::getpid());
+
+  ASSERT_EQ(acquirePosix(name), EPERM);
+  ASSERT_EQ(cleanup.run(), 0);
+}
+
 TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
   const std::string name = uniquePosixName();
   ASSERT_EQ(createPosix(name), 0);
@@ -358,4 +396,13 @@ TEST(MqEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {
 TEST(MqEnforcer, PosixDescriptorReceiptAllowsANamedOwnerRole) {
   expectReceivedFd(
       "roles:\n  owner:\n  client:\n    mq-posix:\n      - owner\n", 0);
+}
+
+TEST(MqEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
+  expectReceivedFd(
+      "roles:\n"
+      "  owner:\n"
+      "  client:\n"
+      "    mq-posix-pattern: bpfj-mq-test-*\n",
+      0);
 }

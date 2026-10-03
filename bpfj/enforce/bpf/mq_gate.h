@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "bpfj/enforce/bpf/ipc_glob.h"
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
@@ -47,50 +48,84 @@ static __always_inline bool bpfj_mq_current_owner(struct bpfj_mq_owner* owner) {
 /// Apply one of the independent mq-sysv/mq-posix gates. Every configured
 /// actor role must permit the owner; an empty list therefore permits only the
 /// exact creating pod. Roles absent from the map abstain, unless an override
-/// role ends the walk. Missing ownership is denied whenever any applicable
-/// role is configured, and allowed when none is.
+/// role ends the walk. A matching POSIX name pattern can permit an object even
+/// when ownership is missing; otherwise configured roles deny unknown owners.
+struct bpfj_mq_allow_ctx {
+  enum bpfj_policy_gate gate;
+  struct bpfj_pid_data* actor;
+  const struct bpfj_mq_owner* owner;
+  const struct bpfj_glob_map __arena* patterns;
+  const struct qstr* name;
+  __u32 next;
+  __u8 allowed;
+};
+
+static long bpfj_mq_allow_cb(__u32 index, void* data) {
+  (void)index;
+  struct bpfj_mq_allow_ctx* ctx = data;
+  const __u32 next = ctx->next;
+  if (next == 0 || next > BPFJ_MAX_POD_PER_PID) {
+    return 1;
+  }
+
+  const __u32 i = next - 1;
+  ctx->next = i;
+  struct bpfj_pod __arena* pod = ctx->actor->pods[i];
+  if (!pod) {
+    return 0;
+  }
+
+  struct bpfj_uuid actor_pod = {};
+  bpfj_pod_read_uuid(&actor_pod, pod);
+  const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+  if (!policy) {
+    ctx->allowed = 0;
+    return 1;
+  }
+  const __u8 mode = ctx->gate == BPFJ_POLICY_GATE_MQ_SYSV
+      ? policy->mq_sysv_mode
+      : policy->mq_posix_mode;
+  if (mode != BPFJ_POLICY_UNCONFIGURED) {
+    if (mode == BPFJ_POLICY_DENY) {
+      ctx->allowed = 0;
+      return 1;
+    }
+
+    const bool permitted = ctx->owner &&
+        (bpfj_mq_uuid_equal(&actor_pod, &ctx->owner->pod) ||
+         bpfj_role_set_contains(policy->gates[ctx->gate], ctx->owner->policy));
+    const __u32 pattern_id = ctx->gate == BPFJ_POLICY_GATE_MQ_POSIX
+        ? policy->mq_posix_pattern_id
+        : 0;
+    if (!permitted &&
+        !bpfj_ipc_glob_matches(ctx->patterns, pod, ctx->name, pattern_id)) {
+      ctx->allowed = 0;
+      return 1;
+    }
+  }
+
+  return bpfj_is_override(pod) ? 1 : 0;
+}
+
 static __always_inline bool bpfj_mq_allowed(
     enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
-    const struct bpfj_mq_owner* owner) {
+    const struct bpfj_mq_owner* owner,
+    const struct bpfj_glob_map __arena* patterns,
+    const struct qstr* name) {
   if (!actor) {
     return true;
   }
 
-  const __u32 num_pods = bpfj_gate_num_pods(actor);
-  for (int i = BPFJ_MAX_POD_PER_PID - 1; i >= 0; --i) {
-    if (i >= num_pods) {
-      continue;
-    }
-
-    struct bpfj_pod __arena* pod = actor->pods[i];
-    if (!pod) {
-      continue;
-    }
-
-    struct bpfj_uuid actor_pod = {};
-    bpfj_pod_read_uuid(&actor_pod, pod);
-    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (!policy) {
-      return false;
-    }
-    const __u8 mode = gate == BPFJ_POLICY_GATE_MQ_SYSV ? policy->mq_sysv_mode
-                                                       : policy->mq_posix_mode;
-    if (mode != BPFJ_POLICY_UNCONFIGURED) {
-      if (mode == BPFJ_POLICY_DENY || !owner) {
-        return false;
-      }
-
-      if (!bpfj_mq_uuid_equal(&actor_pod, &owner->pod) &&
-          !bpfj_role_set_contains(policy->gates[gate], owner->policy)) {
-        return false;
-      }
-    }
-
-    if (bpfj_is_override(pod)) {
-      break;
-    }
-  }
-
-  return true;
+  struct bpfj_mq_allow_ctx ctx = {
+      .gate = gate,
+      .actor = actor,
+      .owner = owner,
+      .patterns = patterns,
+      .name = name,
+      .next = bpfj_gate_num_pods(actor),
+      .allowed = 1,
+  };
+  bpf_loop(ctx.next, bpfj_mq_allow_cb, &ctx, 0);
+  return ctx.allowed;
 }

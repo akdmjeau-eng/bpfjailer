@@ -21,24 +21,6 @@
 // and both the compiled header (see GlobMap.h) and the per-run state live on
 // the arena, keeping ~8 KiB off the 512-byte BPF stack.
 
-struct bpfj_glob_run {
-  // A pointer, not a copy: it and every table it points at are arena-resident.
-  __arena const struct bpfj_glob_map* map;
-  __u32 len;
-  __u32 num_matches;
-  // By value, since a plain pointer stashed in arena run state decays to a
-  // scalar across the global-function boundary.
-  struct bpfj_glob_bindings bindings;
-  __u64 state[BPFJ_GLOB_MAP_MAX_WORDS];
-  __u64 var_advance[BPFJ_GLOB_MAP_MAX_WORDS]; // per-byte gadget advance scratch
-  char str[BPFJ_GLOB_MAP_MAX_STR_LEN];
-  __u64 results[BPFJ_GLOB_MAP_MAX_RESULTS];
-  // Each gadget's resolved variable value, bulk-read once per lookup so the
-  // per-byte matching reads a flat buffer.
-  __u32 gadget_len[BPFJ_GLOB_MAP_MAX_GADGETS];
-  char gadget_val[BPFJ_GLOB_MAP_MAX_GADGETS][BPFJ_GLOB_MAP_MAX_VAR_LEN];
-};
-
 static __always_inline __u32
 bpfj_glob_ptr_off(void __arena* base, __arena const void* ptr) {
   return (__u32)((unsigned long)ptr - (unsigned long)base);
@@ -366,6 +348,37 @@ static __noinline long bpfj_glob_map_lookup(
   }
 
   return count;
+}
+
+// Match one caller-assigned value without truncating at the result-vector
+// capacity, so several patterns carrying the same policy id remain exact.
+// The caller has already copied the search string into run->str.
+static __noinline long
+bpfj_glob_map_contains(struct bpfj_glob_run __arena* run, u32 len, u64 wanted) {
+  if (run == NULL || run->map == NULL || len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+    return 0;
+  }
+
+  run->len = len;
+  long ret = bpfj_glob_eval(run);
+  if (ret < 0) {
+    return ret;
+  }
+
+  u32 accepts = run->map->num_accepts;
+  u32 i = 0;
+  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
+    if (i >= accepts) {
+      break;
+    }
+    u32 word = run->map->accept_word[i] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
+    u32 bit = run->map->accept_bit[i] & 63;
+    if (((run->state[word] >> bit) & 1ULL) != 0 &&
+        run->map->accept_val[i] == wanted) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static __noinline void bpfj_glob_map_destroy(

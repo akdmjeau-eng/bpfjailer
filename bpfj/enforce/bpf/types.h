@@ -123,6 +123,8 @@ struct bpfj_role_policy {
   __u8 kill_mode;
   __u8 ptrace_mode;
   __u8 keyring_mode;
+  __u32 mq_posix_pattern_id;
+  __u32 shm_posix_pattern_id;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };
 

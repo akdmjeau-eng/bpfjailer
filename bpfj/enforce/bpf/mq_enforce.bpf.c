@@ -21,6 +21,8 @@
 
 #define BPFJ_MQUEUE_MAGIC 0x19800202
 
+struct bpfj_glob_map __arena* bpfj_mq_posix_patterns;
+
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
@@ -80,7 +82,7 @@ static __always_inline int bpfj_mq_sysv_check(
       bpf_map_lookup_elem(&bpfj_mq_sysv_owners, &key);
   struct bpfj_pid_data* pid_data =
       actor ? bpfj_get_task_pid_data(actor) : bpfj_get_current_pid_data();
-  return bpfj_mq_allowed(BPFJ_POLICY_GATE_MQ_SYSV, pid_data, owner)
+  return bpfj_mq_allowed(BPFJ_POLICY_GATE_MQ_SYSV, pid_data, owner, NULL, NULL)
       ? 0
       : bpfj_mq_deny("System V");
 }
@@ -96,7 +98,9 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
   if (!bpfj_mq_allowed(
           BPFJ_POLICY_GATE_MQ_SYSV,
           bpfj_get_current_pid_data(),
-          owned ? &owner : NULL)) {
+          owned ? &owner : NULL,
+          NULL,
+          NULL)) {
     return bpfj_mq_deny("System V");
   }
 
@@ -189,7 +193,9 @@ int BPF_PROG(bpfj_mq_posix_alloc, struct inode* inode, int lsm_ret) {
   if (!bpfj_mq_allowed(
           BPFJ_POLICY_GATE_MQ_POSIX,
           bpfj_get_current_pid_data(),
-          pending.owned ? &pending.owner : NULL)) {
+          pending.owned ? &pending.owner : NULL,
+          NULL,
+          NULL)) {
     return bpfj_mq_deny("POSIX");
   }
 
@@ -208,8 +214,14 @@ static __always_inline int bpfj_mq_posix_check(struct file* file) {
 
   const struct bpfj_mq_owner* owner =
       bpf_map_lookup_elem(&bpfj_mq_posix_owners, &key);
+  struct dentry* dentry = file ? BPF_CORE_READ(file, f_path.dentry) : NULL;
+  const struct qstr* name = dentry ? &dentry->d_name : NULL;
   return bpfj_mq_allowed(
-             BPFJ_POLICY_GATE_MQ_POSIX, bpfj_get_current_pid_data(), owner)
+             BPFJ_POLICY_GATE_MQ_POSIX,
+             bpfj_get_current_pid_data(),
+             owner,
+             bpfj_mq_posix_patterns,
+             name)
       ? 0
       : bpfj_mq_deny("POSIX");
 }
@@ -233,10 +245,14 @@ int BPF_PROG(bpfj_mq_posix_open, struct file* file, int lsm_ret) {
     return bpfj_mq_posix_check(file);
   }
 
+  struct dentry* dentry = BPF_CORE_READ(file, f_path.dentry);
+  const struct qstr* name = dentry ? &dentry->d_name : NULL;
   if (!bpfj_mq_allowed(
           BPFJ_POLICY_GATE_MQ_POSIX,
           bpfj_get_current_pid_data(),
-          pending->owned ? &pending->owner : NULL)) {
+          pending->owned ? &pending->owner : NULL,
+          bpfj_mq_posix_patterns,
+          name)) {
     return bpfj_mq_deny("POSIX");
   }
 

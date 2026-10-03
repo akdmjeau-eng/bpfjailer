@@ -47,6 +47,9 @@ struct RolePolicy {
   std::vector<std::string> mqPosix;
   bool hasMqPosix = false;
 
+  /// @brief POSIX queue names this role may acquire regardless of ownership.
+  std::vector<std::string> mqPosixPatterns;
+
   /// @brief Deny POSIX message queues outright. Cannot be combined with
   /// `mq-posix`.
   bool noMqPosix = false;
@@ -63,6 +66,10 @@ struct RolePolicy {
   /// @brief The POSIX-shared-memory counterpart of `shmSysv`.
   std::vector<std::string> shmPosix;
   bool hasShmPosix = false;
+
+  /// @brief POSIX shared-memory names this role may acquire regardless of
+  /// ownership.
+  std::vector<std::string> shmPosixPatterns;
 
   /// @brief Deny POSIX shared memory outright. Cannot be combined with
   /// `shm-posix`.

@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <string>
@@ -20,6 +21,7 @@
 #include "bpfj/enforce/Replace.h"
 #include "bpfj/enforce/ShmEnforcer.h"
 
+using bpfjailer::PodVar;
 using bpfjailer::Policy;
 using bpfjailer::replaceJailer;
 using bpfjailer::ShmEnforcer;
@@ -325,6 +327,30 @@ TEST(ShmEnforcer, PosixPolicyCanNameAnOwnerRole) {
   ASSERT_EQ(::shm_unlink(name.c_str()), 0);
 }
 
+TEST(ShmEnforcer, PosixPatternOverridesTheOwnerRoleList) {
+  const std::string name = uniquePosixName();
+  const std::string serial = name.substr(name.rfind('-') + 1);
+  attach(
+      "vars:\n"
+      "  - SERIAL\n"
+      "roles:\n"
+      "  owner:\n"
+      "  client:\n"
+      "    shm-posix:\n"
+      "    shm-posix-pattern: bpfj-shm-?est-*-${SERIAL}\n");
+  Child creator([name] { return createPosix(name); });
+  enroll("owner", creator.pid());
+  ASSERT_EQ(creator.run(), 0);
+
+  const std::array vars{PodVar{.name = "SERIAL", .value = serial}};
+  enroll("client", ::getpid(), vars);
+  const int fd = ::shm_open(name.c_str(), O_RDWR, 0600);
+  ASSERT(fd >= 0);
+  ASSERT_EQ(mmapErrno(fd), 0);
+  ::close(fd);
+  ASSERT_EQ(::shm_unlink(name.c_str()), 0);
+}
+
 TEST(ShmEnforcer, RestrictedPosixPolicyRejectsAnUnknownOwner) {
   const std::string name = uniquePosixName();
   ASSERT_EQ(createPosix(name), 0);
@@ -423,6 +449,15 @@ TEST(ShmEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {
 TEST(ShmEnforcer, PosixDescriptorReceiptAllowsANamedOwnerRole) {
   expectReceivedFd(
       "roles:\n  owner:\n  client:\n    shm-posix:\n      - owner\n", 0);
+}
+
+TEST(ShmEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
+  expectReceivedFd(
+      "roles:\n"
+      "  owner:\n"
+      "  client:\n"
+      "    shm-posix-pattern: bpfj-shm-test-*\n",
+      0);
 }
 
 TEST(ShmEnforcer, NoShmPosixDoesNotCoverMemfd) {

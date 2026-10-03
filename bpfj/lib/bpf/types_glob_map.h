@@ -89,3 +89,16 @@ struct bpfj_glob_bindings {
   __u32 _pad;
   struct bpfj_glob_binding b[BPFJ_GLOB_MAP_MAX_BINDINGS];
 };
+
+struct bpfj_glob_run {
+  __arena const struct bpfj_glob_map* map;
+  __u32 len;
+  __u32 num_matches;
+  struct bpfj_glob_bindings bindings;
+  __u64 state[BPFJ_GLOB_MAP_MAX_WORDS];
+  __u64 var_advance[BPFJ_GLOB_MAP_MAX_WORDS];
+  char str[BPFJ_GLOB_MAP_MAX_STR_LEN];
+  __u64 results[BPFJ_GLOB_MAP_MAX_RESULTS];
+  __u32 gadget_len[BPFJ_GLOB_MAP_MAX_GADGETS];
+  char gadget_val[BPFJ_GLOB_MAP_MAX_GADGETS][BPFJ_GLOB_MAP_MAX_VAR_LEN];
+};

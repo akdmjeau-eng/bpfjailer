@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "bpfj/enforce/bpf/ipc_glob.h"
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
@@ -44,51 +45,84 @@ static __always_inline bool bpfj_shm_current_owner(
 
 // Every configured actor role has to permit the owner. An empty list permits
 // only the exact creating pod; a deny entry permits nothing; an absent role
-// abstains. A missing owner is denied as soon as any applicable role is
-// configured.
+// abstains. A matching POSIX name pattern can permit an object even when
+// ownership is missing; otherwise configured roles deny unknown owners.
+struct bpfj_shm_allow_ctx {
+  enum bpfj_policy_gate gate;
+  struct bpfj_pid_data* actor;
+  const struct bpfj_shm_owner* owner;
+  const struct bpfj_glob_map __arena* patterns;
+  const struct qstr* name;
+  __u32 next;
+  __u8 allowed;
+};
+
+static long bpfj_shm_allow_cb(__u32 index, void* data) {
+  (void)index;
+  struct bpfj_shm_allow_ctx* ctx = data;
+  const __u32 next = ctx->next;
+  if (next == 0 || next > BPFJ_MAX_POD_PER_PID) {
+    return 1;
+  }
+
+  const __u32 i = next - 1;
+  ctx->next = i;
+  struct bpfj_pod __arena* pod = ctx->actor->pods[i];
+  if (!pod) {
+    return 0;
+  }
+
+  struct bpfj_uuid actor_pod = {};
+  bpfj_pod_read_uuid(&actor_pod, pod);
+  const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+  if (!policy) {
+    ctx->allowed = 0;
+    return 1;
+  }
+  const __u8 mode = ctx->gate == BPFJ_POLICY_GATE_SHM_SYSV
+      ? policy->shm_sysv_mode
+      : policy->shm_posix_mode;
+  if (mode != BPFJ_POLICY_UNCONFIGURED) {
+    if (mode == BPFJ_POLICY_DENY) {
+      ctx->allowed = 0;
+      return 1;
+    }
+
+    const bool permitted = ctx->owner &&
+        (bpfj_shm_uuid_equal(&actor_pod, &ctx->owner->pod) ||
+         bpfj_role_set_contains(policy->gates[ctx->gate], ctx->owner->policy));
+    const __u32 pattern_id = ctx->gate == BPFJ_POLICY_GATE_SHM_POSIX
+        ? policy->shm_posix_pattern_id
+        : 0;
+    if (!permitted &&
+        !bpfj_ipc_glob_matches(ctx->patterns, pod, ctx->name, pattern_id)) {
+      ctx->allowed = 0;
+      return 1;
+    }
+  }
+
+  return bpfj_is_override(pod) ? 1 : 0;
+}
+
 static __always_inline bool bpfj_shm_allowed(
     enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
-    const struct bpfj_shm_owner* owner) {
+    const struct bpfj_shm_owner* owner,
+    const struct bpfj_glob_map __arena* patterns,
+    const struct qstr* name) {
   if (!actor) {
     return true;
   }
 
-  const __u32 num_pods = bpfj_gate_num_pods(actor);
-  for (int i = BPFJ_MAX_POD_PER_PID - 1; i >= 0; --i) {
-    if (i >= num_pods) {
-      continue;
-    }
-
-    struct bpfj_pod __arena* pod = actor->pods[i];
-    if (!pod) {
-      continue;
-    }
-
-    struct bpfj_uuid actor_pod = {};
-    bpfj_pod_read_uuid(&actor_pod, pod);
-    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (!policy) {
-      return false;
-    }
-    const __u8 mode = gate == BPFJ_POLICY_GATE_SHM_SYSV
-        ? policy->shm_sysv_mode
-        : policy->shm_posix_mode;
-    if (mode != BPFJ_POLICY_UNCONFIGURED) {
-      if (mode == BPFJ_POLICY_DENY || !owner) {
-        return false;
-      }
-
-      if (!bpfj_shm_uuid_equal(&actor_pod, &owner->pod) &&
-          !bpfj_role_set_contains(policy->gates[gate], owner->policy)) {
-        return false;
-      }
-    }
-
-    if (bpfj_is_override(pod)) {
-      break;
-    }
-  }
-
-  return true;
+  struct bpfj_shm_allow_ctx ctx = {
+      .gate = gate,
+      .actor = actor,
+      .owner = owner,
+      .patterns = patterns,
+      .name = name,
+      .next = bpfj_gate_num_pods(actor),
+      .allowed = 1,
+  };
+  bpf_loop(ctx.next, bpfj_shm_allow_cb, &ctx, 0);
+  return ctx.allowed;
 }

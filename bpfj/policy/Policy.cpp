@@ -29,10 +29,12 @@ constexpr std::string_view kNoLkm = "no-lkm";
 constexpr std::string_view kMqSysv = "mq-sysv";
 constexpr std::string_view kNoMqSysv = "no-mq-sysv";
 constexpr std::string_view kMqPosix = "mq-posix";
+constexpr std::string_view kMqPosixPattern = "mq-posix-pattern";
 constexpr std::string_view kNoMqPosix = "no-mq-posix";
 constexpr std::string_view kShmSysv = "shm-sysv";
 constexpr std::string_view kNoShmSysv = "no-shm-sysv";
 constexpr std::string_view kShmPosix = "shm-posix";
+constexpr std::string_view kShmPosixPattern = "shm-posix-pattern";
 constexpr std::string_view kNoShmPosix = "no-shm-posix";
 constexpr std::string_view kKill = "kill";
 constexpr std::string_view kNoKill = "no-kill";
@@ -479,6 +481,21 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           res.hasError()) {
         return res.error();
       }
+      if (Yaml::Node* patterns = findChild(value, kMqPosixPattern)) {
+        auto parsed = parseIdList(
+            "role '" + id + "': " + std::string(kMqPosixPattern), *patterns);
+        if (parsed.hasError()) {
+          return parsed.error();
+        }
+        policy.mqPosixPatterns = std::move(*parsed);
+        policy.hasMqPosix = true;
+        if (policy.noMqPosix) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "': " + std::string(kMqPosixPattern) + " and " +
+                  std::string(kNoMqPosix) + " contradict each other");
+        }
+      }
       if (auto res = parseOwnedIpc(
               kShmSysv,
               kNoShmSysv,
@@ -496,6 +513,21 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
               policy.noShmPosix);
           res.hasError()) {
         return res.error();
+      }
+      if (Yaml::Node* patterns = findChild(value, kShmPosixPattern)) {
+        auto parsed = parseIdList(
+            "role '" + id + "': " + std::string(kShmPosixPattern), *patterns);
+        if (parsed.hasError()) {
+          return parsed.error();
+        }
+        policy.shmPosixPatterns = std::move(*parsed);
+        policy.hasShmPosix = true;
+        if (policy.noShmPosix) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "': " + std::string(kShmPosixPattern) + " and " +
+                  std::string(kNoShmPosix) + " contradict each other");
+        }
       }
 
       // Absent is the same as false again. What it turns off is ownership,
