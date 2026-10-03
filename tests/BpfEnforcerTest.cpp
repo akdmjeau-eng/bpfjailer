@@ -16,13 +16,16 @@
 
 #include "bpfj/enforce/BpfEnforcer.h"
 #include "bpfj/enforce/Pins.h"
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/Replace.h"
 #include "bpfj/enforce/RoleId.h"
 
 using bpfjailer::BpfEnforcer;
 using bpfjailer::enrollPod;
+using bpfjailer::PodArena;
 using bpfjailer::Policy;
+using bpfjailer::readPolicyCatalog;
 using bpfjailer::replaceJailer;
 using bpfjailer::Threads;
 namespace pins = bpfjailer::pins;
@@ -633,14 +636,21 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheOwnerLayoutIsUnknown) {
   const std::string yaml = "roles:\n  owner:\n    bpf:\n      - owner\n";
   attach(yaml);
 
+  ASSERT(!mapPinned("bpfj_bpf_owner_version"));
+
   // A tree written by a build with a different bpfj_bpf_owner, whose records
   // this build cannot parse, so the replace refuses rather than guesses.
-  auto version = pins::openPinnedMap(testPins(), "bpfj_bpf_owner_version");
-  ASSERT(version);
+  auto arena = PodArena::open(testPins());
+  ASSERT(arena);
+  auto catalog = readPolicyCatalog(*arena);
+  ASSERT_OK(catalog);
+  ASSERT(*catalog);
 
-  const std::uint32_t slot = 0;
-  const std::uint32_t unknown = BPFJ_BPF_OWNER_VERSION + 1;
-  ASSERT_EQ(::bpf_map_update_elem(version->get(), &slot, &unknown, BPF_ANY), 0);
+  auto* mutableCatalog = const_cast<struct bpfj_policy_catalog*>(*catalog);
+  mutableCatalog->runtime_owner_versions &=
+      ~(BPFJ_OWNER_VERSION_MASK << BPFJ_BPF_OWNER_VERSION_SHIFT);
+  mutableCatalog->runtime_owner_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
+      << BPFJ_BPF_OWNER_VERSION_SHIFT;
 
   ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
 }

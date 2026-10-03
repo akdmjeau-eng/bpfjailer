@@ -39,6 +39,20 @@
 // Layout of both shared-memory ownership maps and the POSIX mount classifier.
 #define BPFJ_SHM_OWNER_VERSION 2
 
+#if BPFJ_BPF_OWNER_VERSION > 255 || BPFJ_MQ_OWNER_VERSION > 255 || \
+    BPFJ_SHM_OWNER_VERSION > 255
+#error "arena runtime owner versions are packed into 8-bit fields"
+#endif
+
+#define BPFJ_BPF_OWNER_VERSION_SHIFT 0
+#define BPFJ_MQ_OWNER_VERSION_SHIFT 8
+#define BPFJ_SHM_OWNER_VERSION_SHIFT 16
+#define BPFJ_OWNER_VERSION_MASK 0xffU
+#define BPFJ_RUNTIME_OWNER_VERSIONS                                  \
+  (((__u32)BPFJ_BPF_OWNER_VERSION << BPFJ_BPF_OWNER_VERSION_SHIFT) | \
+   ((__u32)BPFJ_MQ_OWNER_VERSION << BPFJ_MQ_OWNER_VERSION_SHIFT) |   \
+   ((__u32)BPFJ_SHM_OWNER_VERSION << BPFJ_SHM_OWNER_VERSION_SHIFT))
+
 #define BPFJ_EXEC_POLICY_XATTR "user.bpfj.policy.exec"
 
 // How a pod came to exist, numbered to match the internal tree's.
@@ -133,7 +147,9 @@ struct bpfj_role_policy {
 // the variable catalog and each configured role set are separate allocations.
 struct bpfj_policy_catalog {
   __u32 count;
-  __u32 reserved;
+  // Packed BPF/MQ/SHM runtime-map value layout versions. This occupies the
+  // catalog's original reserved word, preserving the policy-array offset.
+  __u32 runtime_owner_versions;
   const struct bpfj_var_catalog __arena* vars;
   struct bpfj_role_policy policies[1];
 };

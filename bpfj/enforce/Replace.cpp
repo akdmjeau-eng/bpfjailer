@@ -339,48 +339,6 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   return fs::exists(fs::path(cfg.mapPath(kMapOwners)), ec);
 }
 
-/// @brief Refuse a running tree whose records this build cannot read, since
-/// carrying an unknown layout across would write nonsense into the map the
-/// gate reads and skipping it would silently unprotect what the old tree owned.
-[[nodiscard]] Expected<> checkOwnerVersion(const PinConfig& cfg) noexcept {
-  if (!tracksOwnership(cfg)) {
-    return unit;
-  }
-
-  auto map = pins::openPinnedMap(cfg, kOwnerVersion);
-  if (!map) {
-    if (map.error().code() !=
-        std::make_error_code(std::errc::no_such_file_or_directory)) {
-      return makeUnexpected(map.error());
-    }
-
-    return makeUnexpected(makeError(
-        std::errc::not_supported,
-        "the running jailer records BPF ownership but publishes no layout "
-        "version for it, so this build cannot carry those records across; "
-        "detach and attach to move to it, which releases the jail"));
-  }
-
-  const std::uint32_t slot = 0;
-  std::uint32_t version = 0;
-  if (::bpf_map_lookup_elem(map->get(), &slot, &version) != 0) {
-    return makeUnexpected(makeErrnoError(
-        "failed to read the running jailer's BPF ownership layout version"));
-  }
-
-  if (version != BPFJ_BPF_OWNER_VERSION) {
-    return makeUnexpected(makeError(
-        std::errc::not_supported,
-        "the running jailer records BPF ownership in layout v",
-        std::to_string(version),
-        ", and this build reads v",
-        std::to_string(BPFJ_BPF_OWNER_VERSION),
-        "; detach and attach to move to it, which releases the jail"));
-  }
-
-  return unit;
-}
-
 /// @brief Carry one owner map's records into the new tree's copy.
 [[nodiscard]] Expected<std::size_t>
 copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
@@ -467,79 +425,94 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
   return fs::exists(fs::path(cfg.mapPath(name)), ec);
 }
 
-[[nodiscard]] Expected<> checkMqOwnerVersion(
-    const PinConfig& cfg,
-    std::string_view owners,
-    std::string_view versionMap,
-    std::string_view kind) noexcept {
-  if (!hasPinnedMap(cfg, owners)) {
-    return unit;
+[[nodiscard]] bool hasVersionedOwnerState(const PinConfig& cfg) noexcept {
+  for (const auto name :
+       {kMapOwners,
+        kMqSysvOwners,
+        kMqPosixOwners,
+        kShmSysvOwners,
+        kShmPosixOwners}) {
+    if (hasPinnedMap(cfg, name)) {
+      return true;
+    }
   }
-
-  auto map = pins::openPinnedMap(cfg, versionMap);
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::not_supported,
-        "the running jailer records ",
-        kind,
-        " message-queue ownership without a layout version; detach and "
-        "attach to upgrade"));
-  }
-
-  const std::uint32_t slot = 0;
-  std::uint32_t version = 0;
-  if (::bpf_map_lookup_elem(map->get(), &slot, &version) != 0) {
-    return makeUnexpected(makeErrnoError(
-        "failed to read the ", kind, " message-queue ownership version"));
-  }
-  if (version != BPFJ_MQ_OWNER_VERSION) {
-    return makeUnexpected(makeError(
-        std::errc::not_supported,
-        "the running jailer records ",
-        kind,
-        " message-queue ownership in layout v",
-        std::to_string(version),
-        ", and this build reads v",
-        std::to_string(BPFJ_MQ_OWNER_VERSION),
-        "; detach and attach to upgrade"));
-  }
-  return unit;
+  return false;
 }
 
-[[nodiscard]] Expected<> checkShmOwnerVersion(
-    const PinConfig& cfg,
-    std::string_view owners,
-    std::string_view versionMap,
-    std::string_view kind) noexcept {
-  if (!hasPinnedMap(cfg, owners)) {
-    return unit;
+[[nodiscard]] Expected<std::uint32_t> readOwnerVersions(
+    const PinConfig& cfg) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
+  auto catalog = readPolicyCatalog(*arena);
+  if (!catalog) {
+    return makeUnexpected(catalog.error());
+  }
+  if (!*catalog) {
+    return makeUnexpected(makeError(
+        std::errc::bad_address,
+        "the running jailer has no arena policy catalog"));
+  }
+  return (*catalog)->runtime_owner_versions;
+}
 
+[[nodiscard]] Expected<std::uint32_t> readLegacyOwnerVersion(
+    const PinConfig& cfg,
+    std::string_view versionMap,
+    std::string_view what) noexcept {
   auto map = pins::openPinnedMap(cfg, versionMap);
   if (!map) {
     return makeUnexpected(makeError(
         std::errc::not_supported,
         "the running jailer records ",
-        kind,
-        " shared-memory ownership without a layout version; detach and "
+        what,
+        " without an arena or legacy layout version; detach and "
         "attach to upgrade"));
   }
 
   const std::uint32_t slot = 0;
   std::uint32_t version = 0;
   if (::bpf_map_lookup_elem(map->get(), &slot, &version) != 0) {
-    return makeUnexpected(makeErrnoError(
-        "failed to read the ", kind, " shared-memory ownership version"));
+    return makeUnexpected(
+        makeErrnoError("failed to read the legacy ", what, " version"));
   }
-  if (version != BPFJ_SHM_OWNER_VERSION) {
+  return version;
+}
+
+/// Refuse records this build cannot read. A zero arena field denotes the
+/// predecessor that still published one-entry version maps; accepting those
+/// maps here provides a one-way replace path while new trees create none.
+[[nodiscard]] Expected<> checkOwnerVersion(
+    const PinConfig& cfg,
+    std::uint32_t versions,
+    std::string_view owners,
+    std::string_view versionMap,
+    std::uint32_t shift,
+    std::uint32_t expected,
+    std::string_view what) noexcept {
+  if (!hasPinnedMap(cfg, owners)) {
+    return unit;
+  }
+
+  std::uint32_t version = (versions >> shift) & BPFJ_OWNER_VERSION_MASK;
+  if (version == 0) {
+    auto legacy = readLegacyOwnerVersion(cfg, versionMap, what);
+    if (!legacy) {
+      return makeUnexpected(legacy.error());
+    }
+    version = *legacy;
+  }
+
+  if (version != expected) {
     return makeUnexpected(makeError(
         std::errc::not_supported,
         "the running jailer records ",
-        kind,
-        " shared-memory ownership in layout v",
+        what,
+        " in layout v",
         std::to_string(version),
         ", and this build reads v",
-        std::to_string(BPFJ_SHM_OWNER_VERSION),
+        std::to_string(expected),
         "; detach and attach to upgrade"));
   }
   return unit;
@@ -845,27 +818,63 @@ struct BackfillStats {
   const bool hasOld = fs::exists(fs::path(cfg.root()), ec);
 
   // Before anything is built, so the only cost of refusing is the parse.
-  if (hasOld) {
-    if (auto res = checkOwnerVersion(cfg); !res) {
-      return makeUnexpected(res.error());
+  if (hasOld && hasVersionedOwnerState(cfg)) {
+    auto versions = readOwnerVersions(cfg);
+    if (!versions) {
+      return makeUnexpected(versions.error());
     }
-    if (auto res = checkMqOwnerVersion(
-            cfg, kMqSysvOwners, kMqSysvOwnerVersion, "System V");
+    if (auto res = checkOwnerVersion(
+            cfg,
+            *versions,
+            kMapOwners,
+            kOwnerVersion,
+            BPFJ_BPF_OWNER_VERSION_SHIFT,
+            BPFJ_BPF_OWNER_VERSION,
+            "BPF ownership");
         !res) {
       return makeUnexpected(res.error());
     }
-    if (auto res = checkMqOwnerVersion(
-            cfg, kMqPosixOwners, kMqPosixOwnerVersion, "POSIX");
+    if (auto res = checkOwnerVersion(
+            cfg,
+            *versions,
+            kMqSysvOwners,
+            kMqSysvOwnerVersion,
+            BPFJ_MQ_OWNER_VERSION_SHIFT,
+            BPFJ_MQ_OWNER_VERSION,
+            "System V message-queue ownership");
         !res) {
       return makeUnexpected(res.error());
     }
-    if (auto res = checkShmOwnerVersion(
-            cfg, kShmSysvOwners, kShmSysvOwnerVersion, "System V");
+    if (auto res = checkOwnerVersion(
+            cfg,
+            *versions,
+            kMqPosixOwners,
+            kMqPosixOwnerVersion,
+            BPFJ_MQ_OWNER_VERSION_SHIFT,
+            BPFJ_MQ_OWNER_VERSION,
+            "POSIX message-queue ownership");
         !res) {
       return makeUnexpected(res.error());
     }
-    if (auto res = checkShmOwnerVersion(
-            cfg, kShmPosixOwners, kShmPosixOwnerVersion, "POSIX");
+    if (auto res = checkOwnerVersion(
+            cfg,
+            *versions,
+            kShmSysvOwners,
+            kShmSysvOwnerVersion,
+            BPFJ_SHM_OWNER_VERSION_SHIFT,
+            BPFJ_SHM_OWNER_VERSION,
+            "System V shared-memory ownership");
+        !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = checkOwnerVersion(
+            cfg,
+            *versions,
+            kShmPosixOwners,
+            kShmPosixOwnerVersion,
+            BPFJ_SHM_OWNER_VERSION_SHIFT,
+            BPFJ_SHM_OWNER_VERSION,
+            "POSIX shared-memory ownership");
         !res) {
       return makeUnexpected(res.error());
     }

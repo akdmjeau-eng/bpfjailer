@@ -33,7 +33,8 @@ extern void bpf_map_fops __ksym;
 // Keyed on the kernel address of the object rather than its id; see struct
 // bpfj_bpf_owner in types.h. A replace carries both maps across, since the
 // seeding walk below only sees objects some task holds an fd to and a pinned
-// map is held by its pin, and bpfj_bpf_owner_version says whether it can.
+// map is held by its pin. The arena policy catalog records whether a replace
+// can carry the records across.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
@@ -47,16 +48,6 @@ struct {
   __type(key, __u64);
   __type(value, struct bpfj_bpf_owner);
 } bpfj_bpf_prog_owners SEC(".maps");
-
-// BPFJ_BPF_OWNER_VERSION, written by userspace at load. A map rather than
-// rodata because the reader is the next build's replace, reaching in through
-// the pin from another process.
-struct {
-  __uint(type, BPF_MAP_TYPE_ARRAY);
-  __uint(max_entries, 1);
-  __type(key, __u32);
-  __type(value, __u32);
-} bpfj_bpf_owner_version SEC(".maps");
 
 /// Whether the caller may call bpf(2) at all: denied when any role it holds
 /// says so, since `no-bpf` outranks a role that said nothing.

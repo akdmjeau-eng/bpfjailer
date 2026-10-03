@@ -54,17 +54,6 @@ struct {
   __type(value, struct bpfj_mq_pending_owner);
 } bpfj_mq_posix_pending SEC(".maps");
 
-#define BPFJ_MQ_VERSION_MAP(name)     \
-  struct {                            \
-    __uint(type, BPF_MAP_TYPE_ARRAY); \
-    __uint(max_entries, 1);           \
-    __type(key, __u32);               \
-    __type(value, __u32);             \
-  } name SEC(".maps")
-
-BPFJ_MQ_VERSION_MAP(bpfj_mq_sysv_owner_version);
-BPFJ_MQ_VERSION_MAP(bpfj_mq_posix_owner_version);
-
 static __always_inline int bpfj_mq_deny(const char* kind) {
   BPFJ_LOG("Denied %s message queue access", kind);
   return -EPERM;

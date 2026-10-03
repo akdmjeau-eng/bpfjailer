@@ -44,19 +44,6 @@ struct MountRegistration {
   std::uint64_t dev = 0;
 };
 
-Expected<> writeVersion(
-    bpfj::libbpf::BpfSkelBase& skel,
-    std::string_view name) noexcept {
-  auto map = skel.getMap(name.data());
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory,
-        "shared-memory owner version map is missing"));
-  }
-  return map->updateElem(
-      std::uint32_t{0}, std::uint32_t{BPFJ_SHM_OWNER_VERSION});
-}
-
 Expected<std::optional<MountRegistration>> inspectPosixShmMount(
     pid_t pid) noexcept {
   const std::string prefix = "/proc/" + std::to_string(pid);
@@ -195,12 +182,6 @@ Expected<> ShmEnforcer::load(
       return res;
     }
   }
-  for (const auto name :
-       {"bpfj_shm_sysv_owner_version", "bpfj_shm_posix_owner_version"}) {
-    if (auto res = pins::pinMap(skel, name, mapDir); !res) {
-      return res;
-    }
-  }
   if (auto res = pins::pinMap(skel, kMountMap, mapDir, kMaxMounts); !res) {
     return res;
   }
@@ -228,13 +209,6 @@ Expected<> ShmEnforcer::load(
       !res) {
     return res;
   }
-  if (auto res = writeVersion(skel, "bpfj_shm_sysv_owner_version"); !res) {
-    return res;
-  }
-  if (auto res = writeVersion(skel, "bpfj_shm_posix_owner_version"); !res) {
-    return res;
-  }
-
   auto registration = inspectPosixShmMount(::getpid());
   if (!registration) {
     return makeUnexpected(registration.error());

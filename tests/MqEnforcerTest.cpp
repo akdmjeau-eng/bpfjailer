@@ -180,8 +180,8 @@ TEST(MqEnforcer, LoadPinsLinksPolicyAndVersionedOwnershipMaps) {
   ASSERT(linkPinned("bpfj_mq_posix_receive_fd"));
   ASSERT(mapPinned("bpfj_mq_sysv_owners"));
   ASSERT(mapPinned("bpfj_mq_posix_owners"));
-  ASSERT(mapPinned("bpfj_mq_sysv_owner_version"));
-  ASSERT(mapPinned("bpfj_mq_posix_owner_version"));
+  ASSERT(!mapPinned("bpfj_mq_sysv_owner_version"));
+  ASSERT(!mapPinned("bpfj_mq_posix_owner_version"));
 }
 
 TEST(MqEnforcer, NoMqSysvDeniesCreation) {

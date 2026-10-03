@@ -70,17 +70,6 @@ struct {
   __type(value, __u8);
 } bpfj_shm_posix_devices SEC(".maps");
 
-#define BPFJ_SHM_VERSION_MAP(name)    \
-  struct {                            \
-    __uint(type, BPF_MAP_TYPE_ARRAY); \
-    __uint(max_entries, 1);           \
-    __type(key, __u32);               \
-    __type(value, __u32);             \
-  } name SEC(".maps")
-
-BPFJ_SHM_VERSION_MAP(bpfj_shm_sysv_owner_version);
-BPFJ_SHM_VERSION_MAP(bpfj_shm_posix_owner_version);
-
 static __always_inline int bpfj_shm_deny(const char* kind) {
   BPFJ_LOG("Denied %s shared memory access", kind);
   return -EPERM;

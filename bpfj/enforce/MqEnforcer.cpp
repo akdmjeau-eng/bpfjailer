@@ -16,18 +16,6 @@ namespace bpfjailer {
 namespace {
 
 constexpr std::uint32_t kMaxOwners = 16384;
-Expected<> writeVersion(
-    bpfj::libbpf::BpfSkelBase& skel,
-    std::string_view name) noexcept {
-  auto map = skel.getMap(name.data());
-  if (!map) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory,
-        "message-queue owner version map is missing"));
-  }
-  return map->updateElem(
-      std::uint32_t{0}, std::uint32_t{BPFJ_MQ_OWNER_VERSION});
-}
 
 } // namespace
 
@@ -52,13 +40,6 @@ Expected<> MqEnforcer::load(
       return res;
     }
   }
-  for (const auto name :
-       {"bpfj_mq_sysv_owner_version", "bpfj_mq_posix_owner_version"}) {
-    if (auto res = pins::pinMap(skel, name, mapDir); !res) {
-      return res;
-    }
-  }
-
   if (auto res = skel.load(); !res) {
     return res;
   }
@@ -77,12 +58,6 @@ Expected<> MqEnforcer::load(
   if (auto res = publishIpcPatternIds(
           cfg, *patterns, &bpfj_role_policy::mq_posix_pattern_id);
       !res) {
-    return res;
-  }
-  if (auto res = writeVersion(skel, "bpfj_mq_sysv_owner_version"); !res) {
-    return res;
-  }
-  if (auto res = writeVersion(skel, "bpfj_mq_posix_owner_version"); !res) {
     return res;
   }
   if (auto res = skel.attach(); !res) {

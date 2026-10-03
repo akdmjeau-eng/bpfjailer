@@ -206,8 +206,8 @@ TEST(ShmEnforcer, LoadPinsHooksPoliciesClassifiersAndVersionedOwners) {
   ASSERT(linkPinned("bpfj_shm_posix_file_truncate"));
   ASSERT(mapPinned("bpfj_shm_sysv_owners"));
   ASSERT(mapPinned("bpfj_shm_posix_owners"));
-  ASSERT(mapPinned("bpfj_shm_sysv_owner_version"));
-  ASSERT(mapPinned("bpfj_shm_posix_owner_version"));
+  ASSERT(!mapPinned("bpfj_shm_sysv_owner_version"));
+  ASSERT(!mapPinned("bpfj_shm_posix_owner_version"));
   ASSERT(mapPinned("bpfj_shm_posix_mounts"));
   ASSERT(mapPinned("bpfj_shm_posix_devices"));
 }
