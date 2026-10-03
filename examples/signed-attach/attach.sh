@@ -33,15 +33,14 @@ echo "Attached. The jailer is live for the whole host, so run ./detach.sh when d
 echo "  base role:  $BASE_ROLE (every process on the host)"
 echo "  role:       $ROLE (held by the enrolled helper only)"
 echo
-# Worth stating plainly, because it is the one gap in the chain and it cannot
-# be closed from here. Ownership of a BPF object is taken by the role of the
+# Ownership of a BPF object is taken by the role of the
 # process that created it, and at this point no such process existed: the
 # binary that ran this attach was execed before the jailer was loaded, so
 # nothing could have enrolled it in $ROLE yet. The base role it lands in a
 # moment later owns nothing either, by untracked-bpf. Its objects are therefore
-# unowned, and an unowned object is not gated.
-echo "Note: the jailer's own maps are unowned right now, so nothing is"
-echo "protecting them yet. The enrolled helper is what makes the first signed"
-echo "upgrade possible before that ownership handoff."
+# unowned, and the signed bpfjailer role carries bpf-any for this bootstrap.
+echo "Note: the jailer's own maps are unowned right now. The floor role denies"
+echo "access to them; the signed updater carries bpf-any so it can perform the"
+echo "first replacement before the ownership handoff."
 echo
 echo "Next: ./upgrade.sh"

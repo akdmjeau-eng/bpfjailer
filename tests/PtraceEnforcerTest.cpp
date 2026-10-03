@@ -31,9 +31,9 @@ namespace {
 
 constexpr std::string_view kPolicy =
     "roles:\n"
-    "  unconfigured:\n"
-    "  restricted:\n    ptrace:\n      - worker\n"
-    "  denied:\n    no-ptrace: true\n"
+    "  default-deny:\n"
+    "  restricted:\n    ptrace-roles:\n      - worker\n"
+    "  denied:\n"
     "  worker:\n"
     "  other:\n";
 
@@ -90,10 +90,10 @@ TEST(PtraceEnforcer, EnforcesPoliciesWithOneAttachment) {
           "an unconfigured role may attach",
           [] {
             Child target;
-            enroll("unconfigured", ::getpid());
+            enroll("default-deny", ::getpid());
             return attachErrno(target.pid());
           }),
-      0);
+      EPERM);
 
   ASSERT_EQ(
       runIsolated(

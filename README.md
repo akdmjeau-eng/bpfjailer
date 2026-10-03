@@ -124,54 +124,42 @@ certs:
     MIIDXTCCAkWgAwIBAgIJAK...
 roles:
   floor:
+    any: true                  # open tracking-only base role
   webserver:
     enforce-binary-certs:      # execs must be signed by one of these
       - corp-ca
-    kill:                      # may signal its own pod, plus these roles
+    kill-roles:                # may signal its own pod, plus these roles
       - floor
-    ptrace:                    # empty: its own pod only
-    bpf:                       # empty: only BPF objects its role owns
-    mq-sysv:                   # empty: only SysV queues from its own pod
-    mq-posix:                  # empty: only POSIX queues from its own pod
+    ptrace-pod: true           # its own pod only
+    bpf-pod: true              # only BPF objects from its own pod
+    mq-sysv-pod: true          # only SysV queues from its own pod
+    mq-posix-pod: true         # only POSIX queues from its own pod
     mq-posix-pattern:          # names allowed regardless of queue ownership
       - service-${vm_uuid}-*
-    shm-sysv:                  # empty: only SysV SHM from its own pod
-    shm-posix:                 # empty: only POSIX SHM from its own pod
+    shm-sysv-pod: true         # only SysV SHM from its own pod
+    shm-posix-pod: true        # only POSIX SHM from its own pod
     shm-posix-pattern:         # names allowed regardless of SHM ownership
       - service-${vm_uuid}-*
-    keyring:                   # empty: only its own role's keyring
+    keyring-own: true          # only its own role's keyring
   sandbox:
-    no-bpf: true               # bpf(2) denied outright
-    no-kill: true              # kill denied outright
-    no-keyring: true           # keyring writes denied outright
-    no-lkm: true               # kernel module and kexec loading denied
-    no-mq-sysv: true           # System V message queues denied outright
-    no-mq-posix: true          # POSIX message queues denied outright
-    no-shm-sysv: true          # System V shared memory denied outright
-    no-shm-posix: true         # POSIX shared memory denied outright
-    unpriv-enroll: true        # bpfjsrv may enroll non-root callers
-    enroll:                    # empty: bpfjsrv may add no further role
+    unpriv-enroll: true        # every unspecified operation remains denied
     override-stacked: true     # answers alone, ignoring roles stacked below
 vars:                          # the only variable names a pod may carry
   - vm_uuid
 ```
 
-For `kill`, `ptrace`, `bpf`, `keyring`, `mq-sysv`, `mq-posix`, `shm-sysv`, and
-`shm-posix`, leaving a key out and writing it empty mean different things. A
-missing key leaves that operation unrestricted, an empty one confines the
-role to its own pod, and a list adds objects owned by the roles named. The
-System V and POSIX policies are independent. Their `no-` forms deny that IPC
-kind outright and cannot be combined with the corresponding list.
-`no-bpf`, `no-kill`, `no-ptrace` and `no-keyring` are the outright-deny states
-those lists cannot spell, and so each is rejected if written alongside its
-list.
-`enroll` has the same three states over which roles bpfjsrv may add to a
-process already holding this one: missing is unrestricted, empty allows none
-(not even this role again), and a list allows those roles.
+Every operation is denied when its role has no corresponding option. The
+`*-pod` options allow resources from the same pod, `*-roles` adds the named
+owner roles, and `*-any` opens that operation completely. `keyring-own` is the
+role-scoped counterpart because fs-verity keyrings belong to roles rather than
+pods. `enroll-roles` names the only roles bpfjsrv may add; without it enrollment
+through bpfjsrv is denied.
 
-`no-lkm: true` blocks kernel module autoload and insertion as well as kexec
-loading. Leaving it out, or setting it to false, leaves those operations
-unrestricted for that role.
+`any: true` opens every operation that has no more specific option. This is
+useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
+`kill-roles`, `paths`, or `enforce-binary-certs` overrides `any` for that
+operation. `lkm-any`, `fs-any`, and `verity-any` are the operation-specific
+fully-open forms.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its
@@ -186,8 +174,8 @@ inode is not part of the key.
 override the corresponding owner-role list. Patterns match the name without
 its leading slash and support literals, `?`, `*`, and `${NAME}` references to
 the acquiring pod's declared variables. Every referenced variable must be
-present on that pod or the pattern does not match. A pattern does not override
-`no-mq-posix` or `no-shm-posix`; combining either pair in one role is rejected.
+present on that pod or the pattern does not match. A pattern establishes a
+restricted policy and cannot be combined with the corresponding `*-any`.
 Patterns apply to opens, descriptor receipt, and the later queue or mapping
 operations checked by the enforcer. They do not apply to System V IPC.
 
@@ -207,11 +195,10 @@ is intentionally outside `shm-posix`. BpfJailer registers `/dev/shm` for each
 enrolled mount namespace; a replacement preserves those registrations.
 
 A process holding several roles is allowed an operation only if every role
-that configured it agrees; roles that did not configure it abstain. Roles are
-consulted newest first, and an `override-stacked` role answers for the roles
-under it. The target side of `kill` and `ptrace` ignores override: every role
-the target holds has to be listed. The full semantics are documented in
-`bpfj/policy/Policy.h`.
+agrees. Roles are consulted newest first, and an `override-stacked` role
+answers for the roles under it. The target side of `kill` and `ptrace` ignores
+override: every role the target holds has to be listed. The full semantics are
+documented in `bpfj/policy/Policy.h`.
 
 `vars` is an allowlist. An enrollment setting a variable the policy does not
 list is refused, and with no `vars` at all no pod carries any. A `replace`

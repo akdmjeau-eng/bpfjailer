@@ -9,11 +9,9 @@
 namespace bpfjailer {
 
 /// @brief Loads, attaches and pins the BPF object ownership enforcer: every
-/// map and program a role that wrote `bpf` creates is recorded as belonging to
-/// it, and opening one afterwards is checked against the opener's policy. An
-/// unconfigured role may still call bpf(2), has what it creates left untracked
-/// and reaches nothing another role owns, so the scheme can go on one role at
-/// a time.
+/// map and program created by a role allowed to use bpf(2) is recorded with
+/// its role and pod, and opening one afterwards is checked against the
+/// opener's deny, pod, role-list or any policy.
 class BpfEnforcer {
  public:
   /// @brief Load and attach the enforcer, keying it from `policy`. Attached

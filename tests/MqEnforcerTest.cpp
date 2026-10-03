@@ -185,14 +185,14 @@ TEST(MqEnforcer, LoadPinsLinksPolicyAndVersionedOwnershipMaps) {
 }
 
 TEST(MqEnforcer, NoMqSysvDeniesCreation) {
-  attach("roles:\n  jailed:\n    no-mq-sysv: true\n");
+  attach("roles:\n  jailed:\n");
   Child actor([key = uniqueKey()] { return createSysv(key); });
   enroll("jailed", actor.pid());
   ASSERT_EQ(actor.run(), EPERM);
 }
 
 TEST(MqEnforcer, EmptySysvPolicyAllowsSendAndReceiveInsideItsPod) {
-  attach("roles:\n  jailed:\n    mq-sysv:\n");
+  attach("roles:\n  jailed:\n    mq-sysv-roles:\n");
   enroll("jailed", ::getpid());
   const int id = ::msgget(IPC_PRIVATE, 0600);
   ASSERT(id >= 0);
@@ -209,7 +209,7 @@ TEST(MqEnforcer, EmptySysvPolicyAllowsSendAndReceiveInsideItsPod) {
 
 TEST(MqEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsQueue) {
   const key_t key = uniqueKey();
-  attach("roles:\n  owner:\n  jailed:\n    mq-sysv:\n");
+  attach("roles:\n  owner:\n    any: true\n  jailed:\n    mq-sysv-roles:\n");
 
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -228,7 +228,8 @@ TEST(MqEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsQueue) {
 
 TEST(MqEnforcer, SysvPolicyCanNameAnOwnerRole) {
   const key_t key = uniqueKey();
-  attach("roles:\n  owner:\n  client:\n    mq-sysv:\n      - owner\n");
+  attach(
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-sysv-roles:\n      - owner\n");
 
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -250,7 +251,7 @@ TEST(MqEnforcer, RestrictedSysvPolicyRejectsAQueueWithNoKnownOwner) {
   const int id = ::msgget(key, IPC_CREAT | IPC_EXCL | 0600);
   ASSERT(id >= 0);
 
-  attach("roles:\n  jailed:\n    mq-sysv:\n");
+  attach("roles:\n  jailed:\n    mq-sysv-roles:\n");
   Child cleanup([id] {
     errno = 0;
     return ::msgctl(id, IPC_RMID, nullptr) == 0 ? 0 : errno;
@@ -264,7 +265,7 @@ TEST(MqEnforcer, RestrictedSysvPolicyRejectsAQueueWithNoKnownOwner) {
 TEST(MqEnforcer, SysvOwnershipSurvivesAReplace) {
   const key_t key = uniqueKey();
   const std::string yaml =
-      "roles:\n  owner:\n  client:\n    mq-sysv:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-sysv-roles:\n      - owner\n";
   attach(yaml);
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -284,7 +285,7 @@ TEST(MqEnforcer, SysvOwnershipSurvivesAReplace) {
 
 TEST(MqEnforcer, NoMqPosixDeniesCreation) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    no-mq-posix: true\n");
+  attach("roles:\n  jailed:\n");
   Child actor([name] { return createPosix(name); });
   enroll("jailed", actor.pid());
   // mqueuefs translates an inode-allocation security refusal to ENOMEM.
@@ -294,7 +295,7 @@ TEST(MqEnforcer, NoMqPosixDeniesCreation) {
 
 TEST(MqEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    mq-posix:\n");
+  attach("roles:\n  jailed:\n    mq-posix-roles:\n");
   enroll("jailed", ::getpid());
   ASSERT_EQ(createPosix(name), 0);
   ASSERT_EQ(acquirePosix(name), 0);
@@ -303,7 +304,7 @@ TEST(MqEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
 
 TEST(MqEnforcer, EmptyPosixPolicyCannotOpenAnotherPodsQueue) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  owner:\n  jailed:\n    mq-posix:\n");
+  attach("roles:\n  owner:\n    any: true\n  jailed:\n    mq-posix-roles:\n");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -315,7 +316,8 @@ TEST(MqEnforcer, EmptyPosixPolicyCannotOpenAnotherPodsQueue) {
 
 TEST(MqEnforcer, PosixPolicyCanNameAnOwnerRole) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  owner:\n  client:\n    mq-posix:\n      - owner\n");
+  attach(
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -365,7 +367,7 @@ TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
   const std::string name = uniquePosixName();
   ASSERT_EQ(createPosix(name), 0);
 
-  attach("roles:\n  jailed:\n    mq-posix:\n");
+  attach("roles:\n  jailed:\n    mq-posix-roles:\n");
   enroll("jailed", ::getpid());
 
   ASSERT_EQ(acquirePosix(name), EPERM);
@@ -375,7 +377,7 @@ TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
 TEST(MqEnforcer, PosixOwnershipSurvivesAReplace) {
   const std::string name = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n  client:\n    mq-posix:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n";
   attach(yaml);
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
@@ -390,18 +392,21 @@ TEST(MqEnforcer, PosixOwnershipSurvivesAReplace) {
 TEST(MqEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {
   // SCM_RIGHTS delivers the payload but omits an fd refused by
   // security_file_receive(), which the helper reports as ENOMSG.
-  expectReceivedFd("roles:\n  owner:\n  client:\n    mq-posix:\n", ENOMSG);
+  expectReceivedFd(
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n",
+      ENOMSG);
 }
 
 TEST(MqEnforcer, PosixDescriptorReceiptAllowsANamedOwnerRole) {
   expectReceivedFd(
-      "roles:\n  owner:\n  client:\n    mq-posix:\n      - owner\n", 0);
+      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n",
+      0);
 }
 
 TEST(MqEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
   expectReceivedFd(
       "roles:\n"
-      "  owner:\n"
+      "  owner:\n    any: true\n"
       "  client:\n"
       "    mq-posix-pattern: bpfj-mq-test-*\n",
       0);

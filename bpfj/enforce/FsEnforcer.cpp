@@ -44,17 +44,6 @@ namespace {
 Expected<> FsEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
-  bool configured = false;
-  for (const auto& [name, role] : policy.roles) {
-    if (!role.paths.empty()) {
-      configured = true;
-      break;
-    }
-  }
-  if (!configured) {
-    return unit;
-  }
-
   if (auto res = pins::makeTree(cfg); !res) {
     return res;
   }

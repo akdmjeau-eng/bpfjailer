@@ -24,7 +24,7 @@ echo
 echo "To see the jail enforce something, start a process outside it first:"
 echo "    sleep 300 &            # in another terminal, as the same user"
 echo "then in here:"
-echo "    kill <that pid>        # denied: 'kill:' confines signals to this pod"
+echo "    kill <that pid>        # denied: 'kill-pod:' confines signals to this pod"
 echo "    kill \$\$                # allowed: same pod"
 echo "The same kill from outside succeeds, so it is the jail refusing and not"
 echo "file permissions."

@@ -5,14 +5,13 @@
 #
 # Two roles, and the shape of each is load-bearing.
 #
-# `floor` is the base role, so every process on the host is in it. It names no
-# certificate, which leaves execs unchecked -- a base role with
+# `floor` is the base role, so every process on the host is in it. `any` leaves
+# execs and other unspecified operations open -- a base role with
 # `enforce-binary-certs` would demand a signature from every binary on the
 # host, which is not what this example is about.
 #
-# `floor` restricts every process on the host to the BPF objects `floor`
-# itself owns. It is written as an empty `bpf:` rather than left out so that
-# the restriction is stated rather than inherited.
+# `bpf-pod` narrows BPF from that open baseline to objects from the caller's
+# own pod.
 #
 # `untracked-bpf` is what keeps that from meaning the opposite. Configuring a
 # role for bpf is also what makes it take ownership of what it creates, and a
@@ -32,9 +31,9 @@
 #   min-seq:          the lowest signed sequence number the role still accepts.
 #                     A valid signature below it is refused, so a binary can be
 #                     retired without changing the key that signed it.
-#   bpf:              written empty: may call bpf(2), and reaches only the
-#                     objects its own role owns. Those are the jailer's.
-#   keyring:          written empty: may rewrite its own role's keyring,
+#   bpf-any:          may call bpf(2) and reach the unowned bootstrap maps as
+#                     well as the maps its replacements create.
+#   keyring-own:      may rewrite its own role's keyring,
 #                     which is what a replace does when it reloads the
 #                     fs-verity enforcer, and no other role's.
 base-role: floor
@@ -43,13 +42,15 @@ certs:
 @CERT@
 roles:
   floor:
-    bpf:
+    any: true
+    bpf-pod: true
     untracked-bpf: true
-    keyring:
+    keyring-own: true
   bpfjailer:
+    any: true
     override-stacked: true
     enforce-binary-certs:
       - signer
     min-seq: @CURRENT_SEQ@
-    bpf:
-    keyring:
+    bpf-any: true
+    keyring-own: true

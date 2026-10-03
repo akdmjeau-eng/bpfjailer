@@ -89,6 +89,28 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_fs_file_ioctl"));
 }
 
+TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {
+  Fixture fixture;
+  const Policy policy = policyOf("roles:\n  svc:\n");
+  loadJailer(policy);
+  ASSERT_OK(FsEnforcer::load(testPins(), policy));
+
+  Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(FsEnforcer, FsAnyAllowsAccess) {
+  Fixture fixture;
+  const Policy policy = policyOf("roles:\n  svc:\n    fs-any: true\n");
+  loadJailer(policy);
+  ASSERT_OK(FsEnforcer::load(testPins(), policy));
+
+  Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), 0);
+}
+
 TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
   Fixture fixture;
   attach("      " + fixture.file() + ": NONE\n");

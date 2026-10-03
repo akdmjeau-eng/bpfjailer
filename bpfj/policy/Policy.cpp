@@ -23,27 +23,39 @@ constexpr std::string_view kCerts = "certs";
 constexpr std::string_view kRoles = "roles";
 constexpr std::string_view kVars = "vars";
 constexpr std::string_view kEnforceBinaryCerts = "enforce-binary-certs";
-constexpr std::string_view kBpf = "bpf";
-constexpr std::string_view kNoBpf = "no-bpf";
-constexpr std::string_view kNoLkm = "no-lkm";
-constexpr std::string_view kMqSysv = "mq-sysv";
-constexpr std::string_view kNoMqSysv = "no-mq-sysv";
-constexpr std::string_view kMqPosix = "mq-posix";
+constexpr std::string_view kAny = "any";
+constexpr std::string_view kFsAny = "fs-any";
+constexpr std::string_view kVerityAny = "verity-any";
+constexpr std::string_view kBpfPod = "bpf-pod";
+constexpr std::string_view kBpfRoles = "bpf-roles";
+constexpr std::string_view kBpfAny = "bpf-any";
+constexpr std::string_view kLkmAny = "lkm-any";
+constexpr std::string_view kMqSysvPod = "mq-sysv-pod";
+constexpr std::string_view kMqSysvRoles = "mq-sysv-roles";
+constexpr std::string_view kMqSysvAny = "mq-sysv-any";
+constexpr std::string_view kMqPosixPod = "mq-posix-pod";
+constexpr std::string_view kMqPosixRoles = "mq-posix-roles";
+constexpr std::string_view kMqPosixAny = "mq-posix-any";
 constexpr std::string_view kMqPosixPattern = "mq-posix-pattern";
-constexpr std::string_view kNoMqPosix = "no-mq-posix";
-constexpr std::string_view kShmSysv = "shm-sysv";
-constexpr std::string_view kNoShmSysv = "no-shm-sysv";
-constexpr std::string_view kShmPosix = "shm-posix";
+constexpr std::string_view kShmSysvPod = "shm-sysv-pod";
+constexpr std::string_view kShmSysvRoles = "shm-sysv-roles";
+constexpr std::string_view kShmSysvAny = "shm-sysv-any";
+constexpr std::string_view kShmPosixPod = "shm-posix-pod";
+constexpr std::string_view kShmPosixRoles = "shm-posix-roles";
+constexpr std::string_view kShmPosixAny = "shm-posix-any";
 constexpr std::string_view kShmPosixPattern = "shm-posix-pattern";
-constexpr std::string_view kNoShmPosix = "no-shm-posix";
-constexpr std::string_view kKill = "kill";
-constexpr std::string_view kNoKill = "no-kill";
-constexpr std::string_view kPtrace = "ptrace";
-constexpr std::string_view kNoPtrace = "no-ptrace";
-constexpr std::string_view kKeyring = "keyring";
-constexpr std::string_view kNoKeyring = "no-keyring";
+constexpr std::string_view kKillPod = "kill-pod";
+constexpr std::string_view kKillRoles = "kill-roles";
+constexpr std::string_view kKillAny = "kill-any";
+constexpr std::string_view kPtracePod = "ptrace-pod";
+constexpr std::string_view kPtraceRoles = "ptrace-roles";
+constexpr std::string_view kPtraceAny = "ptrace-any";
+constexpr std::string_view kKeyringOwn = "keyring-own";
+constexpr std::string_view kKeyringRoles = "keyring-roles";
+constexpr std::string_view kKeyringAny = "keyring-any";
 constexpr std::string_view kUnprivEnroll = "unpriv-enroll";
-constexpr std::string_view kEnroll = "enroll";
+constexpr std::string_view kEnrollRoles = "enroll-roles";
+constexpr std::string_view kEnrollAny = "enroll-any";
 constexpr std::string_view kOverrideStacked = "override-stacked";
 constexpr std::string_view kUntrackedBpf = "untracked-bpf";
 constexpr std::string_view kMinSeq = "min-seq";
@@ -438,12 +450,106 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
             std::errc::invalid_argument, "role '" + id + "' must be a map");
       }
 
+      const std::set<std::string_view> allowedKeys = {
+          kAny,           kFsAny,        kVerityAny,       kEnforceBinaryCerts,
+          kPaths,         kBpfPod,       kBpfRoles,        kBpfAny,
+          kLkmAny,        kMqSysvPod,    kMqSysvRoles,     kMqSysvAny,
+          kMqPosixPod,    kMqPosixRoles, kMqPosixAny,      kMqPosixPattern,
+          kShmSysvPod,    kShmSysvRoles, kShmSysvAny,      kShmPosixPod,
+          kShmPosixRoles, kShmPosixAny,  kShmPosixPattern, kKillPod,
+          kKillRoles,     kKillAny,      kPtracePod,       kPtraceRoles,
+          kPtraceAny,     kKeyringOwn,   kKeyringRoles,    kKeyringAny,
+          kEnrollRoles,   kEnrollAny,    kUnprivEnroll,    kOverrideStacked,
+          kUntrackedBpf,  kMinSeq,
+      };
+      for (auto field = value.Begin(); field != value.End(); field++) {
+        const auto& [key, child] = *field;
+        (void)child;
+        if (!allowedKeys.contains(key)) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "' has unknown option '" + key + "'");
+        }
+      }
+
+      const auto parseFlag = [&](std::string_view key,
+                                 bool& out) -> err::Expected<err::Unit> {
+        if (Yaml::Node* flagNode = findChild(value, key)) {
+          auto parsed = parseRoleFlag(id, key, *flagNode);
+          if (parsed.hasError()) {
+            return parsed.error();
+          }
+          out = *parsed;
+        }
+        return err::unit;
+      };
+
+      const auto parseScoped =
+          [&](std::string_view podKey,
+              std::string_view rolesKey,
+              std::string_view anyKey,
+              std::vector<std::string>& targets,
+              AccessMode& mode) -> err::Expected<err::Unit> {
+        bool pod = false;
+        bool allowAny = false;
+        if (auto res = parseFlag(podKey, pod); res.hasError()) {
+          return res.error();
+        }
+        if (auto res = parseFlag(anyKey, allowAny); res.hasError()) {
+          return res.error();
+        }
+
+        bool hasRoles = false;
+        if (Yaml::Node* rolesNode = findChild(value, rolesKey)) {
+          auto parsed = parseIdList(
+              "role '" + id + "': " + std::string(rolesKey), *rolesNode);
+          if (parsed.hasError()) {
+            return parsed.error();
+          }
+          targets = std::move(*parsed);
+          hasRoles = true;
+        }
+
+        if (static_cast<unsigned>(pod) + static_cast<unsigned>(hasRoles) +
+                static_cast<unsigned>(allowAny) >
+            1) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "': " + std::string(podKey) + ", " +
+                  std::string(rolesKey) + " and " + std::string(anyKey) +
+                  " are mutually exclusive");
+        }
+        mode = allowAny ? AccessMode::Any
+            : hasRoles  ? AccessMode::Roles
+            : pod       ? AccessMode::Pod
+                        : AccessMode::Deny;
+        return err::unit;
+      };
+
+      if (auto res = parseFlag(kAny, policy.any); res.hasError()) {
+        return res.error();
+      }
+
       if (Yaml::Node* certRefs = findChild(value, kEnforceBinaryCerts)) {
         auto refs = parseCertRefs(id, *certRefs, certs);
         if (refs.hasError()) {
           return refs.error();
         }
+        if (refs->empty()) {
+          return err::Error(
+              std::errc::invalid_argument,
+              "role '" + id + "': enforce-binary-certs must not be empty");
+        }
         policy.enforceBinaryCerts = std::move(*refs);
+      }
+      if (auto res = parseFlag(kVerityAny, policy.verityAny); res.hasError()) {
+        return res.error();
+      }
+      if (policy.verityAny && !policy.enforceBinaryCerts.empty()) {
+        return err::Error(
+            std::errc::invalid_argument,
+            "role '" + id +
+                "': verity-any and enforce-binary-certs are mutually exclusive");
       }
 
       if (Yaml::Node* paths = findChild(value, kPaths)) {
@@ -452,247 +558,206 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           return parsed.error();
         }
         policy.paths = std::move(*parsed);
+        policy.hasPaths = true;
       }
-
-      // Written at all, not written non-empty: an empty `bpf` confines the role
-      // to objects its own role owns, while leaving it out means unconfigured.
-      if (Yaml::Node* bpf = findChild(value, kBpf)) {
-        auto targets = parseIdList("role '" + id + "': bpf", *bpf);
-        if (targets.hasError()) {
-          return targets.error();
-        }
-        policy.bpf = std::move(*targets);
-        policy.hasBpf = true;
+      if (auto res = parseFlag(kFsAny, policy.fsAny); res.hasError()) {
+        return res.error();
       }
-
-      // Absent is the same as false, as for `unpriv-enroll` and unlike the
-      // lists: a role that says nothing about bpf(2) is not denied it.
-      if (Yaml::Node* noBpf = findChild(value, kNoBpf)) {
-        auto denied = parseRoleFlag(id, kNoBpf, *noBpf);
-        if (denied.hasError()) {
-          return denied.error();
-        }
-        policy.noBpf = *denied;
-      }
-
-      // The two say opposite things about the same syscall, and silently
-      // picking one would enforce something the policy does not read as.
-      if (policy.noBpf && policy.hasBpf) {
+      if (policy.fsAny && policy.hasPaths) {
         return err::Error(
             std::errc::invalid_argument,
-            "role '" + id + "': " + std::string(kNoBpf) + " and " +
-                std::string(kBpf) +
-                " contradict each other; no-bpf denies bpf(2) outright, so "
-                "there is nothing for bpf to grant");
+            "role '" + id + "': fs-any and paths are mutually exclusive");
       }
 
-      if (Yaml::Node* noLkm = findChild(value, kNoLkm)) {
-        auto denied = parseRoleFlag(id, kNoLkm, *noLkm);
-        if (denied.hasError()) {
-          return denied.error();
-        }
-        policy.noLkm = *denied;
+      if (auto res = parseScoped(
+              kBpfPod, kBpfRoles, kBpfAny, policy.bpf, policy.bpfMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseFlag(kLkmAny, policy.lkmAny); res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kMqSysvPod,
+              kMqSysvRoles,
+              kMqSysvAny,
+              policy.mqSysv,
+              policy.mqSysvMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kMqPosixPod,
+              kMqPosixRoles,
+              kMqPosixAny,
+              policy.mqPosix,
+              policy.mqPosixMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kShmSysvPod,
+              kShmSysvRoles,
+              kShmSysvAny,
+              policy.shmSysv,
+              policy.shmSysvMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kShmPosixPod,
+              kShmPosixRoles,
+              kShmPosixAny,
+              policy.shmPosix,
+              policy.shmPosixMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kKillPod, kKillRoles, kKillAny, policy.kill, policy.killMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kPtracePod,
+              kPtraceRoles,
+              kPtraceAny,
+              policy.ptrace,
+              policy.ptraceMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
+              kKeyringOwn,
+              kKeyringRoles,
+              kKeyringAny,
+              policy.keyring,
+              policy.keyringMode);
+          res.hasError()) {
+        return res.error();
       }
 
-      const auto parseOwnedIpc = [&](std::string_view listKey,
-                                     std::string_view denyKey,
-                                     std::vector<std::string>& targets,
-                                     bool& configured,
-                                     bool& denied) -> err::Expected<err::Unit> {
-        if (Yaml::Node* list = findChild(value, listKey)) {
-          auto parsed =
-              parseIdList("role '" + id + "': " + std::string(listKey), *list);
+      const auto parsePatterns =
+          [&](std::string_view key,
+              std::vector<std::string>& patterns,
+              AccessMode& mode) -> err::Expected<err::Unit> {
+        if (Yaml::Node* patternNode = findChild(value, key)) {
+          auto parsed = parseIdList(
+              "role '" + id + "': " + std::string(key), *patternNode);
           if (parsed.hasError()) {
             return parsed.error();
           }
-          targets = std::move(*parsed);
-          configured = true;
-        }
-
-        if (Yaml::Node* deny = findChild(value, denyKey)) {
-          auto parsed = parseRoleFlag(id, denyKey, *deny);
-          if (parsed.hasError()) {
-            return parsed.error();
+          if (mode == AccessMode::Any) {
+            return err::Error(
+                std::errc::invalid_argument,
+                "role '" + id + "': " + std::string(key) +
+                    " cannot be combined with the corresponding any option");
           }
-          denied = *parsed;
-        }
-
-        if (configured && denied) {
-          return err::Error(
-              std::errc::invalid_argument,
-              "role '" + id + "': " + std::string(listKey) + " and " +
-                  std::string(denyKey) + " contradict each other");
+          patterns = std::move(*parsed);
+          if (mode == AccessMode::Deny) {
+            mode = AccessMode::Pod;
+          }
         }
         return err::unit;
       };
-
-      if (auto res = parseOwnedIpc(
-              kMqSysv,
-              kNoMqSysv,
-              policy.mqSysv,
-              policy.hasMqSysv,
-              policy.noMqSysv);
+      if (auto res = parsePatterns(
+              kMqPosixPattern, policy.mqPosixPatterns, policy.mqPosixMode);
           res.hasError()) {
         return res.error();
       }
-      if (auto res = parseOwnedIpc(
-              kMqPosix,
-              kNoMqPosix,
-              policy.mqPosix,
-              policy.hasMqPosix,
-              policy.noMqPosix);
+      if (auto res = parsePatterns(
+              kShmPosixPattern, policy.shmPosixPatterns, policy.shmPosixMode);
           res.hasError()) {
         return res.error();
       }
-      if (Yaml::Node* patterns = findChild(value, kMqPosixPattern)) {
-        auto parsed = parseIdList(
-            "role '" + id + "': " + std::string(kMqPosixPattern), *patterns);
-        if (parsed.hasError()) {
-          return parsed.error();
-        }
-        policy.mqPosixPatterns = std::move(*parsed);
-        policy.hasMqPosix = true;
-        if (policy.noMqPosix) {
-          return err::Error(
-              std::errc::invalid_argument,
-              "role '" + id + "': " + std::string(kMqPosixPattern) + " and " +
-                  std::string(kNoMqPosix) + " contradict each other");
-        }
-      }
-      if (auto res = parseOwnedIpc(
-              kShmSysv,
-              kNoShmSysv,
-              policy.shmSysv,
-              policy.hasShmSysv,
-              policy.noShmSysv);
+
+      if (auto res = parseFlag(kUntrackedBpf, policy.untrackedBpf);
           res.hasError()) {
         return res.error();
       }
-      if (auto res = parseOwnedIpc(
-              kShmPosix,
-              kNoShmPosix,
-              policy.shmPosix,
-              policy.hasShmPosix,
-              policy.noShmPosix);
-          res.hasError()) {
+
+      bool enrollAny = false;
+      if (auto res = parseFlag(kEnrollAny, enrollAny); res.hasError()) {
         return res.error();
       }
-      if (Yaml::Node* patterns = findChild(value, kShmPosixPattern)) {
-        auto parsed = parseIdList(
-            "role '" + id + "': " + std::string(kShmPosixPattern), *patterns);
-        if (parsed.hasError()) {
-          return parsed.error();
-        }
-        policy.shmPosixPatterns = std::move(*parsed);
-        policy.hasShmPosix = true;
-        if (policy.noShmPosix) {
-          return err::Error(
-              std::errc::invalid_argument,
-              "role '" + id + "': " + std::string(kShmPosixPattern) + " and " +
-                  std::string(kNoShmPosix) + " contradict each other");
-        }
-      }
-
-      // Absent is the same as false again. What it turns off is ownership,
-      // not permission, so it is read after both of the above.
-      if (Yaml::Node* untracked = findChild(value, kUntrackedBpf)) {
-        auto exempt = parseRoleFlag(id, kUntrackedBpf, *untracked);
-        if (exempt.hasError()) {
-          return exempt.error();
-        }
-        policy.untrackedBpf = *exempt;
-      }
-
-      // Rejected rather than accepted as a no-op, a role that did not write
-      // `bpf` already owning nothing. Covers `no-bpf` too, which the check
-      // above has established cannot appear alongside `bpf`.
-      if (policy.untrackedBpf && !policy.hasBpf) {
-        return err::Error(
-            std::errc::invalid_argument,
-            "role '" + id + "': " + std::string(kUntrackedBpf) + " needs " +
-                std::string(kBpf) +
-                "; only a role configured for bpf(2) takes ownership of what "
-                "it creates, so there is nothing here to exempt");
-      }
-
-      // Written at all again: an empty `kill` confines the role to its own
-      // pods, leaving it out leaves it unrestricted.
-      if (Yaml::Node* kill = findChild(value, kKill)) {
-        auto targets = parseIdList("role '" + id + "': kill", *kill);
+      if (Yaml::Node* enroll = findChild(value, kEnrollRoles)) {
+        auto targets = parseIdList(
+            "role '" + id + "': " + std::string(kEnrollRoles), *enroll);
         if (targets.hasError()) {
           return targets.error();
         }
-        policy.kill = std::move(*targets);
-        policy.hasKill = true;
+        policy.enroll = std::move(*targets);
+        policy.enrollMode = AccessMode::Roles;
       }
-
-      if (Yaml::Node* noKill = findChild(value, kNoKill)) {
-        auto denied = parseRoleFlag(id, kNoKill, *noKill);
-        if (denied.hasError()) {
-          return denied.error();
-        }
-        policy.noKill = *denied;
-      }
-
-      if (policy.noKill && policy.hasKill) {
+      if (enrollAny && policy.enrollMode != AccessMode::Deny) {
         return err::Error(
             std::errc::invalid_argument,
-            "role '" + id + "': " + std::string(kNoKill) + " and " +
-                std::string(kKill) +
-                " contradict each other; no-kill denies signalling outright, "
-                "so there is nothing for kill to grant");
+            "role '" + id +
+                "': enroll-any and enroll-roles are mutually exclusive");
+      }
+      if (enrollAny) {
+        policy.enrollMode = AccessMode::Any;
       }
 
-      if (Yaml::Node* ptrace = findChild(value, kPtrace)) {
-        auto targets = parseIdList("role '" + id + "': ptrace", *ptrace);
-        if (targets.hasError()) {
-          return targets.error();
+      const auto inheritAny = [&](AccessMode& mode, bool configured) {
+        if (policy.any && !configured) {
+          mode = AccessMode::Any;
         }
-        policy.ptrace = std::move(*targets);
-        policy.hasPtrace = true;
-      }
-
-      if (Yaml::Node* noPtrace = findChild(value, kNoPtrace)) {
-        auto denied = parseRoleFlag(id, kNoPtrace, *noPtrace);
-        if (denied.hasError()) {
-          return denied.error();
+      };
+      inheritAny(
+          policy.bpfMode,
+          findChild(value, kBpfPod) || findChild(value, kBpfRoles) ||
+              findChild(value, kBpfAny));
+      inheritAny(
+          policy.mqSysvMode,
+          findChild(value, kMqSysvPod) || findChild(value, kMqSysvRoles) ||
+              findChild(value, kMqSysvAny));
+      inheritAny(
+          policy.mqPosixMode,
+          findChild(value, kMqPosixPod) || findChild(value, kMqPosixRoles) ||
+              findChild(value, kMqPosixAny) ||
+              findChild(value, kMqPosixPattern));
+      inheritAny(
+          policy.shmSysvMode,
+          findChild(value, kShmSysvPod) || findChild(value, kShmSysvRoles) ||
+              findChild(value, kShmSysvAny));
+      inheritAny(
+          policy.shmPosixMode,
+          findChild(value, kShmPosixPod) || findChild(value, kShmPosixRoles) ||
+              findChild(value, kShmPosixAny) ||
+              findChild(value, kShmPosixPattern));
+      inheritAny(
+          policy.killMode,
+          findChild(value, kKillPod) || findChild(value, kKillRoles) ||
+              findChild(value, kKillAny));
+      inheritAny(
+          policy.ptraceMode,
+          findChild(value, kPtracePod) || findChild(value, kPtraceRoles) ||
+              findChild(value, kPtraceAny));
+      inheritAny(
+          policy.keyringMode,
+          findChild(value, kKeyringOwn) || findChild(value, kKeyringRoles) ||
+              findChild(value, kKeyringAny));
+      inheritAny(
+          policy.enrollMode,
+          findChild(value, kEnrollRoles) || findChild(value, kEnrollAny));
+      if (policy.any) {
+        if (!findChild(value, kLkmAny)) {
+          policy.lkmAny = true;
         }
-        policy.noPtrace = *denied;
+        if (!findChild(value, kPaths) && !findChild(value, kFsAny)) {
+          policy.fsAny = true;
+        }
+        if (!findChild(value, kEnforceBinaryCerts) &&
+            !findChild(value, kVerityAny)) {
+          policy.verityAny = true;
+        }
       }
-
-      if (policy.noPtrace && policy.hasPtrace) {
+      if (policy.untrackedBpf && policy.bpfMode == AccessMode::Deny) {
         return err::Error(
             std::errc::invalid_argument,
-            "role '" + id + "': " + std::string(kNoPtrace) + " and " +
-                std::string(kPtrace) +
-                " contradict each other; no-ptrace denies ptrace outright, "
-                "so there is nothing for ptrace to grant");
-      }
-
-      if (Yaml::Node* keyring = findChild(value, kKeyring)) {
-        auto targets = parseIdList("role '" + id + "': keyring", *keyring);
-        if (targets.hasError()) {
-          return targets.error();
-        }
-        policy.keyring = std::move(*targets);
-        policy.hasKeyring = true;
-      }
-
-      if (Yaml::Node* noKeyring = findChild(value, kNoKeyring)) {
-        auto denied = parseRoleFlag(id, kNoKeyring, *noKeyring);
-        if (denied.hasError()) {
-          return denied.error();
-        }
-        policy.noKeyring = *denied;
-      }
-
-      if (policy.noKeyring && policy.hasKeyring) {
-        return err::Error(
-            std::errc::invalid_argument,
-            "role '" + id + "': " + std::string(kNoKeyring) + " and " +
-                std::string(kKeyring) +
-                " contradict each other; no-keyring denies keyring writes "
-                "outright, so there is nothing for keyring to grant");
+            "role '" + id +
+                "': untracked-bpf needs bpf-pod, bpf-roles, bpf-any or any");
       }
 
       // Absent is the same as false, as for the flags above: a role that says
@@ -713,17 +778,6 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           return allowed.error();
         }
         policy.unprivEnroll = *allowed;
-      }
-
-      // Written at all again: an empty `enroll` forbids stacking anything, and
-      // leaving it out leaves the role unrestricted.
-      if (Yaml::Node* enroll = findChild(value, kEnroll)) {
-        auto targets = parseIdList("role '" + id + "': enroll", *enroll);
-        if (targets.hasError()) {
-          return targets.error();
-        }
-        policy.enroll = std::move(*targets);
-        policy.hasEnroll = true;
       }
 
       if (Yaml::Node* minSeq = findChild(value, kMinSeq)) {

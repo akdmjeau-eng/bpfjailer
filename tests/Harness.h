@@ -17,9 +17,9 @@
 // Tests run several at a time, `-j N` or BPFJTEST_JOBS wide. What makes that
 // safe is not the namespaces -- BPF LSM programs are attached host-wide and
 // see every task on the box, whichever namespace it is in -- but that a task
-// no tree enrolled carries no roles, and a walk over no roles denies nothing.
-// One test's enforcers therefore abstain on another's processes, because
-// enroll() names a pid and each tree has pod maps of its own.
+// no tree enrolled has no task-storage entry, so no policy applies. One test's
+// enforcers therefore ignore another's processes, because enroll() names a pid
+// and each tree has pod maps of its own.
 //
 // TEST_EXCLUSIVE is the way out for a test where that does not hold. Exec time
 // enrollment is the case that breaks it: bpfj_enroll_from_xattr makes *every*

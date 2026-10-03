@@ -30,8 +30,8 @@ namespace {
 
 constexpr std::string_view kPolicy =
     "roles:\n"
-    "  unrestricted:\n"
-    "  denied:\n    no-lkm: true\n";
+    "  unrestricted:\n    lkm-any: true\n"
+    "  denied:\n";
 
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);

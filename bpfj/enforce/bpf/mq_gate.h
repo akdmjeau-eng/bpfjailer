@@ -17,7 +17,7 @@ static __always_inline bool bpfj_mq_uuid_equal(
 
 /// Snapshot the creator's newest pod into an owner record. An unjailed task
 /// deliberately produces no owner: restricted actors subsequently treat the
-/// missing record as unknown, while unconfigured actors remain unrestricted.
+/// missing record as unknown, while mq-*-any actors may still access it.
 static __always_inline bool bpfj_mq_current_owner(struct bpfj_mq_owner* owner) {
   struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
   if (!pid_data || pid_data->num_pods == 0) {
@@ -45,11 +45,10 @@ static __always_inline bool bpfj_mq_current_owner(struct bpfj_mq_owner* owner) {
   return true;
 }
 
-/// Apply one of the independent mq-sysv/mq-posix gates. Every configured
-/// actor role must permit the owner; an empty list therefore permits only the
-/// exact creating pod. Roles absent from the map abstain, unless an override
-/// role ends the walk. A matching POSIX name pattern can permit an object even
-/// when ownership is missing; otherwise configured roles deny unknown owners.
+/// Apply one of the independent mq-sysv/mq-posix gates. Every actor role must
+/// permit the owner according to its deny, pod, role-list or any mode. A
+/// matching POSIX name pattern can permit an object even when ownership is
+/// missing; otherwise restricted roles deny unknown owners.
 struct bpfj_mq_allow_ctx {
   enum bpfj_policy_gate gate;
   struct bpfj_pid_data* actor;
@@ -85,7 +84,7 @@ static long bpfj_mq_allow_cb(__u32 index, void* data) {
   const __u8 mode = ctx->gate == BPFJ_POLICY_GATE_MQ_SYSV
       ? policy->mq_sysv_mode
       : policy->mq_posix_mode;
-  if (mode != BPFJ_POLICY_UNCONFIGURED) {
+  if (mode != BPFJ_POLICY_ANY) {
     if (mode == BPFJ_POLICY_DENY) {
       ctx->allowed = 0;
       return 1;
@@ -93,7 +92,9 @@ static long bpfj_mq_allow_cb(__u32 index, void* data) {
 
     const bool permitted = ctx->owner &&
         (bpfj_mq_uuid_equal(&actor_pod, &ctx->owner->pod) ||
-         bpfj_role_set_contains(policy->gates[ctx->gate], ctx->owner->policy));
+         (mode == BPFJ_POLICY_ROLES &&
+          bpfj_role_set_contains(
+              policy->gates[ctx->gate], ctx->owner->policy)));
     const __u32 pattern_id = ctx->gate == BPFJ_POLICY_GATE_MQ_POSIX
         ? policy->mq_posix_pattern_id
         : 0;

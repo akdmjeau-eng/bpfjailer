@@ -280,7 +280,7 @@ TEST(BpfLog, BpfjlogFailsWhenNoMapsArePinned) {
 }
 
 TEST(BpfLog, BpfjlogPrintsDeniedKillToStdoutAndStderr) {
-  attachKill("roles:\n  svc:\n    kill:\n");
+  attachKill("roles:\n  svc:\n    kill-roles:\n");
   Child target;
   enroll("svc", ::getpid());
   auto proc = spawnBpfjlog({"--bpffs-path", bpffsPath()});

@@ -165,33 +165,20 @@ Expected<> publishPolicyCatalog(
     out.min_seq = source.minSeq;
     out.flags = (source.overrideStacked ? BPFJ_POLICY_OVERRIDE_STACKED : 0) |
         (source.unprivEnroll ? BPFJ_POLICY_UNPRIV_ENROLL : 0) |
-        (source.noLkm ? BPFJ_POLICY_NO_LKM : 0) |
-        (source.hasMinSeq ? BPFJ_POLICY_HAS_MIN_SEQ : 0);
-    out.bpf_mode = source.noBpf ? BPFJ_POLICY_DENY
-        : source.hasBpf ? (source.untrackedBpf ? BPFJ_POLICY_ALLOW_UNTRACKED
-                                               : BPFJ_POLICY_ALLOW)
-                        : BPFJ_POLICY_UNCONFIGURED;
-    out.mq_sysv_mode = source.noMqSysv ? BPFJ_POLICY_DENY
-        : source.hasMqSysv             ? BPFJ_POLICY_ALLOW
-                                       : BPFJ_POLICY_UNCONFIGURED;
-    out.mq_posix_mode = source.noMqPosix ? BPFJ_POLICY_DENY
-        : source.hasMqPosix              ? BPFJ_POLICY_ALLOW
-                                         : BPFJ_POLICY_UNCONFIGURED;
-    out.shm_sysv_mode = source.noShmSysv ? BPFJ_POLICY_DENY
-        : source.hasShmSysv              ? BPFJ_POLICY_ALLOW
-                                         : BPFJ_POLICY_UNCONFIGURED;
-    out.shm_posix_mode = source.noShmPosix ? BPFJ_POLICY_DENY
-        : source.hasShmPosix               ? BPFJ_POLICY_ALLOW
-                                           : BPFJ_POLICY_UNCONFIGURED;
-    out.kill_mode = source.noKill ? BPFJ_POLICY_DENY
-        : source.hasKill          ? BPFJ_POLICY_ALLOW
-                                  : BPFJ_POLICY_UNCONFIGURED;
-    out.ptrace_mode = source.noPtrace ? BPFJ_POLICY_DENY
-        : source.hasPtrace            ? BPFJ_POLICY_ALLOW
-                                      : BPFJ_POLICY_UNCONFIGURED;
-    out.keyring_mode = source.noKeyring ? BPFJ_POLICY_DENY
-        : source.hasKeyring             ? BPFJ_POLICY_ALLOW
-                                        : BPFJ_POLICY_UNCONFIGURED;
+        (source.untrackedBpf ? BPFJ_POLICY_BPF_UNTRACKED : 0) |
+        (source.hasMinSeq ? BPFJ_POLICY_HAS_MIN_SEQ : 0) |
+        (source.lkmAny ? BPFJ_POLICY_LKM_ANY : 0) |
+        (source.fsAny ? BPFJ_POLICY_FS_ANY : 0) |
+        (source.verityAny ? BPFJ_POLICY_VERITY_ANY : 0);
+    out.bpf_mode = static_cast<__u8>(source.bpfMode);
+    out.mq_sysv_mode = static_cast<__u8>(source.mqSysvMode);
+    out.mq_posix_mode = static_cast<__u8>(source.mqPosixMode);
+    out.shm_sysv_mode = static_cast<__u8>(source.shmSysvMode);
+    out.shm_posix_mode = static_cast<__u8>(source.shmPosixMode);
+    out.kill_mode = static_cast<__u8>(source.killMode);
+    out.ptrace_mode = static_cast<__u8>(source.ptraceMode);
+    out.keyring_mode = static_cast<__u8>(source.keyringMode);
+    out.enroll_mode = static_cast<__u8>(source.enrollMode);
 
     const struct bpfj_role_policy_ref ref{.policy = &out};
     if (::bpf_map_update_elem(
@@ -207,21 +194,21 @@ Expected<> publishPolicyCatalog(
     auto& out = catalog->policies[index++];
     const struct {
       enum bpfj_policy_gate gate;
-      bool configured;
+      AccessMode mode;
       const std::vector<std::string>* roles;
     } sets[] = {
-        {BPFJ_POLICY_GATE_BPF, source.hasBpf, &source.bpf},
-        {BPFJ_POLICY_GATE_KILL, source.hasKill, &source.kill},
-        {BPFJ_POLICY_GATE_PTRACE, source.hasPtrace, &source.ptrace},
-        {BPFJ_POLICY_GATE_KEYRING, source.hasKeyring, &source.keyring},
-        {BPFJ_POLICY_GATE_ENROLL, source.hasEnroll, &source.enroll},
-        {BPFJ_POLICY_GATE_MQ_SYSV, source.hasMqSysv, &source.mqSysv},
-        {BPFJ_POLICY_GATE_MQ_POSIX, source.hasMqPosix, &source.mqPosix},
-        {BPFJ_POLICY_GATE_SHM_SYSV, source.hasShmSysv, &source.shmSysv},
-        {BPFJ_POLICY_GATE_SHM_POSIX, source.hasShmPosix, &source.shmPosix},
+        {BPFJ_POLICY_GATE_BPF, source.bpfMode, &source.bpf},
+        {BPFJ_POLICY_GATE_KILL, source.killMode, &source.kill},
+        {BPFJ_POLICY_GATE_PTRACE, source.ptraceMode, &source.ptrace},
+        {BPFJ_POLICY_GATE_KEYRING, source.keyringMode, &source.keyring},
+        {BPFJ_POLICY_GATE_ENROLL, source.enrollMode, &source.enroll},
+        {BPFJ_POLICY_GATE_MQ_SYSV, source.mqSysvMode, &source.mqSysv},
+        {BPFJ_POLICY_GATE_MQ_POSIX, source.mqPosixMode, &source.mqPosix},
+        {BPFJ_POLICY_GATE_SHM_SYSV, source.shmSysvMode, &source.shmSysv},
+        {BPFJ_POLICY_GATE_SHM_POSIX, source.shmPosixMode, &source.shmPosix},
     };
     for (const auto& set : sets) {
-      if (!set.configured) {
+      if (set.mode != AccessMode::Roles) {
         continue;
       }
       auto published = publishRoleSet(*arena, *rolePolicies, *set.roles);

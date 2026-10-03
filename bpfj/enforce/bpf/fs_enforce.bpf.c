@@ -77,7 +77,7 @@ static __noinline bool bpfj_fs_match_allowed(
       best = entry;
     }
   }
-  return best == NULL || bpfj_fs_mode_allowed(best->mode, wanted);
+  return best != NULL && bpfj_fs_mode_allowed(best->mode, wanted);
 }
 
 // Inlined to avoid adding a ninth frame to the mount and glob walk. The pod
@@ -118,7 +118,9 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
     struct bpfj_uuid uuid = {};
     bpfj_pod_read_role_id(&role, pod);
     bpfj_pod_read_uuid(&uuid, pod);
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
     struct bpfj_file_matcher __arena* matcher = bpfj_fs_matcher_for(&role);
+    bool allowed = policy && (policy->flags & BPFJ_POLICY_FS_ANY);
     if (matcher) {
       long count = BPFJ_FILE_MATCH_CACHED(
           state,
@@ -128,15 +130,16 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
           &uuid,
           bpfj_file_match_cached_bind_var_array,
           &pod->var_array);
-      if (count > 0 && !bpfj_fs_match_allowed(state, wanted, count)) {
-        struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
-        bpfj_event_submit(event);
-        BPFJ_LOG("Denied filesystem access for role %s", role.id);
-        return -EACCES;
-      }
+      allowed = count > 0 && bpfj_fs_match_allowed(state, wanted, count);
       if (count < 0 && count != -EXDEV) {
         BPFJ_LOG_ERR(-count, "filesystem path match failed");
       }
+    }
+    if (!allowed) {
+      struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
+      bpfj_event_submit(event);
+      BPFJ_LOG("Denied filesystem access for role %s", role.id);
+      return -EACCES;
     }
     if (bpfj_is_override(pod)) {
       break;

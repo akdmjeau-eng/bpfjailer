@@ -43,10 +43,9 @@ static __always_inline bool bpfj_shm_current_owner(
   return true;
 }
 
-// Every configured actor role has to permit the owner. An empty list permits
-// only the exact creating pod; a deny entry permits nothing; an absent role
-// abstains. A matching POSIX name pattern can permit an object even when
-// ownership is missing; otherwise configured roles deny unknown owners.
+// Every actor role has to permit the owner according to its deny, pod,
+// role-list or any mode. A matching POSIX name pattern can permit an object
+// even when ownership is missing; otherwise restricted roles deny it.
 struct bpfj_shm_allow_ctx {
   enum bpfj_policy_gate gate;
   struct bpfj_pid_data* actor;
@@ -82,7 +81,7 @@ static long bpfj_shm_allow_cb(__u32 index, void* data) {
   const __u8 mode = ctx->gate == BPFJ_POLICY_GATE_SHM_SYSV
       ? policy->shm_sysv_mode
       : policy->shm_posix_mode;
-  if (mode != BPFJ_POLICY_UNCONFIGURED) {
+  if (mode != BPFJ_POLICY_ANY) {
     if (mode == BPFJ_POLICY_DENY) {
       ctx->allowed = 0;
       return 1;
@@ -90,7 +89,9 @@ static long bpfj_shm_allow_cb(__u32 index, void* data) {
 
     const bool permitted = ctx->owner &&
         (bpfj_shm_uuid_equal(&actor_pod, &ctx->owner->pod) ||
-         bpfj_role_set_contains(policy->gates[ctx->gate], ctx->owner->policy));
+         (mode == BPFJ_POLICY_ROLES &&
+          bpfj_role_set_contains(
+              policy->gates[ctx->gate], ctx->owner->policy)));
     const __u32 pattern_id = ctx->gate == BPFJ_POLICY_GATE_SHM_POSIX
         ? policy->shm_posix_pattern_id
         : 0;

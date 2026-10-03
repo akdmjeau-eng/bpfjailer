@@ -402,8 +402,17 @@ TEST(VerityEnforcer, ARoleNamingNoCertificateGetsNoKeyMapEntry) {
   ASSERT_EQ(keyringOf("worker"), 0);
 }
 
-TEST(VerityEnforcer, AJailedRoleNamingNoCertificateMayStillExec) {
+TEST(VerityEnforcer, AJailedRoleNamingNoCertificateMayNotExec) {
   attach("roles:\n  svc:\n");
+
+  Child actor([] { return runProgram("/bin/true"); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), EPERM);
+}
+
+TEST(VerityEnforcer, VerityAnyAllowsUnsignedExec) {
+  attach("roles:\n  svc:\n    verity-any: true\n");
 
   Child actor([] { return runProgram("/bin/true"); });
   enroll("svc", actor.pid());
@@ -698,18 +707,17 @@ TEST(VerityEnforcer, LoadPinsTheKeyringGate) {
   ASSERT(!mapPinned("bpfj_keyring_access"));
 }
 
-TEST(VerityEnforcer, ARoleNamingNoKeyringListMayWriteAKeyring) {
+TEST(VerityEnforcer, AKeyringAnyRoleMayWriteAKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture));
+  attach(signedPolicy(fixture) + "    keyring-any: true\n");
   enroll("svc", ::getpid());
 
-  // Unrestricted, like the other gates: writing the list is what restricts.
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
 }
 
 TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAnotherRolesKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "  other:\n    keyring:\n");
+  attach(signedPolicy(fixture) + "  other:\n    keyring-roles:\n");
   enroll("other", ::getpid());
 
   // The bypass this exists to close: a certificate of `other`'s in the keyring
@@ -719,7 +727,7 @@ TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAnotherRolesKeyring) {
 
 TEST(VerityEnforcer, ARestrictedRoleMayWriteItsOwnKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "    keyring:\n");
+  attach(signedPolicy(fixture) + "    keyring-own: true\n");
   enroll("svc", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
@@ -727,7 +735,7 @@ TEST(VerityEnforcer, ARestrictedRoleMayWriteItsOwnKeyring) {
 
 TEST(VerityEnforcer, ARoleWithNoKeyringMayNotWriteItsOwnKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "    no-keyring: true\n");
+  attach(signedPolicy(fixture) + "");
   enroll("svc", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), EPERM);
@@ -735,7 +743,7 @@ TEST(VerityEnforcer, ARoleWithNoKeyringMayNotWriteItsOwnKeyring) {
 
 TEST(VerityEnforcer, ARoleNamedInAKeyringListMayWriteThatKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "  admin:\n    keyring:\n      - svc\n");
+  attach(signedPolicy(fixture) + "  admin:\n    keyring-roles:\n      - svc\n");
   enroll("admin", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
@@ -745,7 +753,7 @@ TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAKeyringItDidNotName) {
   Fixture fixture;
   attach(
       signedPolicy(fixture) + "  other:\n    enforce-binary-certs:\n" +
-      "      - trusted\n  admin:\n    keyring:\n      - other\n");
+      "      - trusted\n  admin:\n    keyring-roles:\n      - other\n");
   enroll("admin", ::getpid());
 
   // Named one keyring, which says nothing about the other.
@@ -756,8 +764,8 @@ TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAKeyringItDidNotName) {
 TEST(VerityEnforcer, EveryRoleWithAKeyringListHasToPermitTheWrite) {
   Fixture fixture;
   attach(
-      signedPolicy(fixture) + "  strict:\n    keyring:\n" +
-      "  admin:\n    keyring:\n      - svc\n");
+      signedPolicy(fixture) + "  strict:\n    keyring-roles:\n" +
+      "  admin:\n    keyring-roles:\n      - svc\n");
   enroll("strict", ::getpid());
   enroll("admin", ::getpid());
 
@@ -767,8 +775,8 @@ TEST(VerityEnforcer, EveryRoleWithAKeyringListHasToPermitTheWrite) {
 TEST(VerityEnforcer, AnOverrideRoleAnswersForAKeyringWrite) {
   Fixture fixture;
   attach(
-      signedPolicy(fixture) + "  strict:\n    keyring:\n" +
-      "  admin:\n    override-stacked: true\n    keyring:\n      - svc\n");
+      signedPolicy(fixture) + "  strict:\n    keyring-roles:\n" +
+      "  admin:\n    override-stacked: true\n    keyring-roles:\n      - svc\n");
   enroll("strict", ::getpid());
   enroll("admin", ::getpid());
 
@@ -781,7 +789,7 @@ TEST(VerityEnforcer, AProtectedKeyringIsStillSearchedForVerification) {
 
   // The gate denies writes and nothing else: verification walks the keyring
   // with SEARCH, so a keyring nobody may write still runs a signed binary.
-  attach(signedPolicy(fixture) + "  other:\n    keyring:\n");
+  attach(signedPolicy(fixture) + "  other:\n    keyring-roles:\n");
 
   Child actor([path = fixture.path("hello")] { return runProgram(path); });
   enroll("svc", actor.pid());

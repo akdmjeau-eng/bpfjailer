@@ -29,22 +29,23 @@ namespace {
 
 constexpr std::string_view kPolicy =
     "roles:\n"
-    "  unconfigured:\n"
-    "  restricted:\n    kill:\n      - worker\n"
-    "  denied:\n    no-kill: true\n"
+    "  open:\n    any: true\n"
+    "  default-deny:\n"
+    "  restricted:\n    kill-roles:\n      - worker\n"
+    "  denied:\n"
     "  worker:\n"
     "  other:\n"
-    "  strict:\n    kill:\n"
-    "  base:\n"
+    "  strict:\n    kill-pod: true\n"
+    "  base:\n    kill-any: true\n"
     "  override-allow:\n"
     "    override-stacked: true\n"
-    "    kill:\n      - worker\n"
-    "  shield-reader:\n    kill:\n      - shield\n"
+    "    kill-roles:\n      - worker\n"
+    "  shield-reader:\n    kill-roles:\n      - shield\n"
     "  shield:\n    override-stacked: true\n"
     "  locked-override:\n"
     "    override-stacked: true\n"
-    "    kill:\n"
-    "  locked:\n    kill:\n";
+    "    kill-pod: true\n"
+    "  locked:\n    kill-pod: true\n";
 
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);
@@ -89,7 +90,17 @@ TEST(KillEnforcer, EnforcesPoliciesWithOneAttachment) {
           "an unconfigured role is unrestricted",
           [] {
             Child target;
-            enroll("unconfigured", ::getpid());
+            enroll("default-deny", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "an explicitly open role is unrestricted",
+          [] {
+            Child target;
+            enroll("open", ::getpid());
             return signalErrno(target.pid());
           }),
       0);

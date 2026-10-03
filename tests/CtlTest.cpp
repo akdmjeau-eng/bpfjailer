@@ -31,14 +31,22 @@ constexpr int kUsageError = 64;
 
 /// @brief A policy of the kind `make cmd CMD_POLICY=...` compiles in.
 constexpr std::string_view kCompiledPolicy =
-    "base-role: floor\nroles:\n  floor:\n  webserver:\n  carried:\n";
+    "base-role: floor\nroles:\n"
+    "  floor:\n    any: true\n"
+    "  webserver:\n    any: true\n"
+    "  carried:\n    any: true\n";
 
 constexpr std::string_view kDefaultPolicy =
     "roles:\n"
-    "  dropped:\n  carried:\n  testrole:\n  role:\n"
-    "  role0:\n  role1:\n  role2:\n  role3:\n"
-    "  role4:\n  role5:\n  role6:\n  role7:\n"
-    "  listed:\n  wrapped:\n  keeps:\n  drops:\n  missing:\n";
+    "  dropped:\n    any: true\n  carried:\n    any: true\n"
+    "  testrole:\n    any: true\n  role:\n    any: true\n"
+    "  role0:\n    any: true\n  role1:\n    any: true\n"
+    "  role2:\n    any: true\n  role3:\n    any: true\n"
+    "  role4:\n    any: true\n  role5:\n    any: true\n"
+    "  role6:\n    any: true\n  role7:\n    any: true\n"
+    "  listed:\n    any: true\n  wrapped:\n    any: true\n"
+    "  keeps:\n    any: true\n  drops:\n    any: true\n"
+    "  missing:\n    any: true\n";
 
 /// @brief Run a command against this test's own bpffs, as a binary carrying
 /// `policy` compiled in.
@@ -116,7 +124,7 @@ TEST(Ctl, AttachIgnoresACompiledInPolicy) {
   // `attach` reads its path and nothing else, whatever the binary carries --
   // which is the point of the compiled-in policy being a separate command.
   const std::string policy =
-      writePolicy("base-role: fromfile\nroles:\n  fromfile:\n");
+      writePolicy("base-role: fromfile\nroles:\n  fromfile:\n    any: true\n");
 
   const CommandResult res = ctlCompiled({"attach", policy});
   ASSERT_EQ(res.status, 0);
@@ -151,7 +159,7 @@ TEST(Ctl, AttachCompiledWithNothingCompiledInSaysSo) {
 
 TEST(Ctl, AttachCompiledRejectsAMalformedPolicy) {
   const CommandResult res = ctlCompiled(
-      {"attach-compiled"}, "roles:\n  web:\n    kill:\n      - nosuch\n");
+      {"attach-compiled"}, "roles:\n  web:\n    kill-roles:\n      - nosuch\n");
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("which is not in roles"));
   ASSERT(!exists(pinRoot()));
@@ -283,8 +291,10 @@ TEST(Ctl, ReplaceClearsATreeLeftBehindByAFailedRun) {
 }
 
 TEST(Ctl, ReplaceMergesCarriedPodsOntoTheNewBaseRole) {
-  const std::string policy =
-      writePolicy("base-role: floor\nroles:\n  floor:\n  carried:\n");
+  const std::string policy = writePolicy(
+      "base-role: floor\nroles:\n"
+      "  floor:\n    any: true\n"
+      "  carried:\n    any: true\n");
 
   const CommandResult attached = ctl({"attach", policy});
   ASSERT_EQ(attached.status, 0);
@@ -314,8 +324,9 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
   const std::string policy = writePolicy(
       "base-role: floor\n"
       "roles:\n"
-      "  floor:\n    bpf:\n    untracked-bpf: true\n"
-      "  bpfjailer:\n    override-stacked: true\n    bpf:\n");
+      "  floor:\n    any: true\n    bpf-roles:\n    untracked-bpf: true\n"
+      "  bpfjailer:\n    any: true\n    override-stacked: true\n"
+      "    bpf-any: true\n");
 
   ASSERT_EQ(ctl({"attach", policy}).status, 0);
   ASSERT_EQ(ctl({"enroll", "bpfjailer", "signed@meta", selfPid()}).status, 0);
@@ -326,14 +337,15 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
 // Ids are positions in the policy's vars, so dropping `first` moves `second`
 // from id 2 to id 1. A pod copied across by id would come out with no name.
 TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
-  const std::string before =
-      writePolicy("vars:\n  - first\n  - second\nroles:\n  carried:\n");
+  const std::string before = writePolicy(
+      "vars:\n  - first\n  - second\nroles:\n"
+      "  carried:\n    any: true\n");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(
       ctl({"enroll", "carried", "user", selfPid(), "second=kept"}).status, 0);
 
   const std::string after =
-      writePolicy("vars:\n  - second\nroles:\n  carried:\n");
+      writePolicy("vars:\n  - second\nroles:\n  carried:\n    any: true\n");
   ASSERT_EQ(ctl({"replace", after}).status, 0);
 
   const CommandResult shown = ctl({"show", selfPid()});
@@ -343,12 +355,12 @@ TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
 
 TEST(Ctl, ReplaceRefusesToDropAVarAPodCarries) {
   const std::string before =
-      writePolicy("vars:\n  - kept\nroles:\n  carried:\n");
+      writePolicy("vars:\n  - kept\nroles:\n  carried:\n    any: true\n");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(ctl({"enroll", "carried", "user", selfPid(), "kept=x"}).status, 0);
 
   const CommandResult replaced =
-      ctl({"replace", writePolicy("roles:\n  carried:\n")});
+      ctl({"replace", writePolicy("roles:\n  carried:\n    any: true\n")});
   ASSERT_EQ(replaced.status, 1);
   ASSERT(replaced.errHas("carries variable 'kept'"));
 
@@ -401,40 +413,40 @@ TEST(Ctl, CheckReportsWhatAPolicyHolds) {
   ASSERT(res.outHas("2 role(s), 0 cert(s), base role floor"));
 }
 
-TEST(Ctl, CheckRejectsNoBpfAlongsideABpfList) {
+TEST(Ctl, CheckRejectsBpfAnyAlongsideABpfList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    no-bpf: true\n    bpf:\n      - muddled\n");
+      "roles:\n  muddled:\n    bpf-any: true\n    bpf-roles:\n      - muddled\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict each other"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
-TEST(Ctl, CheckRejectsNoKillAlongsideAKillList) {
+TEST(Ctl, CheckRejectsKillAnyAlongsideAKillList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    no-kill: true\n    kill:\n      - muddled\n");
+      "roles:\n  muddled:\n    kill-any: true\n    kill-roles:\n      - muddled\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict each other"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
-TEST(Ctl, CheckRejectsNoPtraceAlongsideAPtraceList) {
+TEST(Ctl, CheckRejectsPtraceAnyAlongsideAPtraceList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    no-ptrace: true\n    ptrace:\n      - muddled\n");
+      "roles:\n  muddled:\n    ptrace-any: true\n    ptrace-roles:\n      - muddled\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict each other"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
-TEST(Ctl, CheckRejectsNoKeyringAlongsideAKeyringList) {
+TEST(Ctl, CheckRejectsKeyringAnyAlongsideAKeyringList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    no-keyring: true\n    keyring:\n      - muddled\n");
+      "roles:\n  muddled:\n    keyring-any: true\n    keyring-roles:\n      - muddled\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict each other"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
 TEST(Ctl, CheckRejectsUntrackedBpfWithoutABpfList) {
@@ -443,12 +455,12 @@ TEST(Ctl, CheckRejectsUntrackedBpfWithoutABpfList) {
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("only a role configured for bpf(2) takes ownership"));
+  ASSERT(res.errHas("untracked-bpf needs bpf-pod, bpf-roles, bpf-any or any"));
 }
 
 TEST(Ctl, CheckRejectsAnEnrollTargetNotInRoles) {
   const std::string policy =
-      writePolicy("roles:\n  sandbox:\n    enroll:\n      - missing\n");
+      writePolicy("roles:\n  sandbox:\n    enroll-roles:\n      - missing\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -471,45 +483,45 @@ TEST(Ctl, CheckRejectsAVarListedTwice) {
   ASSERT(res.errHas("var 'vm_uuid' is listed twice"));
 }
 
-TEST(Ctl, CheckRejectsANoBpfThatIsNotABoolean) {
+TEST(Ctl, CheckRejectsABpfAnyThatIsNotABoolean) {
   const std::string policy =
-      writePolicy("roles:\n  muddled:\n    no-bpf: maybe\n");
+      writePolicy("roles:\n  muddled:\n    bpf-any: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("neither true nor false"));
 }
 
-TEST(Ctl, CheckRejectsANoKillThatIsNotABoolean) {
+TEST(Ctl, CheckRejectsAKillAnyThatIsNotABoolean) {
   const std::string policy =
-      writePolicy("roles:\n  muddled:\n    no-kill: maybe\n");
+      writePolicy("roles:\n  muddled:\n    kill-any: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("neither true nor false"));
 }
 
-TEST(Ctl, CheckRejectsANoPtraceThatIsNotABoolean) {
+TEST(Ctl, CheckRejectsAPtraceAnyThatIsNotABoolean) {
   const std::string policy =
-      writePolicy("roles:\n  muddled:\n    no-ptrace: maybe\n");
+      writePolicy("roles:\n  muddled:\n    ptrace-any: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("neither true nor false"));
 }
 
-TEST(Ctl, CheckRejectsANoKeyringThatIsNotABoolean) {
+TEST(Ctl, CheckRejectsAKeyringAnyThatIsNotABoolean) {
   const std::string policy =
-      writePolicy("roles:\n  muddled:\n    no-keyring: maybe\n");
+      writePolicy("roles:\n  muddled:\n    keyring-any: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("neither true nor false"));
 }
 
-TEST(Ctl, CheckRejectsANoLkmThatIsNotABoolean) {
+TEST(Ctl, CheckRejectsALkmAnyThatIsNotABoolean) {
   const std::string policy =
-      writePolicy("roles:\n  muddled:\n    no-lkm: maybe\n");
+      writePolicy("roles:\n  muddled:\n    lkm-any: maybe\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -521,27 +533,26 @@ TEST(Ctl, CheckAcceptsIndependentMessageQueuePolicies) {
       "roles:\n"
       "  owner:\n"
       "  client:\n"
-      "    mq-sysv:\n"
+      "    mq-sysv-roles:\n"
       "      - owner\n"
-      "    mq-posix:\n"
-      "    no-mq-posix: false\n");
+      "    mq-posix-pod: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
 }
 
-TEST(Ctl, CheckRejectsMessageQueueListAndOutrightDenialTogether) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    mq-sysv:\n    no-mq-sysv: true\n");
+TEST(Ctl, CheckRejectsMessageQueueListAndAnyTogether) {
+  const std::string policy = writePolicy(
+      "roles:\n  muddled:\n    mq-sysv-roles:\n    mq-sysv-any: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
 TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
   const std::string policy =
-      writePolicy("roles:\n  client:\n    mq-posix:\n      - missing\n");
+      writePolicy("roles:\n  client:\n    mq-posix-roles:\n      - missing\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -562,16 +573,16 @@ TEST(Ctl, CheckAcceptsMessageQueuePosixPatterns) {
   ASSERT_EQ(res.status, 0);
 }
 
-TEST(Ctl, CheckRejectsMessageQueuePatternAndOutrightDenialTogether) {
+TEST(Ctl, CheckRejectsMessageQueuePatternAndAnyTogether) {
   const std::string policy = writePolicy(
       "roles:\n"
       "  muddled:\n"
       "    mq-posix-pattern: service-*\n"
-      "    no-mq-posix: true\n");
+      "    mq-posix-any: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict"));
+  ASSERT(res.errHas("corresponding any option"));
 }
 
 TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
@@ -579,27 +590,26 @@ TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
       "roles:\n"
       "  owner:\n"
       "  client:\n"
-      "    shm-sysv:\n"
+      "    shm-sysv-roles:\n"
       "      - owner\n"
-      "    shm-posix:\n"
-      "    no-shm-posix: false\n");
+      "    shm-posix-pod: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
 }
 
-TEST(Ctl, CheckRejectsSharedMemoryListAndOutrightDenialTogether) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    shm-sysv:\n    no-shm-sysv: true\n");
+TEST(Ctl, CheckRejectsSharedMemoryListAndAnyTogether) {
+  const std::string policy = writePolicy(
+      "roles:\n  muddled:\n    shm-sysv-roles:\n    shm-sysv-any: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict"));
+  ASSERT(res.errHas("mutually exclusive"));
 }
 
 TEST(Ctl, CheckRejectsUnknownSharedMemoryRole) {
   const std::string policy =
-      writePolicy("roles:\n  client:\n    shm-posix:\n      - missing\n");
+      writePolicy("roles:\n  client:\n    shm-posix-roles:\n      - missing\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -620,16 +630,16 @@ TEST(Ctl, CheckAcceptsSharedMemoryPosixPatterns) {
   ASSERT_EQ(res.status, 0);
 }
 
-TEST(Ctl, CheckRejectsSharedMemoryPatternAndOutrightDenialTogether) {
+TEST(Ctl, CheckRejectsSharedMemoryPatternAndAnyTogether) {
   const std::string policy = writePolicy(
       "roles:\n"
       "  muddled:\n"
       "    shm-posix-pattern: service-*\n"
-      "    no-shm-posix: true\n");
+      "    shm-posix-any: true\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("contradict"));
+  ASSERT(res.errHas("corresponding any option"));
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatIsNotAnInteger) {

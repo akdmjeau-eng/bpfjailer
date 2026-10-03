@@ -6,25 +6,23 @@
 // enforcer asks it of `kill` and the ptrace enforcer of `ptrace`, so the rule
 // lives here and each enforcer supplies its own two maps:
 //
-//   roles    one entry per role that wrote its list, an empty list included,
-//            or set its outright-deny flag.
+//   roles    one entry per role, carrying its deny, pod, role-list or any mode.
 //   access   one entry per (actor, target) role pair the lists permit.
 //
-// Which gives a role three states:
+// Which gives a role four states:
 //
-//   list absent    unrestricted
-//   list empty     may act only inside its own pod
-//   list [a, b]    that, and on a process whose roles are all in {a, b}
-//   no-* true      may not act at all
+//   option absent  may not act at all
+//   *-pod          may act only inside its own pod
+//   *-roles [a,b]  that, and on a process whose roles are all in {a, b}
+//   *-any           unrestricted
 //
 // Acting inside the restricting role's *own* pod is always allowed, a pod
 // being one jail instance -- not any pod the two share, since a base role puts
 // the whole host in one and the list would then never deny anything.
 //
-// Where the actor holds several roles, every configured one has to permit,
-// walking newest first and stopping after the first override role; an
-// unconfigured role abstains rather than granting or denying. The target is
-// read the other way round, every role it holds having to be listed, or
+// Where the actor holds several roles, every one has to permit, walking newest
+// first and stopping after the first override role. The target is read the
+// other way round, every role it holds having to be listed, or
 // picking up a listed role alongside the one protecting it is an escalation --
 // which is also why a restricted actor cannot reach a target in no pod at all.
 
@@ -49,7 +47,10 @@ static __always_inline __u8 bpfj_gate_mode(
   if (gate == BPFJ_POLICY_GATE_KEYRING) {
     return policy->keyring_mode;
   }
-  return policy->gates[gate] ? BPFJ_POLICY_ALLOW : BPFJ_POLICY_UNCONFIGURED;
+  if (gate == BPFJ_POLICY_GATE_ENROLL) {
+    return policy->enroll_mode;
+  }
+  return BPFJ_POLICY_DENY;
 }
 
 /// Whether `pid_data` names `pod`.
@@ -136,13 +137,15 @@ static __always_inline bool bpfj_gate_allowed_owner(
       return false;
     }
     const struct bpfj_role_set __arena* set = policy->gates[gate];
-    if (mode == BPFJ_POLICY_ALLOW && policy != owner &&
+    if (mode == BPFJ_POLICY_POD && policy != owner) {
+      return false;
+    }
+    if (mode == BPFJ_POLICY_ROLES && policy != owner &&
         !bpfj_role_set_contains(set, owner)) {
       return false;
     }
 
-    // Checked for every pod, configured or not: an override role that wrote no
-    // list still answers for the task, and the answer is "unrestricted".
+    // Checked for every pod: an override role's answer ends the walk.
     if (bpfj_is_override(pod)) {
       break;
     }
@@ -151,7 +154,7 @@ static __always_inline bool bpfj_gate_allowed_owner(
   return true;
 }
 
-/// Whether any role the actor holds wrote a list.
+/// Whether any role the actor holds is narrower than unrestricted.
 static __always_inline bool bpfj_gate_restricted(
     enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor) {
@@ -172,7 +175,7 @@ static __always_inline bool bpfj_gate_restricted(
     if (!policy) {
       return true;
     }
-    if (bpfj_gate_mode(policy, gate) != BPFJ_POLICY_UNCONFIGURED) {
+    if (bpfj_gate_mode(policy, gate) != BPFJ_POLICY_ANY) {
       return true;
     }
 
@@ -223,12 +226,15 @@ static __always_inline bool bpfj_gate_allowed(
     if (mode == BPFJ_POLICY_DENY) {
       return false;
     }
-    if (mode == BPFJ_POLICY_ALLOW && !bpfj_gate_in_pod(target, pod) &&
+    if (mode == BPFJ_POLICY_POD && !bpfj_gate_in_pod(target, pod)) {
+      return false;
+    }
+    if (mode == BPFJ_POLICY_ROLES && !bpfj_gate_in_pod(target, pod) &&
         !bpfj_gate_covers(gate, policy, target)) {
       return false;
     }
 
-    // As above: an override role that wrote no list still answers.
+    // As above: an override role's answer ends the walk.
     if (bpfj_is_override(pod)) {
       break;
     }

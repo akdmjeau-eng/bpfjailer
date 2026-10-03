@@ -1,7 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-// `no-lkm` denies module autoload, module insertion and kexec loading through
-// the kernel's three kernel-data LSM hooks.
+// Module autoload, module insertion and kexec loading are denied unless every
+// role explicitly allows them.
 
 #include <bpf/vmlinux/vmlinux.h>
 
@@ -36,7 +36,7 @@ static __always_inline bool bpfj_lkm_allowed(void) {
     }
 
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (!policy || (policy->flags & BPFJ_POLICY_NO_LKM)) {
+    if (!policy || !(policy->flags & BPFJ_POLICY_LKM_ANY)) {
       return false;
     }
 

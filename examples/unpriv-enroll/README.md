@@ -36,25 +36,24 @@ instead, the same way `bpfjctl wrap` takes a command:
 roles:
   sandbox:
     unpriv-enroll: true
-    no-bpf: true
-    kill:
-    ptrace:
-    enroll:
+    fs-any: true
+    verity-any: true
+    kill-pod: true
+    ptrace-pod: true
 ```
 
 `unpriv-enroll: true` is the only reason a non-root caller may take this role.
 Leave it out and `bpfjsrv` refuses with `role sandbox is not open to
 unprivileged callers`, which is what every other role gets by default.
 
-`no-bpf: true` is the load-bearing one: without it a jailed process holding
-`CAP_BPF` could delete its own entry from the jailer's maps and walk out. An
-empty `bpf:` is not a substitute -- that confines the role to the objects its
-own role owns, and nothing owns the jailer's maps in this policy, so they
-would stay ungated.
+BPF is omitted because absence is the load-bearing denial: a jailed process
+holding `CAP_BPF` cannot delete its own entry from the jailer's maps and walk
+out. `bpf-pod: true` would instead permit BPF objects from its own pod.
 
-The three empty keys are restrictions rather than absences: `kill` and
-`ptrace` each confine the role to its own pod, and `enroll` stops a process
-in the jail asking `bpfjsrv` for any further role, `sandbox` included.
+The two pod options confine signalling and ptrace to the pod. `fs-any` and
+`verity-any` keep ordinary file access and unsigned executables open so the
+shell can run; all other unspecified operations remain denied. Enrollment is
+omitted, so a process in the jail cannot ask `bpfjsrv` for any further role.
 
 To watch the jail refuse something, start a process outside it and try to
 signal it from inside:
@@ -66,7 +65,7 @@ sleep 300 &        # another terminal, same user
 ```
 
 The same `kill` from outside the jail succeeds. Same user, same command, so
-it is the `kill:` policy refusing and not file permissions — which is the
+it is the `kill-pod:` policy refusing and not file permissions — which is the
 point, since an example that only shows root-only operations being denied to
 a non-root process would demonstrate nothing.
 

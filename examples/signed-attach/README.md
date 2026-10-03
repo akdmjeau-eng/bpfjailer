@@ -38,26 +38,28 @@ certs:
     <the minted certificate>
 roles:
   floor:
-    bpf:
+    any: true
+    bpf-pod: true
     untracked-bpf: true
-    keyring:
+    keyring-own: true
   bpfjailer:
+    any: true
     override-stacked: true
     enforce-binary-certs:
       - signer
     min-seq: 2
-    bpf:
-    keyring:
+    bpf-any: true
+    keyring-own: true
 ```
 
 `floor` is the base role, so every process on the host is in it. It names no
 certificate, so ordinary execs are not signature-checked.
 
-`floor` writes an empty `bpf:`, which restricts every process on the host to
+`floor` writes `bpf-pod: true`, which restricts every process on the host to
 the objects `floor` itself owns, and `untracked-bpf: true` is what makes that
 none. Configuring a role for bpf is also what makes it take ownership of what
-it creates, and `floor` is held by every process — so on its own the empty
-`bpf:` would hand `floor` every BPF object on the machine, including the
+it creates, and `floor` is held by every process — so without `untracked-bpf`
+it would hand `floor` every BPF object on the machine, including the
 jailer's own maps, and restrict the host to the host. `untracked-bpf` keeps
 the restriction and drops the ownership.
 
@@ -70,10 +72,10 @@ every process holds would be voting on what the jailer may do to itself.
 
 `bpfjailer` is the privileged role a helper process enters through
 `bpfjctl enroll` during `attach.sh`. `enforce-binary-certs` is what makes later
-execs in that role require a signature; `bpf:` written empty confines it to the
-objects its own role owns, which are the jailer's; `keyring:` written empty
-lets it rewrite its own role's keyring, which is what a replace does when it
-reloads the fs-verity enforcer, and no other role's. `min-seq: 2` is the
+execs in that role require a signature. `bpf-any` lets the first replacement
+open the unowned bootstrap maps; `keyring-own` lets it rewrite only its own
+role's keyring, which is what a replace does when it reloads the fs-verity
+enforcer. `min-seq: 2` is the
 anti-rollback floor: a binary signed by the same key but carrying sequence 1 is
 refused before `main()` runs.
 
@@ -112,7 +114,7 @@ fs-verity enabled, and is still refused in `bpfjailer` because its sequence is
 ## Why the teardown needs a signed binary too
 
 Once `upgrade.sh` has run, the jailer's own maps are owned by `bpfjailer`, and
-`bpf:` written empty on `floor` means no other role can open them. `detach` is
+`bpf-pod` on `floor` means no other role can open them. `detach` is
 not exempt from that: `Jailer::unload()` reads the fs-verity keyring map before
 it removes anything, so a plain `bpfjctl detach` — which claims no role, and is
 therefore in `floor` like everything else — is refused on that first map and
@@ -155,23 +157,24 @@ Extended attributes are not part of those contents, so both the signature and
 sequence xattrs can be set either side of it without invalidating the digest
 they were taken over.
 
-## The gap this example does not close
+## The bootstrap tradeoff
 
-The bootstrap `attach` leaves the jailer's own maps **unowned**, and an unowned
-object is not gated. Ownership is taken from the role of the process that
-created the object, and the binary that ran the bootstrap was execed before the
-jailer existed — so nothing could have enrolled it in `bpfjailer` yet. The base
-role it is seeded into a moment later does not own either, which is what
-`untracked-bpf` on `floor` says.
+The bootstrap `attach` leaves the jailer's own maps **unowned**. Ownership is
+taken from the pod of the process that created the object, and the binary that
+ran the bootstrap was execed before the jailer existed. The base role it is
+seeded into a moment later does not own them either, which is what
+`untracked-bpf` on `floor` says. `floor` cannot open those unowned maps, but the
+signed `bpfjailer` role needs `bpf-any` to perform the first replacement.
 
 The first signed upgrade is what takes ownership: `bpfjcmd` execs under a live
 jailer from that pre-enrolled helper, enters `bpfjailer`, and the objects it
 creates are recorded against that role. `verify.sh` is therefore only
 meaningful after `upgrade.sh` has run.
 
-Closing the window entirely would need the jailer to be brought up by something
-already inside a role, which is not possible for the process that installs it.
-This example also leaves one broader product gap in place: file-xattr
+That bootstrap permission also lets the signed updater reach BPF objects
+outside the jailer. A production flow can replace into a narrower policy after
+the ownership handoff; this compact example keeps one policy for both stages.
+It also leaves one broader product gap in place: file-xattr
 self-enrollment is still weaker than explicit enrollment for anti-rollback, so
 the example avoids self-claiming binaries entirely and uses a pre-enrolled
 helper as the role entry point instead.

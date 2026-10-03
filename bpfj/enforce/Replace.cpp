@@ -68,6 +68,14 @@ constexpr std::string_view kShmPosixOwnerVersion =
 constexpr std::string_view kShmPosixMounts = "bpfj_shm_posix_mounts";
 constexpr std::string_view kShmPosixDevices = "bpfj_shm_posix_devices";
 
+struct BpfOwnerV2 {
+  struct bpfj_role_id role;
+  std::uint32_t id;
+  const struct bpfj_role_policy* policy;
+};
+
+static_assert(sizeof(BpfOwnerV2) == 32);
+
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
 
@@ -367,8 +375,11 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 }
 
 /// @brief Carry one owner map's records into the new tree's copy.
-[[nodiscard]] Expected<std::size_t>
-copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
+[[nodiscard]] Expected<std::size_t> copyOwnerMap(
+    int from,
+    int to,
+    const Fd& rolePolicies,
+    std::uint32_t sourceVersion) noexcept {
   // Same guard as copyPods(), and the free hook deletes from this map, so a
   // restarted walk is not hypothetical here.
   std::set<std::uint64_t> seen;
@@ -383,7 +394,21 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
     }
 
     struct bpfj_bpf_owner owner{};
-    if (::bpf_map_lookup_elem(from, &next, &owner) == 0) {
+    bool found = false;
+    if (sourceVersion == 2) {
+      BpfOwnerV2 legacy{};
+      found = ::bpf_map_lookup_elem(from, &next, &legacy) == 0;
+      if (found) {
+        owner.role = legacy.role;
+        owner.id = legacy.id;
+        // v2 had no pod identity. Leave the UUID zero as an explicit legacy
+        // marker; the BPF gate preserves v2's same-role access for only these
+        // records rather than pretending they belong to an arbitrary pod.
+      }
+    } else {
+      found = ::bpf_map_lookup_elem(from, &next, &owner) == 0;
+    }
+    if (found) {
       auto policy = lookupRolePolicy(rolePolicies, owner.role);
       if (!policy) {
         return makeUnexpected(policy.error());
@@ -414,7 +439,8 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
 /// the objects that unload frees.
 [[nodiscard]] Expected<std::size_t> copyBpfOwners(
     const PinConfig& oldCfg,
-    const PinConfig& newCfg) noexcept {
+    const PinConfig& newCfg,
+    std::uint32_t sourceVersion) noexcept {
   if (!tracksOwnership(oldCfg)) {
     return std::size_t{0};
   }
@@ -435,7 +461,8 @@ copyOwnerMap(int from, int to, const Fd& rolePolicies) noexcept {
       return makeUnexpected(to.error());
     }
 
-    auto one = copyOwnerMap(from->get(), to->get(), *rolePolicies);
+    auto one =
+        copyOwnerMap(from->get(), to->get(), *rolePolicies, sourceVersion);
     if (!one) {
       return makeUnexpected(one.error());
     }
@@ -895,6 +922,7 @@ struct BackfillStats {
     const Policy& policy) noexcept {
   std::error_code ec;
   const bool hasOld = fs::exists(fs::path(cfg.root()), ec);
+  std::uint32_t bpfOwnerVersion = BPFJ_BPF_OWNER_VERSION;
 
   // Before anything is built, so the only cost of refusing is the parse.
   if (hasOld && hasVersionedOwnerState(cfg)) {
@@ -905,16 +933,26 @@ struct BackfillStats {
     if (auto res = checkMembershipVersion(cfg, *versions); !res) {
       return makeUnexpected(res.error());
     }
-    if (auto res = checkOwnerVersion(
-            cfg,
-            *versions,
-            kMapOwners,
-            kOwnerVersion,
-            BPFJ_BPF_OWNER_VERSION_SHIFT,
-            BPFJ_BPF_OWNER_VERSION,
-            "BPF ownership");
-        !res) {
-      return makeUnexpected(res.error());
+    if (hasPinnedMap(cfg, kMapOwners)) {
+      bpfOwnerVersion = (*versions >> BPFJ_BPF_OWNER_VERSION_SHIFT) &
+          BPFJ_RUNTIME_VERSION_MASK;
+      if (bpfOwnerVersion == 0) {
+        auto legacy =
+            readLegacyOwnerVersion(cfg, kOwnerVersion, "BPF ownership");
+        if (!legacy) {
+          return makeUnexpected(legacy.error());
+        }
+        bpfOwnerVersion = *legacy;
+      }
+      if (bpfOwnerVersion != 2 && bpfOwnerVersion != BPFJ_BPF_OWNER_VERSION) {
+        return makeUnexpected(makeError(
+            std::errc::not_supported,
+            "the running jailer records BPF ownership in layout v",
+            std::to_string(bpfOwnerVersion),
+            ", and this build reads v2 or v",
+            std::to_string(BPFJ_BPF_OWNER_VERSION),
+            "; detach and attach to upgrade"));
+      }
     }
     if (auto res = checkOwnerVersion(
             cfg,
@@ -1027,7 +1065,7 @@ struct BackfillStats {
 
     // Before the unload below, so the new tree's free hook prunes the records
     // for the objects that unload is about to free.
-    auto owners = copyBpfOwners(cfg, newCfg);
+    auto owners = copyBpfOwners(cfg, newCfg, bpfOwnerVersion);
     if (!owners) {
       return makeUnexpected(owners.error());
     }

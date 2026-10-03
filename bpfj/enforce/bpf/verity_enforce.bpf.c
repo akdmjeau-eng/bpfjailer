@@ -1,8 +1,8 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 // fs-verity signature enforcement: a jailed task may only bring in code whose
-// fs-verity digest carries a PKCS#7 signature from a key its role trusts, and
-// a role whose arena policy has no key is not checked at all. A file is checked
+// fs-verity digest carries a PKCS#7 signature from a key its role trusts. A
+// role must explicitly allow unsigned code. A file is checked
 // against every pod the task belongs to, and a failed check is a silent denial
 // until the event pipeline is ported.
 //
@@ -63,8 +63,15 @@ static int bpfj_verity_check(struct file* file, bool is_exec) {
     if (!policy) {
       return -EPERM;
     }
+    if (policy->flags & BPFJ_POLICY_VERITY_ANY) {
+      if (bpfj_is_override(pod)) {
+        break;
+      }
+      continue;
+    }
     enum bpfj_fsverity_reason reason = BPFJ_FSVERITY_REASON_NONE;
-    if (bpfj_check_fsverity_pkcs7_policy(
+    if (policy->key_serial == 0 ||
+        bpfj_check_fsverity_pkcs7_policy(
             file,
             policy->key_serial,
             policy->flags & BPFJ_POLICY_HAS_MIN_SEQ,

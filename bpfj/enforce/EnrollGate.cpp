@@ -65,9 +65,14 @@ Expected<bool> enrollPermitted(
     if (!policy) {
       return false;
     }
-    const auto* set = policy->gates[BPFJ_POLICY_GATE_ENROLL];
-    if (set && !contains(set, *targetPolicy)) {
+    if (policy->enroll_mode == BPFJ_POLICY_DENY) {
       return false;
+    }
+    if (policy->enroll_mode == BPFJ_POLICY_ROLES) {
+      const auto* set = policy->gates[BPFJ_POLICY_GATE_ENROLL];
+      if (!contains(set, *targetPolicy)) {
+        return false;
+      }
     }
 
     if (policy->flags & BPFJ_POLICY_OVERRIDE_STACKED) {

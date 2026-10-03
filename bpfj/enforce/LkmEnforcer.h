@@ -11,7 +11,7 @@ namespace bpfjailer {
 /// @brief Loads, attaches and pins the kernel module and kexec enforcer.
 class LkmEnforcer {
  public:
-  /// @brief Deny kernel loading operations for roles with `no-lkm: true`.
+  /// @brief Deny kernel loading operations unless every role allows them.
   [[nodiscard]] static Expected<> load(
       const PinConfig& cfg,
       const Policy& policy) noexcept;

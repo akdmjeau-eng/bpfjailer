@@ -213,14 +213,14 @@ TEST(ShmEnforcer, LoadPinsHooksPoliciesClassifiersAndVersionedOwners) {
 }
 
 TEST(ShmEnforcer, NoShmSysvDeniesCreation) {
-  attach("roles:\n  jailed:\n    no-shm-sysv: true\n");
+  attach("roles:\n  jailed:\n");
   Child actor([key = uniqueKey()] { return createSysv(key); });
   enroll("jailed", actor.pid());
   ASSERT_EQ(actor.run(), EPERM);
 }
 
 TEST(ShmEnforcer, EmptySysvPolicyAllowsAttachInsideItsPod) {
-  attach("roles:\n  jailed:\n    shm-sysv:\n");
+  attach("roles:\n  jailed:\n    shm-sysv-roles:\n");
   enroll("jailed", ::getpid());
   const int id = ::shmget(IPC_PRIVATE, kSegmentSize, 0600);
   ASSERT(id >= 0);
@@ -230,7 +230,7 @@ TEST(ShmEnforcer, EmptySysvPolicyAllowsAttachInsideItsPod) {
 
 TEST(ShmEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsSegment) {
   const key_t key = uniqueKey();
-  attach("roles:\n  owner:\n  client:\n    shm-sysv:\n");
+  attach("roles:\n  owner:\n    any: true\n  client:\n    shm-sysv-roles:\n");
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -248,7 +248,8 @@ TEST(ShmEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsSegment) {
 
 TEST(ShmEnforcer, SysvPolicyCanNameAnOwnerRole) {
   const key_t key = uniqueKey();
-  attach("roles:\n  owner:\n  client:\n    shm-sysv:\n      - owner\n");
+  attach(
+      "roles:\n  owner:\n    any: true\n  client:\n    shm-sysv-roles:\n      - owner\n");
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -265,7 +266,7 @@ TEST(ShmEnforcer, RestrictedSysvPolicyRejectsAnUnknownOwner) {
   const key_t key = uniqueKey();
   const int id = ::shmget(key, kSegmentSize, IPC_CREAT | IPC_EXCL | 0600);
   ASSERT(id >= 0);
-  attach("roles:\n  jailed:\n    shm-sysv:\n");
+  attach("roles:\n  jailed:\n    shm-sysv-roles:\n");
   Child cleanup([id] {
     errno = 0;
     return ::shmctl(id, IPC_RMID, nullptr) == 0 ? 0 : errno;
@@ -278,7 +279,7 @@ TEST(ShmEnforcer, RestrictedSysvPolicyRejectsAnUnknownOwner) {
 
 TEST(ShmEnforcer, NoShmPosixDeniesCreation) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    no-shm-posix: true\n");
+  attach("roles:\n  jailed:\n");
   Child actor([name] { return createPosix(name); });
   enroll("jailed", actor.pid());
   // tmpfs translates an inode-allocation security refusal to ENOSPC.
@@ -288,7 +289,7 @@ TEST(ShmEnforcer, NoShmPosixDeniesCreation) {
 
 TEST(ShmEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    shm-posix:\n");
+  attach("roles:\n  jailed:\n    shm-posix-roles:\n");
   enroll("jailed", ::getpid());
   ASSERT_EQ(createPosix(name), 0);
   ASSERT_EQ(acquirePosix(name), 0);
@@ -297,7 +298,7 @@ TEST(ShmEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
 
 TEST(ShmEnforcer, EmptyPosixPolicyCannotOpenOrUnlinkAnotherPodsObject) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  owner:\n  client:\n    shm-posix:\n");
+  attach("roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -317,7 +318,8 @@ TEST(ShmEnforcer, EmptyPosixPolicyCannotOpenOrUnlinkAnotherPodsObject) {
 
 TEST(ShmEnforcer, PosixPolicyCanNameAnOwnerRole) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  owner:\n  client:\n    shm-posix:\n      - owner\n");
+  attach(
+      "roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n      - owner\n");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -334,9 +336,9 @@ TEST(ShmEnforcer, PosixPatternOverridesTheOwnerRoleList) {
       "vars:\n"
       "  - SERIAL\n"
       "roles:\n"
-      "  owner:\n"
+      "  owner:\n    any: true\n"
       "  client:\n"
-      "    shm-posix:\n"
+      "    shm-posix-roles:\n"
       "    shm-posix-pattern: bpfj-shm-?est-*-${SERIAL}\n");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
@@ -354,7 +356,7 @@ TEST(ShmEnforcer, PosixPatternOverridesTheOwnerRoleList) {
 TEST(ShmEnforcer, RestrictedPosixPolicyRejectsAnUnknownOwner) {
   const std::string name = uniquePosixName();
   ASSERT_EQ(createPosix(name), 0);
-  attach("roles:\n  jailed:\n    shm-posix:\n");
+  attach("roles:\n  jailed:\n    shm-posix-roles:\n");
   Child cleanup([name] {
     errno = 0;
     return ::shm_unlink(name.c_str()) == 0 ? 0 : errno;
@@ -365,9 +367,11 @@ TEST(ShmEnforcer, RestrictedPosixPolicyRejectsAnUnknownOwner) {
   ASSERT_EQ(cleanup.run(), 0);
 }
 
-TEST(ShmEnforcer, UnconfiguredFloorCanOpenAJailedPodsObject) {
+TEST(ShmEnforcer, AnyFloorCanOpenAJailedPodsObject) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  floor:\n  jailed:\n    shm-posix:\n");
+  attach(
+      "roles:\n  floor:\n    shm-posix-any: true\n"
+      "  jailed:\n    shm-posix-roles:\n");
   Child creator([name] { return createPosix(name); });
   enroll("jailed", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -378,7 +382,7 @@ TEST(ShmEnforcer, UnconfiguredFloorCanOpenAJailedPodsObject) {
 
 TEST(ShmEnforcer, InheritedPosixDescriptorIsCheckedAtMmap) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    shm-posix:\n");
+  attach("roles:\n  jailed:\n    shm-posix-roles:\n");
   const int fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
   ASSERT(fd >= 0);
   ASSERT_EQ(::ftruncate(fd, kSegmentSize), 0);
@@ -405,7 +409,7 @@ TEST(ShmEnforcer, InheritedPosixDescriptorIsCheckedAtFtruncate) {
 
 TEST(ShmEnforcer, ExistingPosixMappingRemainsACapability) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    no-shm-posix: true\n");
+  attach("roles:\n  jailed:\n");
   const int fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
   ASSERT(fd >= 0);
   ASSERT_EQ(::ftruncate(fd, kSegmentSize), 0);
@@ -431,7 +435,7 @@ TEST(ShmEnforcer, MprotectChecksOnlyProtectionUpgrades) {
   ASSERT(address != MAP_FAILED);
   ASSERT_EQ(::shm_unlink(name.c_str()), 0);
 
-  attach("roles:\n  jailed:\n    shm-posix:\n");
+  attach("roles:\n  jailed:\n    shm-posix-roles:\n");
   enroll("jailed", ::getpid());
   ASSERT_EQ(::mprotect(address, kSegmentSize, PROT_NONE), 0);
   errno = 0;
@@ -443,25 +447,28 @@ TEST(ShmEnforcer, MprotectChecksOnlyProtectionUpgrades) {
 }
 
 TEST(ShmEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {
-  expectReceivedFd("roles:\n  owner:\n  client:\n    shm-posix:\n", ENOMSG);
+  expectReceivedFd(
+      "roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n",
+      ENOMSG);
 }
 
 TEST(ShmEnforcer, PosixDescriptorReceiptAllowsANamedOwnerRole) {
   expectReceivedFd(
-      "roles:\n  owner:\n  client:\n    shm-posix:\n      - owner\n", 0);
+      "roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n      - owner\n",
+      0);
 }
 
 TEST(ShmEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
   expectReceivedFd(
       "roles:\n"
-      "  owner:\n"
+      "  owner:\n    any: true\n"
       "  client:\n"
       "    shm-posix-pattern: bpfj-shm-test-*\n",
       0);
 }
 
 TEST(ShmEnforcer, NoShmPosixDoesNotCoverMemfd) {
-  attach("roles:\n  jailed:\n    no-shm-posix: true\n");
+  attach("roles:\n  jailed:\n");
   enroll("jailed", ::getpid());
   const int fd = static_cast<int>(
       ::syscall(SYS_memfd_create, "bpfj-shm-memfd", MFD_CLOEXEC));
@@ -474,7 +481,7 @@ TEST(ShmEnforcer, NoShmPosixDoesNotCoverMemfd) {
 TEST(ShmEnforcer, OwnershipSurvivesAReplace) {
   const std::string name = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n  client:\n    shm-posix:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n      - owner\n";
   attach(yaml);
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());

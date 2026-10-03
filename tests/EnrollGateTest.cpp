@@ -42,16 +42,16 @@ TEST(EnrollGate, AnUnjailedCallerIsUnrestricted) {
   ASSERT(permitted("sandbox"));
 }
 
-TEST(EnrollGate, ARoleWithNoEnrollKeyIsUnrestricted) {
+TEST(EnrollGate, ARoleWithNoEnrollKeyIsDenied) {
   loadJailer(policyOf("roles:\n  svc:\n  sandbox:\n"));
   enroll("svc", ::getpid());
 
-  ASSERT(permitted("sandbox"));
-  ASSERT(permitted("svc"));
+  ASSERT(!permitted("sandbox"));
+  ASSERT(!permitted("svc"));
 }
 
 TEST(EnrollGate, AnEmptyListForbidsEvenTheSameRoleAgain) {
-  loadJailer(policyOf("roles:\n  sandbox:\n    enroll:\n  other:\n"));
+  loadJailer(policyOf("roles:\n  sandbox:\n    enroll-roles:\n  other:\n"));
   enroll("sandbox", ::getpid());
 
   ASSERT(!permitted("sandbox"));
@@ -60,7 +60,7 @@ TEST(EnrollGate, AnEmptyListForbidsEvenTheSameRoleAgain) {
 
 TEST(EnrollGate, AListPermitsOnlyTheRolesItNames) {
   loadJailer(policyOf(
-      "roles:\n  svc:\n    enroll:\n      - worker\n  worker:\n  other:\n"));
+      "roles:\n  svc:\n    enroll-roles:\n      - worker\n  worker:\n  other:\n"));
   enroll("svc", ::getpid());
 
   ASSERT(permitted("worker"));
@@ -70,8 +70,8 @@ TEST(EnrollGate, AListPermitsOnlyTheRolesItNames) {
 TEST(EnrollGate, EveryConfiguredRoleHasToPermit) {
   loadJailer(policyOf(
       "roles:\n"
-      "  svc:\n    enroll:\n      - worker\n"
-      "  strict:\n    enroll:\n"
+      "  svc:\n    enroll-roles:\n      - worker\n"
+      "  strict:\n    enroll-roles:\n"
       "  worker:\n"));
   enroll("strict", ::getpid());
   enroll("svc", ::getpid());
@@ -79,10 +79,11 @@ TEST(EnrollGate, EveryConfiguredRoleHasToPermit) {
   ASSERT(!permitted("worker"));
 }
 
-TEST(EnrollGate, AnUnconfiguredRoleAbstains) {
+TEST(EnrollGate, AnAnyRolePermitsTheNarrowerRoleToAnswer) {
   loadJailer(policyOf(
       "base-role: floor\n"
-      "roles:\n  floor:\n  svc:\n    enroll:\n      - worker\n  worker:\n"));
+      "roles:\n  floor:\n    enroll-any: true\n"
+      "  svc:\n    enroll-roles:\n      - worker\n  worker:\n"));
   enroll("svc", ::getpid());
 
   ASSERT(permitted("worker"));
@@ -91,8 +92,8 @@ TEST(EnrollGate, AnUnconfiguredRoleAbstains) {
 TEST(EnrollGate, AnOverrideRoleAnswersForTheRolesUnderIt) {
   loadJailer(policyOf(
       "roles:\n"
-      "  strict:\n    enroll:\n"
-      "  svc:\n    override-stacked: true\n    enroll:\n      - worker\n"
+      "  strict:\n    enroll-roles:\n"
+      "  svc:\n    override-stacked: true\n    enroll-roles:\n      - worker\n"
       "  worker:\n"));
   enroll("strict", ::getpid());
   enroll("svc", ::getpid());
@@ -101,8 +102,8 @@ TEST(EnrollGate, AnOverrideRoleAnswersForTheRolesUnderIt) {
 }
 
 TEST(EnrollGate, ABaseRoleCanForbidStackingHostWide) {
-  loadJailer(
-      policyOf("base-role: floor\nroles:\n  floor:\n    enroll:\n  svc:\n"));
+  loadJailer(policyOf(
+      "base-role: floor\nroles:\n  floor:\n    enroll-roles:\n  svc:\n"));
 
   ASSERT(!permitted("svc"));
 }

@@ -33,7 +33,7 @@
 // bump it whenever bpfj_bpf_owner changes shape. Pin adoption does not cover
 // this: it catches a change of size but not a reordering, and the replace
 // copies between two maps rather than adopting one.
-#define BPFJ_BPF_OWNER_VERSION 2
+#define BPFJ_BPF_OWNER_VERSION 3
 
 // Layout of both message-queue ownership maps. The maps have distinct keys,
 // but intentionally share this value and version so replacement can validate
@@ -106,23 +106,25 @@ enum bpfj_policy_gate {
 };
 
 enum bpfj_policy_mode {
-  BPFJ_POLICY_UNCONFIGURED = 0,
-  BPFJ_POLICY_ALLOW = 1,
-  BPFJ_POLICY_DENY = 2,
-  BPFJ_POLICY_ALLOW_UNTRACKED = 3,
+  BPFJ_POLICY_DENY = 0,
+  BPFJ_POLICY_POD = 1,
+  BPFJ_POLICY_ROLES = 2,
+  BPFJ_POLICY_ANY = 3,
 };
 
 #define BPFJ_POLICY_OVERRIDE_STACKED (1U << 0)
 #define BPFJ_POLICY_UNPRIV_ENROLL (1U << 1)
-#define BPFJ_POLICY_NO_LKM (1U << 2)
+#define BPFJ_POLICY_BPF_UNTRACKED (1U << 2)
 #define BPFJ_POLICY_HAS_MIN_SEQ (1U << 3)
+#define BPFJ_POLICY_LKM_ANY (1U << 4)
+#define BPFJ_POLICY_FS_ANY (1U << 5)
+#define BPFJ_POLICY_VERITY_ANY (1U << 6)
 
 struct bpfj_role_policy;
 
-// A configured role list. Empty and absent are different: an empty set
-// restricts access to the actor's own pod, while a null set is unrestricted.
-// Entries point directly at shared policies, avoiding role-name resolution in
-// enforcement paths.
+// A role list used only with BPFJ_POLICY_ROLES. An empty set permits the
+// actor's own pod but no additional role. Entries point directly at shared
+// policies, avoiding role-name resolution in enforcement paths.
 struct bpfj_role_set {
   __u32 count;
   const struct bpfj_role_policy __arena* policies[1];
@@ -144,6 +146,7 @@ struct bpfj_role_policy {
   __u8 kill_mode;
   __u8 ptrace_mode;
   __u8 keyring_mode;
+  __u8 enroll_mode;
   __u32 mq_posix_pattern_id;
   __u32 shm_posix_pattern_id;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
@@ -205,6 +208,7 @@ struct bpfj_event {
 struct bpfj_bpf_owner {
   struct bpfj_role_id role;
   __u32 id;
+  struct bpfj_uuid pod;
   const struct bpfj_role_policy __arena* policy;
 };
 
@@ -262,7 +266,7 @@ BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 80);
 
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.
-BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_bpf_owner) == 32);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_bpf_owner) == 48);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_mq_owner) == 40);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_posix_mq_key) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_shm_owner) == 40);
