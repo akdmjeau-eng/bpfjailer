@@ -33,8 +33,8 @@ LOOPFILE="$WORK/loop.dev"
 
 KEY="$WORK/signer_key.pem"
 CERT="$WORK/signer_cert.der"
-POLICY="$WORK/policy.yaml"
-TEMPLATE="$here/policy.yaml.in"
+POLICY="$WORK/policy.toml"
+TEMPLATE="$here/policy.toml.in"
 
 # The signed binary, an older signed one that verify.sh uses to show rollback
 # is refused, and an unsigned twin that differs only in the signature. All
@@ -59,7 +59,7 @@ RESPONSE_RC="$CONTROL/response.rc"
 RESPONSE_OUT="$CONTROL/response.out"
 
 # The role a pre-enrolled helper enters for upgrades and detach, and the floor
-# every process on the host lands on. Both are in policy.yaml.in.
+# every process on the host lands on. Both are in policy.toml.in.
 ROLE=bpfjailer
 BASE_ROLE=floor
 WRAP_USER=signed-attach@example

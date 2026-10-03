@@ -12,7 +12,7 @@
 
 namespace bpfjailer::srv {
 
-/// @brief Read `text` as a request document, handed to the YAML parser rather
+/// @brief Read `text` as a request document, handed to the TOML parser rather
 /// than read by hand as the reply is, being the one message in the protocol
 /// that arrives from somewhere else.
 [[nodiscard]] Expected<EnrollRequest> decodeRequest(

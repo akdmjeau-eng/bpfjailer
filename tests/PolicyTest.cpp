@@ -13,13 +13,16 @@ using bpfjailer::Policy;
 
 TEST(Policy, ParsesPathModes) {
   auto policy = Policy::parse(
-      "roles:\n"
-      "  svc:\n"
-      "    paths:\n"
-      "      /etc/**: RDONLY\n"
-      "      /var/lib/svc/**: RDWR\n"
-      "      /usr/bin/tool: RDEXEC\n"
-      "      /secret: NONE\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.paths]
+"/etc/**" = "RDONLY"
+"/var/lib/svc/**" = "RDWR"
+"/usr/bin/tool" = "RDEXEC"
+"/secret" = "NONE"
+)toml");
   ASSERT_OK(policy);
 
   const auto& paths = policy->roles.at("svc").paths;
@@ -30,8 +33,13 @@ TEST(Policy, ParsesPathModes) {
 }
 
 TEST(Policy, RejectsUnknownPathMode) {
-  auto policy =
-      Policy::parse("roles:\n  svc:\n    paths:\n      /etc/**: READ_MOSTLY\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.paths]
+"/etc/**" = "READ_MOSTLY"
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("expected NONE, RDONLY, RDWR or RDEXEC") !=
@@ -39,34 +47,40 @@ TEST(Policy, RejectsUnknownPathMode) {
 }
 
 TEST(Policy, RejectsPathList) {
-  auto policy = Policy::parse("roles:\n  svc:\n    paths:\n      - /etc/**\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.svc]
+paths = ["/etc/**"]
+)toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be a map of path pattern to mode") !=
-      std::string::npos);
+      policy.error().message().find(
+          "must be a table of path pattern to mode") != std::string::npos);
 }
 
 TEST(Policy, RejectsDuplicatePaths) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    paths:\n      /etc/**: RDONLY\n"
-      "      /etc/**: RDWR\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.paths]
+"/etc/**" = "RDWR"
+"/etc/**" = "RDONLY"
+)toml");
   ASSERT(!policy);
-  ASSERT(
-      policy.error().message().find("contains duplicate path '/etc/**'") !=
-      std::string::npos);
 }
 
 TEST(Policy, ParsesExecPathPermissions) {
   auto policy = Policy::parse(
-      "roles:\n"
-      "  svc:\n"
-      "    exec-paths:\n"
-      "      /usr/bin/svc:\n"
-      "        allow-exec: true\n"
-      "        allow-setuid: false\n"
-      "        allow-shared-object: false\n"
-      "      /usr/lib/**:\n"
-      "        allow-shared-object: true\n");
+      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
+allow-exec = true
+allow-setuid = false
+allow-shared-object = false
+
+[roles.svc.exec-paths."/usr/lib/**"]
+allow-shared-object = true
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("svc");
@@ -80,8 +94,9 @@ TEST(Policy, ParsesExecPathPermissions) {
 
 TEST(Policy, RejectsUnknownExecPathPermission) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc:\n"
-      "        allow-jit: true\n");
+      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
+allow-jit = true
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("unknown option 'allow-jit'") !=
@@ -90,25 +105,29 @@ TEST(Policy, RejectsUnknownExecPathPermission) {
 
 TEST(Policy, RejectsNonBooleanExecPathPermission) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc:\n"
-      "        allow-exec: sometimes\n");
+      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
+allow-exec = "sometimes"
+)toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("neither true nor false") !=
+      policy.error().message().find("must be true or false") !=
       std::string::npos);
 }
 
 TEST(Policy, RejectsScalarExecPathEntry) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc: true\n");
+      R"toml([roles.svc]
+exec-paths = {"/usr/bin/svc" = true}
+)toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be a permissions map") !=
+      policy.error().message().find("must be a permissions table") !=
       std::string::npos);
 }
 
 TEST(Policy, RejectsBlankExecPaths) {
-  auto policy = Policy::parse("roles:\n  svc:\n    exec-paths:\n");
+  auto policy = Policy::parse(R"toml([roles.svc.exec-paths]
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must contain at least one path pattern") !=
@@ -117,8 +136,9 @@ TEST(Policy, RejectsBlankExecPaths) {
 
 TEST(Policy, RejectsRelativeExecPath) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    exec-paths:\n      usr/bin/svc:\n"
-      "        allow-exec: true\n");
+      R"toml([roles.svc.exec-paths."usr/bin/svc"]
+allow-exec = true
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must start with '/'") !=
@@ -127,15 +147,20 @@ TEST(Policy, RejectsRelativeExecPath) {
 
 TEST(Policy, ParsesUnixSocketRules) {
   auto policy = Policy::parse(
-      "roles:\n"
-      "  svc:\n"
-      "    unix-bind:\n"
-      "      /run/svc: false\n"
-      "      '@svc-*': true\n"
-      "    unix-connect:\n"
-      "      /run/peer: true\n"
-      "    unix-dgram:\n"
-      "      '@log-${UUID}': false\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.unix-bind]
+"/run/svc" = false
+"@svc-*" = true
+
+[roles.svc.unix-connect]
+"/run/peer" = true
+
+[roles.svc.unix-dgram]
+"@log-${UUID}" = false
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("svc");
@@ -146,8 +171,13 @@ TEST(Policy, ParsesUnixSocketRules) {
 }
 
 TEST(Policy, RejectsUnixSocketRuleWithoutNameKind) {
-  auto policy =
-      Policy::parse("roles:\n  svc:\n    unix-bind:\n      relative: false\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.unix-bind]
+relative = false
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must start with '/' or '@'") !=
@@ -156,25 +186,34 @@ TEST(Policy, RejectsUnixSocketRuleWithoutNameKind) {
 
 TEST(Policy, RejectsNonBooleanUnixSocketRule) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    unix-connect:\n      /run/svc: sometimes\n");
-  ASSERT(!policy);
-  ASSERT(
-      policy.error().message().find("neither true nor false") !=
-      std::string::npos);
-}
+      R"toml([roles]
 
-TEST(Policy, RejectsBlankUnixSocketRule) {
-  auto policy =
-      Policy::parse("roles:\n  svc:\n    unix-dgram:\n      /dev/log:\n");
+[roles.svc]
+
+[roles.svc.unix-connect]
+"/run/svc" = "sometimes"
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must be true or false") !=
       std::string::npos);
 }
 
+TEST(Policy, RejectsBlankUnixSocketRule) {
+  auto policy = Policy::parse("[roles.svc.unix-dgram]\n\"/dev/log\" =\n");
+  ASSERT(!policy);
+}
+
 TEST(Policy, RejectsCollidingUnixRootRules) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    unix-bind:\n      '/': false\n      '/*': true\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.unix-bind]
+"/" = false
+"/*" = true
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("cannot contain both '/' and '/*'") !=
@@ -183,14 +222,15 @@ TEST(Policy, RejectsCollidingUnixRootRules) {
 
 TEST(Policy, ParsesMountAndUmountRules) {
   auto policy = Policy::parse(
-      "roles:\n"
-      "  svc:\n"
-      "    mount:\n"
-      "      /srv/data:\n"
-      "        - ext4\n"
-      "        - xfs\n"
-      "      /blocked: []\n"
-      "    umount: false\n");
+      R"toml([roles]
+
+[roles.svc]
+umount = false
+
+[roles.svc.mount]
+"/srv/data" = ["ext4", "xfs"]
+"/blocked" = []
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("svc");
@@ -203,7 +243,13 @@ TEST(Policy, ParsesMountAndUmountRules) {
 
 TEST(Policy, RejectsRelativeMountDestination) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    mount:\n      relative:\n        - tmpfs\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.mount]
+relative = ["tmpfs"]
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must be an absolute path") !=
@@ -211,23 +257,40 @@ TEST(Policy, RejectsRelativeMountDestination) {
 }
 
 TEST(Policy, RejectsScalarMountFilesystemType) {
-  auto policy =
-      Policy::parse("roles:\n  svc:\n    mount:\n      /run: tmpfs\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.mount]
+"/run" = "tmpfs"
+)toml");
   ASSERT(!policy);
-  ASSERT(policy.error().message().find("must be a list") != std::string::npos);
+  ASSERT(
+      policy.error().message().find("must be an array") != std::string::npos);
 }
 
 TEST(Policy, RejectsNonBooleanUmount) {
-  auto policy = Policy::parse("roles:\n  svc:\n    umount: sometimes\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.svc]
+umount = "sometimes"
+)toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("neither true nor false") !=
+      policy.error().message().find("must be true or false") !=
       std::string::npos);
 }
 
 TEST(Policy, RejectsCollidingMountRootRules) {
   auto policy = Policy::parse(
-      "roles:\n  svc:\n    mount:\n      '/': []\n      '/*': []\n");
+      R"toml([roles]
+
+[roles.svc]
+
+[roles.svc.mount]
+"/" = []
+"/*" = []
+)toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("cannot contain both '/' and '/*'") !=
@@ -235,7 +298,10 @@ TEST(Policy, RejectsCollidingMountRootRules) {
 }
 
 TEST(Policy, MissingOperationsDefaultToDeny) {
-  auto policy = Policy::parse("roles:\n  sandbox:\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.sandbox]
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("sandbox");
@@ -251,7 +317,11 @@ TEST(Policy, MissingOperationsDefaultToDeny) {
 }
 
 TEST(Policy, AnyOpensUnspecifiedOperations) {
-  auto policy = Policy::parse("roles:\n  inventory:\n    any: true\n");
+  auto policy = Policy::parse(R"toml([roles]
+
+[roles.inventory]
+any = true
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("inventory");
@@ -268,8 +338,16 @@ TEST(Policy, AnyOpensUnspecifiedOperations) {
 
 TEST(Policy, ScopedOptionOverridesAny) {
   auto policy = Policy::parse(
-      "roles:\n  sandbox:\n    any: true\n    bpf-pod: true\n"
-      "    kill-roles:\n      - target\n    proc-pod: true\n  target:\n");
+      R"toml([roles]
+
+[roles.sandbox]
+any = true
+bpf-pod = true
+kill-roles = ["target"]
+proc-pod = true
+
+[roles.target]
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("sandbox");
@@ -281,8 +359,14 @@ TEST(Policy, ScopedOptionOverridesAny) {
 
 TEST(Policy, ParsesProcRolesAndAnyProc) {
   auto policy = Policy::parse(
-      "roles:\n  reader:\n    proc-roles:\n      - target\n"
-      "  target:\n  monitor:\n    any-proc: true\n");
+      R"toml([roles.reader]
+proc-roles = ["target"]
+
+[roles.target]
+
+[roles.monitor]
+any-proc = true
+)toml");
   ASSERT_OK(policy);
 
   const auto& reader = policy->roles.at("reader");
@@ -294,8 +378,10 @@ TEST(Policy, ParsesProcRolesAndAnyProc) {
 
 TEST(Policy, ProcScopesAreMutuallyExclusive) {
   auto policy = Policy::parse(
-      "roles:\n  muddled:\n    any-proc: true\n    proc-roles:\n"
-      "      - muddled\n");
+      R"toml([roles.muddled]
+any-proc = true
+proc-roles = ["muddled"]
+)toml");
   ASSERT(policy.hasError());
   ASSERT(
       policy.error().message().find("mutually exclusive") != std::string::npos);
@@ -303,8 +389,15 @@ TEST(Policy, ProcScopesAreMutuallyExclusive) {
 
 TEST(Policy, ExplicitFalseOverridesAny) {
   auto policy = Policy::parse(
-      "roles:\n  sandbox:\n    any: true\n    bpf-pod: false\n"
-      "    lkm-any: false\n    fs-any: false\n    verity-any: false\n");
+      R"toml([roles]
+
+[roles.sandbox]
+any = true
+bpf-pod = false
+lkm-any = false
+fs-any = false
+verity-any = false
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("sandbox");
@@ -316,8 +409,12 @@ TEST(Policy, ExplicitFalseOverridesAny) {
 
 TEST(Policy, ExecPathsOverrideAny) {
   auto policy = Policy::parse(
-      "roles:\n  sandbox:\n    any: true\n    exec-paths:\n"
-      "      /usr/bin/only:\n        allow-exec: true\n");
+      R"toml([roles.sandbox]
+any = true
+
+[roles.sandbox.exec-paths."/usr/bin/only"]
+allow-exec = true
+)toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("sandbox");

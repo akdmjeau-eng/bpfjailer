@@ -16,7 +16,7 @@ const char* argp_program_version = "bpfjcmd 0.1";
 // digest the signature is taken over.
 //
 // A policy built in with CMD_POLICY sits there on the same terms, and closes
-// what the command alone leaves open: signing `attach /etc/bpfj/policy.yaml`
+// what the command alone leaves open: signing `attach /etc/bpfj/policy.toml`
 // fixes the path and not its contents, so anyone able to write that file
 // rewrites the policy -- trust store included -- against a signature that
 // still verifies. Only the -compiled commands read it.

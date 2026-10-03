@@ -61,7 +61,7 @@ class Fixture {
 };
 
 void attach(const std::string& paths) {
-  const Policy policy = policyOf("roles:\n  svc:\n    paths:\n" + paths);
+  const Policy policy = policyOf("[roles.svc.paths]\n" + paths);
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 }
@@ -80,7 +80,7 @@ void attach(const std::string& paths) {
 
 TEST(FsEnforcer, LoadPinsEveryHook) {
   Fixture fixture;
-  attach("      " + fixture.file() + ": RDONLY\n");
+  attach("\"" + fixture.file() + "\" = \"RDONLY\"\n");
 
   ASSERT(linkPinned("bpfj_fs_file_open"));
   ASSERT(linkPinned("bpfj_fs_inode_rename"));
@@ -102,7 +102,10 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
 
 TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {
   Fixture fixture;
-  const Policy policy = policyOf("roles:\n  svc:\n");
+  const Policy policy = policyOf(R"toml([roles]
+
+[roles.svc]
+)toml");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 
@@ -113,7 +116,11 @@ TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {
 
 TEST(FsEnforcer, FsAnyAllowsAccess) {
   Fixture fixture;
-  const Policy policy = policyOf("roles:\n  svc:\n    fs-any: true\n");
+  const Policy policy = policyOf(R"toml([roles]
+
+[roles.svc]
+fs-any = true
+)toml");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 
@@ -124,7 +131,7 @@ TEST(FsEnforcer, FsAnyAllowsAccess) {
 
 TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
   Fixture fixture;
-  attach("      " + fixture.file() + ": NONE\n");
+  attach("\"" + fixture.file() + "\" = \"NONE\"\n");
 
   auto arena = bpfjailer::PodArena::open(testPins());
   ASSERT(arena.hasValue());
@@ -143,7 +150,7 @@ TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
 
 TEST(FsEnforcer, ReadOnlyAllowsReadsAndDeniesWrites) {
   Fixture fixture;
-  attach("      " + fixture.file() + ": RDONLY\n");
+  attach("\"" + fixture.file() + "\" = \"RDONLY\"\n");
 
   Child actor([&] {
     const int readError = openErrno(fixture.file(), O_RDONLY);
@@ -155,7 +162,7 @@ TEST(FsEnforcer, ReadOnlyAllowsReadsAndDeniesWrites) {
 
 TEST(FsEnforcer, NoneDeniesReads) {
   Fixture fixture;
-  attach("      " + fixture.file() + ": NONE\n");
+  attach("\"" + fixture.file() + "\" = \"NONE\"\n");
 
   Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
   enroll("svc", actor.pid());
@@ -164,7 +171,7 @@ TEST(FsEnforcer, NoneDeniesReads) {
 
 TEST(FsEnforcer, ReadWriteAllowsWrites) {
   Fixture fixture;
-  attach("      " + fixture.file() + ": RDWR\n");
+  attach("\"" + fixture.file() + "\" = \"RDWR\"\n");
 
   Child actor([&] { return openErrno(fixture.file(), O_WRONLY); });
   enroll("svc", actor.pid());
@@ -174,8 +181,8 @@ TEST(FsEnforcer, ReadWriteAllowsWrites) {
 TEST(FsEnforcer, LongestPathWins) {
   Fixture fixture;
   attach(
-      "      " + fixture.dir() + ": NONE\n      " + fixture.file() +
-      ": RDONLY\n");
+      "\"" + fixture.dir() + "\" = \"NONE\"\n\"" + fixture.file() +
+      "\" = \"RDONLY\"\n");
 
   Child actor([&] {
     const int readError = openErrno(fixture.file(), O_RDONLY);
@@ -185,9 +192,49 @@ TEST(FsEnforcer, LongestPathWins) {
   ASSERT_EQ(actor.run(), EACCES);
 }
 
+TEST(FsEnforcer, RootPolicyAppliesToDescendants) {
+  Fixture fixture;
+  attach("\"/\" = \"NONE\"\n");
+
+  Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(FsEnforcer, SpecificPathOverridesRootPolicy) {
+  Fixture fixture;
+  attach("\"/\" = \"NONE\"\n\"" + fixture.file() + "\" = \"RDONLY\"\n");
+
+  Child actor([&] {
+    const int readError = openErrno(fixture.file(), O_RDONLY);
+    return readError != 0 ? readError : openErrno(fixture.file(), O_WRONLY);
+  });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(FsEnforcer, HardLinkAliasesDoNotShareCachedPolicy) {
+  Fixture fixture;
+  const std::string alias = fixture.dir() + "/renamed";
+  ASSERT_EQ(::link(fixture.file().c_str(), alias.c_str()), 0);
+  attach(
+      "\"" + fixture.file() + "\" = \"RDWR\"\n\"" + alias + "\" = \"NONE\"\n");
+
+  Child actor([&] {
+    int error = openErrno(fixture.file(), O_RDONLY);
+    if (error != 0) {
+      return error;
+    }
+    error = openErrno(fixture.file(), O_RDONLY);
+    return error != 0 ? error : openErrno(alias, O_RDONLY);
+  });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
 TEST(FsEnforcer, ReadOnlyDirectoryDeniesCreate) {
   Fixture fixture;
-  attach("      " + fixture.dir() + ": RDONLY\n");
+  attach("\"" + fixture.dir() + "\" = \"RDONLY\"\n");
 
   Child actor(
       [&] { return openErrno(fixture.dir() + "/new", O_CREAT | O_WRONLY); });
@@ -198,7 +245,9 @@ TEST(FsEnforcer, ReadOnlyDirectoryDeniesCreate) {
 TEST(FsEnforcer, RenameInvalidatesTheCachedPath) {
   Fixture fixture;
   const std::string renamed = fixture.dir() + "/renamed";
-  attach("      " + fixture.file() + ": RDWR\n      " + renamed + ": NONE\n");
+  attach(
+      "\"" + fixture.file() + "\" = \"RDWR\"\n\"" + renamed +
+      "\" = \"NONE\"\n");
 
   Child actor([&] {
     int error = openErrno(fixture.file(), O_RDONLY);
@@ -225,8 +274,8 @@ TEST(FsEnforcer, CacheSeparatesPodsWithDifferentVariableBindings) {
   ASSERT_EQ(::close(fd), 0);
 
   const Policy policy = policyOf(
-      "vars:\n  - USER\nroles:\n  svc:\n    paths:\n      " +
-      std::string(root) + ": RDONLY\n      " + root + "/$USER/data: NONE\n");
+      "vars = [\"USER\"]\n[roles.svc.paths]\n\"" + std::string(root) +
+      "\" = \"RDONLY\"\n\"" + root + "/$USER/data\" = \"NONE\"\n");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 

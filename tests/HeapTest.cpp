@@ -80,7 +80,10 @@ TEST(Heap, UserspaceGrowMakesLaterAllocsSucceed) {
 }
 
 TEST(ArenaMap, IndependentPinTreesUseDifferentSlots) {
-  const auto policy = bpfjailer::test::policyOf("roles:\n  svc:\n");
+  const auto policy = bpfjailer::test::policyOf(R"toml([roles]
+
+[roles.svc]
+)toml");
   const auto first = bpfjailer::test::testPins();
   ASSERT_OK(bpfjailer::Jailer::load(first, policy));
 

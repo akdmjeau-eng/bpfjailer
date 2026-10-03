@@ -18,10 +18,9 @@
 #            even another `sandbox` pod, so the jail cannot be widened or its
 #            pod slots used up from inside.
 #
-roles:
-  sandbox:
-    unpriv-enroll: true
-    fs-any: true
-    verity-any: true
-    kill-pod: true
-    ptrace-pod: true
+[roles.sandbox]
+unpriv-enroll = true
+fs-any = true
+verity-any = true
+kill-pod = true
+ptrace-pod = true

@@ -1,5 +1,5 @@
 # Template. build.sh replaces the placeholder line below with the minted
-# certificate and writes the result to $WORK/policy.yaml. The same file is loaded by the
+# certificate and writes the result to $WORK/policy.toml. The same file is loaded by the
 # bootstrap attach and compiled into bpfjcmd, so both halves agree by
 # construction.
 #
@@ -36,21 +36,21 @@
 #   keyring-own:      may rewrite its own role's keyring,
 #                     which is what a replace does when it reloads the
 #                     fs-verity enforcer, and no other role's.
-base-role: floor
-certs:
-  signer: |
-@CERT@
-roles:
-  floor:
-    any: true
-    bpf-pod: true
-    untracked-bpf: true
-    keyring-own: true
-  bpfjailer:
-    any: true
-    override-stacked: true
-    enforce-binary-certs:
-      - signer
-    min-seq: @CURRENT_SEQ@
-    bpf-any: true
-    keyring-own: true
+base-role = "floor"
+
+[certs]
+signer = "@CERT@"
+
+[roles.floor]
+any = true
+bpf-pod = true
+untracked-bpf = true
+keyring-own = true
+
+[roles.bpfjailer]
+any = true
+override-stacked = true
+enforce-binary-certs = ["signer"]
+min-seq = @CURRENT_SEQ@
+bpf-any = true
+keyring-own = true

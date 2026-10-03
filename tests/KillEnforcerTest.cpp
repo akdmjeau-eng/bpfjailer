@@ -28,27 +28,48 @@ using bpfjailer::test::testPins;
 namespace {
 
 constexpr std::string_view kPolicy =
-    "roles:\n"
-    "  open:\n    any: true\n"
-    "  default-deny:\n"
-    "  restricted:\n    kill-roles:\n      - worker\n"
-    "  denied:\n"
-    "  worker:\n"
-    "  other:\n"
-    "  strict:\n    kill-pod: true\n"
-    "  base:\n    kill-any: true\n"
-    "  override-allow:\n"
-    "    override-stacked: true\n"
-    "    kill-roles:\n      - worker\n"
-    "  shield-reader:\n    kill-roles:\n      - shield\n"
-    "  shield:\n    override-stacked: true\n"
-    "  locked-override:\n"
-    "    override-stacked: true\n"
-    "    kill-pod: true\n"
-    "  locked:\n    kill-pod: true\n";
+    R"toml([roles]
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+[roles.open]
+any = true
+
+[roles.default-deny]
+
+[roles.restricted]
+kill-roles = ["worker"]
+
+[roles.denied]
+
+[roles.worker]
+
+[roles.other]
+
+[roles.strict]
+kill-pod = true
+
+[roles.base]
+kill-any = true
+
+[roles.override-allow]
+override-stacked = true
+kill-roles = ["worker"]
+
+[roles.shield-reader]
+kill-roles = ["shield"]
+
+[roles.shield]
+override-stacked = true
+
+[roles.locked-override]
+override-stacked = true
+kill-pod = true
+
+[roles.locked]
+kill-pod = true
+)toml";
+
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(KillEnforcer::load(testPins(), policy));
 }
@@ -72,7 +93,12 @@ void attach(const std::string& yaml) {
 
 TEST(KillEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
   // This loader-specific case must use an otherwise unconfigured policy.
-  attach("roles:\n  svc:\n  worker:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+
+[roles.worker]
+)toml");
 
   ASSERT(linkPinned("bpfj_kill_check"));
 }

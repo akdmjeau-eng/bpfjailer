@@ -30,15 +30,22 @@ using bpfjailer::test::testPins;
 namespace {
 
 constexpr std::string_view kPolicy =
-    "roles:\n"
-    "  default-deny:\n"
-    "  restricted:\n    ptrace-roles:\n      - worker\n"
-    "  denied:\n"
-    "  worker:\n"
-    "  other:\n";
+    R"toml([roles]
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+[roles.default-deny]
+
+[roles.restricted]
+ptrace-roles = ["worker"]
+
+[roles.denied]
+
+[roles.worker]
+
+[roles.other]
+)toml";
+
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(PtraceEnforcer::load(testPins(), policy));
 }
@@ -71,7 +78,12 @@ void attach(const std::string& yaml) {
 } // namespace
 
 TEST(PtraceEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
-  attach("roles:\n  svc:\n  worker:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+
+[roles.worker]
+)toml");
 
   ASSERT(linkPinned("bpfj_ptrace_check"));
 }

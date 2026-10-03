@@ -29,7 +29,10 @@ namespace {
 } // namespace
 
 TEST(EnrollGate, LoadPinsItsMaps) {
-  loadJailer(policyOf("roles:\n  svc:\n"));
+  loadJailer(policyOf(R"toml([roles]
+
+[roles.svc]
+)toml"));
 
   ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_enroll_roles"));
@@ -37,13 +40,21 @@ TEST(EnrollGate, LoadPinsItsMaps) {
 }
 
 TEST(EnrollGate, AnUnjailedCallerIsUnrestricted) {
-  loadJailer(policyOf("roles:\n  sandbox:\n"));
+  loadJailer(policyOf(R"toml([roles]
+
+[roles.sandbox]
+)toml"));
 
   ASSERT(permitted("sandbox"));
 }
 
 TEST(EnrollGate, ARoleWithNoEnrollKeyIsDenied) {
-  loadJailer(policyOf("roles:\n  svc:\n  sandbox:\n"));
+  loadJailer(policyOf(R"toml([roles]
+
+[roles.svc]
+
+[roles.sandbox]
+)toml"));
   enroll("svc", ::getpid());
 
   ASSERT(!permitted("sandbox"));
@@ -51,7 +62,13 @@ TEST(EnrollGate, ARoleWithNoEnrollKeyIsDenied) {
 }
 
 TEST(EnrollGate, AnEmptyListForbidsEvenTheSameRoleAgain) {
-  loadJailer(policyOf("roles:\n  sandbox:\n    enroll-roles:\n  other:\n"));
+  loadJailer(policyOf(R"toml([roles]
+
+[roles.sandbox]
+enroll-roles = []
+
+[roles.other]
+)toml"));
   enroll("sandbox", ::getpid());
 
   ASSERT(!permitted("sandbox"));
@@ -60,7 +77,15 @@ TEST(EnrollGate, AnEmptyListForbidsEvenTheSameRoleAgain) {
 
 TEST(EnrollGate, AListPermitsOnlyTheRolesItNames) {
   loadJailer(policyOf(
-      "roles:\n  svc:\n    enroll-roles:\n      - worker\n  worker:\n  other:\n"));
+      R"toml([roles]
+
+[roles.svc]
+enroll-roles = ["worker"]
+
+[roles.worker]
+
+[roles.other]
+)toml"));
   enroll("svc", ::getpid());
 
   ASSERT(permitted("worker"));
@@ -69,10 +94,16 @@ TEST(EnrollGate, AListPermitsOnlyTheRolesItNames) {
 
 TEST(EnrollGate, EveryConfiguredRoleHasToPermit) {
   loadJailer(policyOf(
-      "roles:\n"
-      "  svc:\n    enroll-roles:\n      - worker\n"
-      "  strict:\n    enroll-roles:\n"
-      "  worker:\n"));
+      R"toml([roles]
+
+[roles.svc]
+enroll-roles = ["worker"]
+
+[roles.strict]
+enroll-roles = []
+
+[roles.worker]
+)toml"));
   enroll("strict", ::getpid());
   enroll("svc", ::getpid());
 
@@ -81,9 +112,18 @@ TEST(EnrollGate, EveryConfiguredRoleHasToPermit) {
 
 TEST(EnrollGate, AnAnyRolePermitsTheNarrowerRoleToAnswer) {
   loadJailer(policyOf(
-      "base-role: floor\n"
-      "roles:\n  floor:\n    enroll-any: true\n"
-      "  svc:\n    enroll-roles:\n      - worker\n  worker:\n"));
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+enroll-any = true
+
+[roles.svc]
+enroll-roles = ["worker"]
+
+[roles.worker]
+)toml"));
   enroll("svc", ::getpid());
 
   ASSERT(permitted("worker"));
@@ -91,10 +131,17 @@ TEST(EnrollGate, AnAnyRolePermitsTheNarrowerRoleToAnswer) {
 
 TEST(EnrollGate, AnOverrideRoleAnswersForTheRolesUnderIt) {
   loadJailer(policyOf(
-      "roles:\n"
-      "  strict:\n    enroll-roles:\n"
-      "  svc:\n    override-stacked: true\n    enroll-roles:\n      - worker\n"
-      "  worker:\n"));
+      R"toml([roles]
+
+[roles.strict]
+enroll-roles = []
+
+[roles.svc]
+override-stacked = true
+enroll-roles = ["worker"]
+
+[roles.worker]
+)toml"));
   enroll("strict", ::getpid());
   enroll("svc", ::getpid());
 
@@ -103,7 +150,15 @@ TEST(EnrollGate, AnOverrideRoleAnswersForTheRolesUnderIt) {
 
 TEST(EnrollGate, ABaseRoleCanForbidStackingHostWide) {
   loadJailer(policyOf(
-      "base-role: floor\nroles:\n  floor:\n    enroll-roles:\n  svc:\n"));
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+enroll-roles = []
+
+[roles.svc]
+)toml"));
 
   ASSERT(!permitted("svc"));
 }

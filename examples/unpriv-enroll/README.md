@@ -30,16 +30,15 @@ instead, the same way `bpfjctl wrap` takes a command:
 
 ## What it shows
 
-`policy.yaml` has one role, `sandbox`:
+`policy.toml` has one role, `sandbox`:
 
-```yaml
-roles:
-  sandbox:
-    unpriv-enroll: true
-    fs-any: true
-    verity-any: true
-    kill-pod: true
-    ptrace-pod: true
+```toml
+[roles.sandbox]
+unpriv-enroll = true
+fs-any = true
+verity-any = true
+kill-pod = true
+ptrace-pod = true
 ```
 
 `unpriv-enroll: true` is the only reason a non-root caller may take this role.

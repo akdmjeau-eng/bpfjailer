@@ -39,15 +39,15 @@ constexpr int kRanAndFailed = -1;
 }
 
 [[nodiscard]] std::string rule(
+    const std::string& role,
     const std::string& path,
     bool allowExec,
     bool allowSetuid,
     bool allowSharedObject) {
-  return "      " + path + ":\n" +
-      "        allow-exec: " + (allowExec ? "true\n" : "false\n") +
-      "        allow-setuid: " + (allowSetuid ? "true\n" : "false\n") +
-      "        allow-shared-object: " +
-      (allowSharedObject ? "true\n" : "false\n");
+  return "\n[roles." + role + ".exec-paths.\"" + path + "\"]\n" +
+      "allow-exec = " + (allowExec ? "true\n" : "false\n") +
+      "allow-setuid = " + (allowSetuid ? "true\n" : "false\n") +
+      "allow-shared-object = " + (allowSharedObject ? "true\n" : "false\n");
 }
 
 [[nodiscard]] std::string execPolicy(
@@ -55,13 +55,13 @@ constexpr int kRanAndFailed = -1;
     bool allowExec,
     bool allowSetuid = false,
     bool allowSharedObjects = true) {
-  return "roles:\n  svc:\n    exec-paths:\n" +
-      rule("/usr/lib64/*", false, false, allowSharedObjects) +
-      rule(executable, allowExec, allowSetuid, false);
+  return "[roles.svc]\n" +
+      rule("svc", "/usr/lib64/*", false, false, allowSharedObjects) +
+      rule("svc", executable, allowExec, allowSetuid, false);
 }
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(ExecEnforcer::load(testPins(), policy));
 }
@@ -130,7 +130,7 @@ void attach(const std::string& yaml) {
 } // namespace
 
 TEST(ExecEnforcer, LoadPinsEveryHook) {
-  attach("roles:\n  svc:\n");
+  attach("[roles.svc]\n");
 
   ASSERT(linkPinned("bpfj_exec_bprm_check"));
   ASSERT(linkPinned("bpfj_exec_mmap_file"));
@@ -140,7 +140,7 @@ TEST(ExecEnforcer, LoadPinsEveryHook) {
 
 TEST(ExecEnforcer, MissingPolicyDeniesExec) {
   const std::string executable = truePath();
-  attach("roles:\n  svc:\n");
+  attach("[roles.svc]\n");
 
   Child actor([&] { return runProgram(executable); });
   enroll("svc", actor.pid());
@@ -200,7 +200,7 @@ TEST(ExecEnforcer, AllowedSetuidExecutableRuns) {
 
 TEST(ExecEnforcer, FileMprotectNeedsSharedObjectPermission) {
   const std::string path = uniquePath("exec-enforcer-mprotect");
-  attach("roles:\n  svc:\n    exec-paths:\n" + rule(path, false, false, false));
+  attach("[roles.svc]\n" + rule("svc", path, false, false, false));
 
   Child actor([&] { return addExecutePermission(path); });
   enroll("svc", actor.pid());
@@ -210,7 +210,7 @@ TEST(ExecEnforcer, FileMprotectNeedsSharedObjectPermission) {
 
 TEST(ExecEnforcer, SharedObjectPermissionAllowsFileMprotect) {
   const std::string path = uniquePath("exec-enforcer-mprotect");
-  attach("roles:\n  svc:\n    exec-paths:\n" + rule(path, false, false, true));
+  attach("[roles.svc]\n" + rule("svc", path, false, false, true));
 
   Child actor([&] { return addExecutePermission(path); });
   enroll("svc", actor.pid());
@@ -229,7 +229,7 @@ TEST(ExecEnforcer, UnjailedProcessMayExec) {
 
 TEST(ExecEnforcer, AnyAllowsExecutableAndSharedObjects) {
   const std::string executable = truePath();
-  attach("roles:\n  svc:\n    any: true\n");
+  attach("[roles.svc]\nany = true\n");
 
   Child actor([&] { return runProgram(executable); });
   enroll("svc", actor.pid());
@@ -240,9 +240,9 @@ TEST(ExecEnforcer, AnyAllowsExecutableAndSharedObjects) {
 TEST(ExecEnforcer, LongestPathMatchWins) {
   const std::string executable = truePath();
   attach(
-      "roles:\n  svc:\n    exec-paths:\n" + rule("/usr", false, false, false) +
-      rule("/usr/lib64/*", false, false, true) +
-      rule(executable, true, false, false));
+      "[roles.svc]\n" + rule("svc", "/usr", false, false, false) +
+      rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", executable, true, false, false));
 
   Child actor([&] { return runProgram(executable); });
   enroll("svc", actor.pid());
@@ -253,11 +253,11 @@ TEST(ExecEnforcer, LongestPathMatchWins) {
 TEST(ExecEnforcer, EveryStackedRoleMustAllowExec) {
   const std::string executable = truePath();
   attach(
-      "roles:\n  allow:\n    exec-paths:\n" +
-      rule("/usr/lib64/*", false, false, true) +
-      rule(executable, true, false, false) + "  deny:\n    exec-paths:\n" +
-      rule("/usr/lib64/*", false, false, true) +
-      rule(executable, false, false, false));
+      "[roles.allow]\n[roles.deny]\n" +
+      rule("allow", "/usr/lib64/*", false, false, true) +
+      rule("allow", executable, true, false, false) +
+      rule("deny", "/usr/lib64/*", false, false, true) +
+      rule("deny", executable, false, false, false));
 
   Child actor([&] { return runProgram(executable); });
   enroll("allow", actor.pid());

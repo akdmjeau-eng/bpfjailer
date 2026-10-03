@@ -35,8 +35,8 @@ using bpfjailer::test::waitForMutationJournal;
 
 namespace {
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(MqEnforcer::load(testPins(), policy));
 }
@@ -173,7 +173,10 @@ void expectReceivedFd(const std::string& policy, int expected) {
 } // namespace
 
 TEST(MqEnforcer, LoadPinsLinksPolicyAndVersionedOwnershipMaps) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(linkPinned("bpfj_mq_sysv_send"));
   ASSERT(linkPinned("bpfj_mq_sysv_receive"));
@@ -187,14 +190,21 @@ TEST(MqEnforcer, LoadPinsLinksPolicyAndVersionedOwnershipMaps) {
 }
 
 TEST(MqEnforcer, NoMqSysvDeniesCreation) {
-  attach("roles:\n  jailed:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+)toml");
   Child actor([key = uniqueKey()] { return createSysv(key); });
   enroll("jailed", actor.pid());
   ASSERT_EQ(actor.run(), EPERM);
 }
 
 TEST(MqEnforcer, EmptySysvPolicyAllowsSendAndReceiveInsideItsPod) {
-  attach("roles:\n  jailed:\n    mq-sysv-roles:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+mq-sysv-roles = []
+)toml");
   enroll("jailed", ::getpid());
   const int id = ::msgget(IPC_PRIVATE, 0600);
   ASSERT(id >= 0);
@@ -211,7 +221,14 @@ TEST(MqEnforcer, EmptySysvPolicyAllowsSendAndReceiveInsideItsPod) {
 
 TEST(MqEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsQueue) {
   const key_t key = uniqueKey();
-  attach("roles:\n  owner:\n    any: true\n  jailed:\n    mq-sysv-roles:\n");
+  attach(R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.jailed]
+mq-sysv-roles = []
+)toml");
 
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -231,7 +248,14 @@ TEST(MqEnforcer, EmptySysvPolicyCannotAcquireAnotherPodsQueue) {
 TEST(MqEnforcer, SysvPolicyCanNameAnOwnerRole) {
   const key_t key = uniqueKey();
   attach(
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-sysv-roles:\n      - owner\n");
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+mq-sysv-roles = ["owner"]
+)toml");
 
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -253,7 +277,11 @@ TEST(MqEnforcer, RestrictedSysvPolicyRejectsAQueueWithNoKnownOwner) {
   const int id = ::msgget(key, IPC_CREAT | IPC_EXCL | 0600);
   ASSERT(id >= 0);
 
-  attach("roles:\n  jailed:\n    mq-sysv-roles:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+mq-sysv-roles = []
+)toml");
   Child cleanup([id] {
     errno = 0;
     return ::msgctl(id, IPC_RMID, nullptr) == 0 ? 0 : errno;
@@ -266,10 +294,17 @@ TEST(MqEnforcer, RestrictedSysvPolicyRejectsAQueueWithNoKnownOwner) {
 
 TEST(MqEnforcer, SysvOwnershipSurvivesAReplace) {
   const key_t key = uniqueKey();
-  const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
-      "    mq-sysv-roles:\n      - owner\n";
-  attach(yaml);
+  const std::string toml =
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+any = true
+mq-sysv-roles = ["owner"]
+)toml";
+  attach(toml);
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -281,14 +316,17 @@ TEST(MqEnforcer, SysvOwnershipSurvivesAReplace) {
   });
   enroll("client", ::getpid());
 
-  ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT_OK(replaceJailer(testPins(), policyOf(toml)));
   ASSERT_EQ(acquireSysv(key), 0);
   ASSERT_EQ(cleanup.run(), 0);
 }
 
 TEST(MqEnforcer, NoMqPosixDeniesCreation) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+)toml");
   Child actor([name] { return createPosix(name); });
   enroll("jailed", actor.pid());
   // mqueuefs translates an inode-allocation security refusal to ENOMEM.
@@ -298,7 +336,11 @@ TEST(MqEnforcer, NoMqPosixDeniesCreation) {
 
 TEST(MqEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  jailed:\n    mq-posix-roles:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+mq-posix-roles = []
+)toml");
   enroll("jailed", ::getpid());
   ASSERT_EQ(createPosix(name), 0);
   ASSERT_EQ(acquirePosix(name), 0);
@@ -307,7 +349,14 @@ TEST(MqEnforcer, EmptyPosixPolicyAllowsItsOwnPod) {
 
 TEST(MqEnforcer, EmptyPosixPolicyCannotOpenAnotherPodsQueue) {
   const std::string name = uniquePosixName();
-  attach("roles:\n  owner:\n    any: true\n  jailed:\n    mq-posix-roles:\n");
+  attach(R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.jailed]
+mq-posix-roles = []
+)toml");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -320,7 +369,14 @@ TEST(MqEnforcer, EmptyPosixPolicyCannotOpenAnotherPodsQueue) {
 TEST(MqEnforcer, PosixPolicyCanNameAnOwnerRole) {
   const std::string name = uniquePosixName();
   attach(
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n");
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+mq-posix-roles = ["owner"]
+)toml");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
@@ -335,11 +391,13 @@ TEST(MqEnforcer, PosixPatternOverridesUnknownOwnership) {
   const std::string serial = name.substr(name.rfind('-') + 1);
   ASSERT_EQ(createPosix(name), 0);
   attach(
-      "vars:\n"
-      "  - SERIAL\n"
-      "roles:\n"
-      "  client:\n"
-      "    mq-posix-pattern: bpfj-mq-?est-*-${SERIAL}\n");
+      R"toml(vars = ["SERIAL"]
+
+[roles]
+
+[roles.client]
+mq-posix-pattern = "bpfj-mq-?est-*-${SERIAL}"
+)toml");
   const std::array vars{PodVar{.name = "SERIAL", .value = serial}};
   enroll("client", ::getpid(), vars);
 
@@ -355,11 +413,13 @@ TEST(MqEnforcer, PosixPatternWithAMissingVariableDoesNotMatch) {
     return ::mq_unlink(name.c_str()) == 0 ? 0 : errno;
   });
   attach(
-      "vars:\n"
-      "  - SERIAL\n"
-      "roles:\n"
-      "  client:\n"
-      "    mq-posix-pattern: bpfj-mq-test-*-${SERIAL}\n");
+      R"toml(vars = ["SERIAL"]
+
+[roles]
+
+[roles.client]
+mq-posix-pattern = "bpfj-mq-test-*-${SERIAL}"
+)toml");
   enroll("client", ::getpid());
 
   ASSERT_EQ(acquirePosix(name), EPERM);
@@ -370,7 +430,11 @@ TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
   const std::string name = uniquePosixName();
   ASSERT_EQ(createPosix(name), 0);
 
-  attach("roles:\n  jailed:\n    mq-posix-roles:\n");
+  attach(R"toml([roles]
+
+[roles.jailed]
+mq-posix-roles = []
+)toml");
   enroll("jailed", ::getpid());
 
   ASSERT_EQ(acquirePosix(name), EPERM);
@@ -379,16 +443,23 @@ TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
 
 TEST(MqEnforcer, PosixOwnershipSurvivesAReplace) {
   const std::string name = uniquePosixName();
-  const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
-      "    mq-posix-roles:\n      - owner\n";
-  attach(yaml);
+  const std::string toml =
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+any = true
+mq-posix-roles = ["owner"]
+)toml";
+  attach(toml);
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
   ASSERT_EQ(creator.run(), 0);
   enroll("client", ::getpid());
 
-  ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT_OK(replaceJailer(testPins(), policyOf(toml)));
   ASSERT_EQ(acquirePosix(name), 0);
   ASSERT_EQ(::mq_unlink(name.c_str()), 0);
 }
@@ -398,14 +469,21 @@ TEST(MqEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   const key_t removedSysv = uniqueKey();
   const std::string keptPosix = uniquePosixName();
   const std::string removedPosix = uniquePosixName();
-  const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
-      "    any: true\n"
-      "    mq-sysv-roles:\n      - owner\n"
-      "    mq-posix-roles:\n      - owner\n";
-  attach(yaml);
-  Child replacer([yaml] {
-    auto replaced = replaceJailer(testPins(), policyOf(yaml));
+  const std::string toml =
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+any = true
+mq-sysv-roles = ["owner"]
+mq-posix-roles = ["owner"]
+)toml";
+  attach(toml);
+
+  Child replacer([toml] {
+    auto replaced = replaceJailer(testPins(), policyOf(toml));
     if (!replaced) {
       const std::string diagnostic =
           "      replace: " + replaced.error().message() + "\n";
@@ -459,21 +537,39 @@ TEST(MqEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {
   // SCM_RIGHTS delivers the payload but omits an fd refused by
   // security_file_receive(), which the helper reports as ENOMSG.
   expectReceivedFd(
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n",
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+mq-posix-roles = []
+)toml",
       ENOMSG);
 }
 
 TEST(MqEnforcer, PosixDescriptorReceiptAllowsANamedOwnerRole) {
   expectReceivedFd(
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n",
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+mq-posix-roles = ["owner"]
+)toml",
       0);
 }
 
 TEST(MqEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
   expectReceivedFd(
-      "roles:\n"
-      "  owner:\n    any: true\n"
-      "  client:\n"
-      "    mq-posix-pattern: bpfj-mq-test-*\n",
+      R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.client]
+mq-posix-pattern = "bpfj-mq-test-*"
+)toml",
       0);
 }

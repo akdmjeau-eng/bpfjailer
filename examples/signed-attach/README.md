@@ -31,25 +31,25 @@ for those and names the packages if any are missing.
 
 ## The policy
 
-```yaml
-base-role: floor
-certs:
-  signer: |
-    <the minted certificate>
-roles:
-  floor:
-    any: true
-    bpf-pod: true
-    untracked-bpf: true
-    keyring-own: true
-  bpfjailer:
-    any: true
-    override-stacked: true
-    enforce-binary-certs:
-      - signer
-    min-seq: 2
-    bpf-any: true
-    keyring-own: true
+```toml
+base-role = "floor"
+
+[certs]
+signer = "<the minted certificate>"
+
+[roles.floor]
+any = true
+bpf-pod = true
+untracked-bpf = true
+keyring-own = true
+
+[roles.bpfjailer]
+any = true
+override-stacked = true
+enforce-binary-certs = ["signer"]
+min-seq = 2
+bpf-any = true
+keyring-own = true
 ```
 
 `floor` is the base role, so every process on the host is in it. It names no

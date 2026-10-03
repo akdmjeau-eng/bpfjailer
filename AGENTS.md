@@ -2,18 +2,18 @@
 
 ## Overview
 
-BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. Policy covers executable paths, fs-verity, filesystem paths, BPF objects, kernel loading, signals, ptrace, process files, message queues, shared memory, Unix sockets, mounts, keyrings and enrollment. See README.md for the user-facing overview and POLICY.md for the option reference.
+BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a TOML policy, and pods are inherited across fork and exec. Policy covers executable paths, fs-verity, filesystem paths, BPF objects, kernel loading, signals, ptrace, process files, message queues, shared memory, Unix sockets, mounts, keyrings and enrollment. See README.md for the user-facing overview and POLICY.md for the option reference.
 
 ## Layout
 
-- bpfj/ is the core library. bpfj/enforce/ holds the jailer, live replacement and the enforcers, with their BPF programs in bpfj/enforce/bpf/. bpfj/policy/ parses the YAML policy, bpfj/match/ implements cached path and glob matching, bpfj/fsverity/ handles signatures and keyrings, and bpfj/libbpf-cpp/ has C++ helpers for working with BPF, which you should use and extend as needed.
+- bpfj/ is the core library. bpfj/enforce/ holds the jailer, live replacement and the enforcers, with their BPF programs in bpfj/enforce/bpf/. bpfj/policy/ parses the TOML policy, bpfj/match/ implements cached path and glob matching, bpfj/fsverity/ handles signatures and keyrings, and bpfj/libbpf-cpp/ has C++ helpers for working with BPF, which you should use and extend as needed.
 - ctl/ builds bpfjctl, the general purpose tool: `attach`, `replace`, `check`, `detach`, `enroll`, `wrap`, `show`, `list`. Subcommands live in ctl/commands/ and are routed by ctl/Dispatch.cpp.
 - cmd/ builds bpfjcmd, which is bpfjctl with its args statically baked in (argv is never read) and optionally a baked policy (`make cmd CMD_POLICY=...`), which puts the policy under the signature rather than only the path it would be read from. The `-compiled` commands (`attach-compiled`, `replace-compiled`, `check-compiled`) are the ones that read it; their path-taking twins are unchanged. This lets the binary be fully statically linked and signed, so it is validated in one go when run.
 - srv/ builds bpfjsrv, a socket activated server that performs unprivileged enrollment into roles with `unpriv-enroll: true`, subject to the caller's current roles' `enroll` lists. client/ builds bpfjclient, which must only depend on libc and srv/Client.h.
 - log/ builds bpfjlog. It drains the pinned diagnostic and structured-event ring buffers, sends them to stderr and stdout respectively, and reconnects after replace swaps the maps.
 - tests/ is the bpfjtest suite, and tests/verity/Makefile builds the signed fixtures for the fs-verity tests.
 - examples/ has end to end scripts for a signed bpfjcmd and for unprivileged enrollment.
-- yaml/ is mini-yaml, vendored and kept as close to upstream as possible.
+- toml/ contains the vendored toml++ single-header parser.
 
 ## Building and testing
 
@@ -66,7 +66,7 @@ Leaving `lkm-any` absent denies kernel module and kexec loading. Leaving `verity
 
 Comments should be 1 sentence unless absolutely necessary.
 
-Every source file must start with the header `Copyright (c) Meta Platforms, Inc. and affiliates.` in the file's comment syntax, after the shebang if there is one. Never add it to the vendored files under yaml/, which carry only their upstream MIT notice.
+Every source file must start with the header `Copyright (c) Meta Platforms, Inc. and affiliates.` in the file's comment syntax, after the shebang if there is one. Never add it to vendored files under toml/, which carry only their upstream MIT notice.
 
 The project is MIT licensed. BPF programs must declare `char LICENSE[] SEC("license") = "Dual MIT/GPL";`, which the kernel treats as GPL compatible.
 

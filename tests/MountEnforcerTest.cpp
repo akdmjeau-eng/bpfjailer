@@ -107,7 +107,10 @@ mountFs(const std::string& path, const char* type, unsigned long flags = 0) {
 }
 
 void attach(std::string rules) {
-  const Policy policy = policyOf("roles:\n  svc:\n" + std::move(rules));
+  const Policy policy = policyOf(R"toml([roles]
+
+[roles.svc]
+)toml" + std::move(rules));
   loadJailer(policy);
   ASSERT_OK(MountEnforcer::load(testPins(), policy));
 }
@@ -116,7 +119,7 @@ void attach(std::string rules) {
 
 TEST(MountEnforcer, LoadPinsEveryHook) {
   Fixture fixture;
-  attach("    mount:\n      " + fixture.destination() + ":\n");
+  attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   ASSERT(linkPinned("bpfj_mount_new"));
   ASSERT(linkPinned("bpfj_mount_remount"));
@@ -132,7 +135,7 @@ TEST(MountEnforcer, LoadPinsEveryHook) {
 
 TEST(MountEnforcer, UnmatchedDestinationIsAllowed) {
   Fixture fixture;
-  attach("    mount:\n      " + fixture.destination() + ":\n");
+  attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   Child actor([&] { return mountFs(fixture.other(), "tmpfs"); });
   enroll("svc", actor.pid());
@@ -141,7 +144,7 @@ TEST(MountEnforcer, UnmatchedDestinationIsAllowed) {
 
 TEST(MountEnforcer, EmptyFilesystemListBlocksMount) {
   Fixture fixture;
-  attach("    mount:\n      " + fixture.destination() + ":\n");
+  attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   Child actor([&] { return mountFs(fixture.destination(), "tmpfs"); });
   enroll("svc", actor.pid());
@@ -150,7 +153,7 @@ TEST(MountEnforcer, EmptyFilesystemListBlocksMount) {
 
 TEST(MountEnforcer, FilesystemTypeListSelectsAllowedType) {
   Fixture fixture;
-  attach("    mount:\n      " + fixture.destination() + ":\n        - tmpfs\n");
+  attach("mount.\"" + fixture.destination() + "\" = [\"tmpfs\"]\n");
 
   Child actor([&] {
     const int allowed = mountFs(fixture.destination(), "tmpfs");
@@ -167,9 +170,10 @@ TEST(MountEnforcer, FilesystemTypeListSelectsAllowedType) {
 TEST(MountEnforcer, LongestDestinationOverridesRootDenial) {
   Fixture fixture;
   attach(
-      "    mount:\n      " + fixture.destination() +
-      ":\n        - tmpfs\n      '/': []\n"
-      "    umount: true\n");
+      "mount.\"" + fixture.destination() +
+      "\" = [\"tmpfs\"]\n"
+      "mount.\"/\" = []\n"
+      "umount = true\n");
 
   Child actor([&] {
     const int allowed = mountFs(fixture.destination(), "tmpfs");
@@ -182,7 +186,7 @@ TEST(MountEnforcer, LongestDestinationOverridesRootDenial) {
 TEST(MountEnforcer, UmountFalseBlocksUnmount) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
-  attach("    umount: false\n");
+  attach("umount = false\n");
 
   Child actor([&] { return unmount(fixture.source()); });
   enroll("svc", actor.pid());
@@ -193,9 +197,9 @@ TEST(MountEnforcer, MoveMountRequiresDestinationPermission) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
   attach(
-      "    mount:\n      " + fixture.destination() +
-      ":\n"
-      "    umount: true\n");
+      "mount.\"" + fixture.destination() +
+      "\" = []\n"
+      "umount = true\n");
 
   Child actor(
       [&] { return moveMount(fixture.source(), fixture.destination()); });
@@ -207,9 +211,9 @@ TEST(MountEnforcer, MoveMountRequiresSourceUmountPermission) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
   attach(
-      "    mount:\n      " + fixture.destination() +
-      ":\n        - tmpfs\n"
-      "    umount: false\n");
+      "mount.\"" + fixture.destination() +
+      "\" = [\"tmpfs\"]\n"
+      "umount = false\n");
 
   Child actor(
       [&] { return moveMount(fixture.source(), fixture.destination()); });
@@ -221,9 +225,9 @@ TEST(MountEnforcer, MoveMountSucceedsWhenBothPermissionsAgree) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
   attach(
-      "    mount:\n      " + fixture.destination() +
-      ":\n        - tmpfs\n"
-      "    umount: true\n");
+      "mount.\"" + fixture.destination() +
+      "\" = [\"tmpfs\"]\n"
+      "umount = true\n");
 
   Child actor(
       [&] { return moveMount(fixture.source(), fixture.destination()); });
@@ -234,7 +238,7 @@ TEST(MountEnforcer, MoveMountSucceedsWhenBothPermissionsAgree) {
 TEST(MountEnforcer, RemountUsesTheMountedFilesystemType) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.destination(), "tmpfs"), 0);
-  attach("    mount:\n      " + fixture.destination() + ":\n        - tmpfs\n");
+  attach("mount.\"" + fixture.destination() + "\" = [\"tmpfs\"]\n");
 
   Child actor(
       [&] { return mountFs(fixture.destination(), nullptr, MS_REMOUNT); });
@@ -245,7 +249,7 @@ TEST(MountEnforcer, RemountUsesTheMountedFilesystemType) {
 TEST(MountEnforcer, RemountIsDeniedByAnEmptyFilesystemList) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.destination(), "tmpfs"), 0);
-  attach("    mount:\n      " + fixture.destination() + ":\n");
+  attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   Child actor(
       [&] { return mountFs(fixture.destination(), nullptr, MS_REMOUNT); });

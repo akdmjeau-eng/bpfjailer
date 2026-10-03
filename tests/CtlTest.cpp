@@ -31,22 +31,74 @@ constexpr int kUsageError = 64;
 
 /// @brief A policy of the kind `make cmd CMD_POLICY=...` compiles in.
 constexpr std::string_view kCompiledPolicy =
-    "base-role: floor\nroles:\n"
-    "  floor:\n    any: true\n"
-    "  webserver:\n    any: true\n"
-    "  carried:\n    any: true\n";
+    R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+any = true
+
+[roles.webserver]
+any = true
+
+[roles.carried]
+any = true
+)toml";
 
 constexpr std::string_view kDefaultPolicy =
-    "roles:\n"
-    "  dropped:\n    any: true\n  carried:\n    any: true\n"
-    "  testrole:\n    any: true\n  role:\n    any: true\n"
-    "  role0:\n    any: true\n  role1:\n    any: true\n"
-    "  role2:\n    any: true\n  role3:\n    any: true\n"
-    "  role4:\n    any: true\n  role5:\n    any: true\n"
-    "  role6:\n    any: true\n  role7:\n    any: true\n"
-    "  listed:\n    any: true\n  wrapped:\n    any: true\n"
-    "  keeps:\n    any: true\n  drops:\n    any: true\n"
-    "  missing:\n    any: true\n";
+    R"toml([roles]
+
+[roles.dropped]
+any = true
+
+[roles.carried]
+any = true
+
+[roles.testrole]
+any = true
+
+[roles.role]
+any = true
+
+[roles.role0]
+any = true
+
+[roles.role1]
+any = true
+
+[roles.role2]
+any = true
+
+[roles.role3]
+any = true
+
+[roles.role4]
+any = true
+
+[roles.role5]
+any = true
+
+[roles.role6]
+any = true
+
+[roles.role7]
+any = true
+
+[roles.listed]
+any = true
+
+[roles.wrapped]
+any = true
+
+[roles.keeps]
+any = true
+
+[roles.drops]
+any = true
+
+[roles.missing]
+any = true
+)toml";
 
 /// @brief Run a command against this test's own bpffs, as a binary carrying
 /// `policy` compiled in.
@@ -68,7 +120,7 @@ constexpr std::string_view kDefaultPolicy =
 /// @brief Write `body` to a policy file under the test's own bpffs and return
 /// its path, so it goes with the mount namespace.
 [[nodiscard]] std::string writePolicy(std::string_view body) {
-  const std::string path = bpffsPath() + ".policy.yaml";
+  const std::string path = bpffsPath() + ".policy.toml";
   std::ofstream out(path, std::ios::trunc);
   out << body;
   out.close();
@@ -123,8 +175,13 @@ TEST(Ctl, AttachNeedsAPolicyPath) {
 TEST(Ctl, AttachIgnoresACompiledInPolicy) {
   // `attach` reads its path and nothing else, whatever the binary carries --
   // which is the point of the compiled-in policy being a separate command.
-  const std::string policy =
-      writePolicy("base-role: fromfile\nroles:\n  fromfile:\n    any: true\n");
+  const std::string policy = writePolicy(R"toml(base-role = "fromfile"
+
+[roles]
+
+[roles.fromfile]
+any = true
+)toml");
 
   const CommandResult res = ctlCompiled({"attach", policy});
   ASSERT_EQ(res.status, 0);
@@ -141,7 +198,10 @@ TEST(Ctl, AttachCompiledUsesThePolicyCompiledIn) {
 }
 
 TEST(Ctl, AttachCompiledTakesNoPath) {
-  const std::string policy = writePolicy("roles:\n  other:\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.other]
+)toml");
 
   const CommandResult res = ctlCompiled({"attach-compiled", policy});
   ASSERT_EQ(res.status, kUsageError);
@@ -158,8 +218,11 @@ TEST(Ctl, AttachCompiledWithNothingCompiledInSaysSo) {
 }
 
 TEST(Ctl, AttachCompiledRejectsAMalformedPolicy) {
-  const CommandResult res = ctlCompiled(
-      {"attach-compiled"}, "roles:\n  web:\n    kill-roles:\n      - nosuch\n");
+  const CommandResult res = ctlCompiled({"attach-compiled"}, R"toml([roles]
+
+[roles.web]
+kill-roles = ["nosuch"]
+)toml");
   ASSERT_EQ(res.status, 1);
   ASSERT(res.errHas("which is not in roles"));
   ASSERT(!exists(pinRoot()));
@@ -291,9 +354,16 @@ TEST(Ctl, ReplaceClearsATreeLeftBehindByAFailedRun) {
 
 TEST(Ctl, ReplaceMergesCarriedPodsOntoTheNewBaseRole) {
   const std::string policy = writePolicy(
-      "base-role: floor\nroles:\n"
-      "  floor:\n    any: true\n"
-      "  carried:\n    any: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+any = true
+
+[roles.carried]
+any = true
+)toml");
 
   const CommandResult attached = ctl({"attach", policy});
   ASSERT_EQ(attached.status, 0);
@@ -321,11 +391,20 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
   // hands the jailer's own pins to `floor`, which overriding stops the
   // replace's walk from ever reaching.
   const std::string policy = writePolicy(
-      "base-role: floor\n"
-      "roles:\n"
-      "  floor:\n    any: true\n    bpf-roles:\n    untracked-bpf: true\n"
-      "  bpfjailer:\n    any: true\n    override-stacked: true\n"
-      "    bpf-any: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+any = true
+bpf-roles = []
+untracked-bpf = true
+
+[roles.bpfjailer]
+any = true
+override-stacked = true
+bpf-any = true
+)toml");
 
   ASSERT_EQ(ctl({"attach", policy}).status, 0);
   ASSERT_EQ(ctl({"enroll", "bpfjailer", "signed@meta", selfPid()}).status, 0);
@@ -337,14 +416,24 @@ TEST(Ctl, ReplaceFromAnOverrideRoleUnderAConfiguredBaseRole) {
 // from id 2 to id 1. A pod copied across by id would come out with no name.
 TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
   const std::string before = writePolicy(
-      "vars:\n  - first\n  - second\nroles:\n"
-      "  carried:\n    any: true\n");
+      R"toml(vars = ["first", "second"]
+
+[roles]
+
+[roles.carried]
+any = true
+)toml");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(
       ctl({"enroll", "carried", "user", selfPid(), "second=kept"}).status, 0);
 
-  const std::string after =
-      writePolicy("vars:\n  - second\nroles:\n  carried:\n    any: true\n");
+  const std::string after = writePolicy(R"toml(vars = ["second"]
+
+[roles]
+
+[roles.carried]
+any = true
+)toml");
   ASSERT_EQ(ctl({"replace", after}).status, 0);
 
   const CommandResult shown = ctl({"show", selfPid()});
@@ -353,13 +442,21 @@ TEST(Ctl, ReplaceCarriesAVarByNameWhenTheNewPolicyRenumbersIt) {
 }
 
 TEST(Ctl, ReplaceRefusesToDropAVarAPodCarries) {
-  const std::string before =
-      writePolicy("vars:\n  - kept\nroles:\n  carried:\n    any: true\n");
+  const std::string before = writePolicy(R"toml(vars = ["kept"]
+
+[roles]
+
+[roles.carried]
+any = true
+)toml");
   ASSERT_EQ(ctl({"attach", before}).status, 0);
   ASSERT_EQ(ctl({"enroll", "carried", "user", selfPid(), "kept=x"}).status, 0);
 
-  const CommandResult replaced =
-      ctl({"replace", writePolicy("roles:\n  carried:\n    any: true\n")});
+  const CommandResult replaced = ctl({"replace", writePolicy(R"toml([roles]
+
+[roles.carried]
+any = true
+)toml")});
   ASSERT_EQ(replaced.status, 1);
   ASSERT(replaced.errHas("carries variable 'kept'"));
 
@@ -391,7 +488,10 @@ TEST(Ctl, ReplaceCompiledUsesThePolicyCompiledIn) {
 }
 
 TEST(Ctl, ReplaceCompiledTakesNoPath) {
-  const std::string policy = writePolicy("roles:\n  other:\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.other]
+)toml");
 
   const CommandResult res = ctlCompiled({"replace-compiled", policy});
   ASSERT_EQ(res.status, kUsageError);
@@ -404,8 +504,14 @@ TEST(Ctl, ReplaceCompiledWithNothingCompiledInSaysSo) {
 }
 
 TEST(Ctl, CheckReportsWhatAPolicyHolds) {
-  const std::string policy =
-      writePolicy("base-role: floor\nroles:\n  floor:\n  web:\n");
+  const std::string policy = writePolicy(R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+
+[roles.web]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
@@ -414,7 +520,12 @@ TEST(Ctl, CheckReportsWhatAPolicyHolds) {
 
 TEST(Ctl, CheckRejectsBpfAnyAlongsideABpfList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    bpf-any: true\n    bpf-roles:\n      - muddled\n");
+      R"toml([roles]
+
+[roles.muddled]
+bpf-any = true
+bpf-roles = ["muddled"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -423,7 +534,12 @@ TEST(Ctl, CheckRejectsBpfAnyAlongsideABpfList) {
 
 TEST(Ctl, CheckRejectsKillAnyAlongsideAKillList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    kill-any: true\n    kill-roles:\n      - muddled\n");
+      R"toml([roles]
+
+[roles.muddled]
+kill-any = true
+kill-roles = ["muddled"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -432,7 +548,12 @@ TEST(Ctl, CheckRejectsKillAnyAlongsideAKillList) {
 
 TEST(Ctl, CheckRejectsPtraceAnyAlongsideAPtraceList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    ptrace-any: true\n    ptrace-roles:\n      - muddled\n");
+      R"toml([roles]
+
+[roles.muddled]
+ptrace-any = true
+ptrace-roles = ["muddled"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -441,7 +562,12 @@ TEST(Ctl, CheckRejectsPtraceAnyAlongsideAPtraceList) {
 
 TEST(Ctl, CheckRejectsKeyringAnyAlongsideAKeyringList) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    keyring-any: true\n    keyring-roles:\n      - muddled\n");
+      R"toml([roles]
+
+[roles.muddled]
+keyring-any = true
+keyring-roles = ["muddled"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -449,8 +575,11 @@ TEST(Ctl, CheckRejectsKeyringAnyAlongsideAKeyringList) {
 }
 
 TEST(Ctl, CheckRejectsUntrackedBpfWithoutABpfList) {
-  const std::string policy =
-      writePolicy("roles:\n  exempt:\n    untracked-bpf: true\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.exempt]
+untracked-bpf = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -458,8 +587,11 @@ TEST(Ctl, CheckRejectsUntrackedBpfWithoutABpfList) {
 }
 
 TEST(Ctl, CheckRejectsAnEnrollTargetNotInRoles) {
-  const std::string policy =
-      writePolicy("roles:\n  sandbox:\n    enroll-roles:\n      - missing\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.sandbox]
+enroll-roles = ["missing"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -467,7 +599,7 @@ TEST(Ctl, CheckRejectsAnEnrollTargetNotInRoles) {
 }
 
 TEST(Ctl, CheckRejectsAVarNameThatIsNotAnIdentifier) {
-  const std::string policy = writePolicy("vars:\n  - vm-uuid\n");
+  const std::string policy = writePolicy("vars = [\"vm-uuid\"]\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -475,7 +607,7 @@ TEST(Ctl, CheckRejectsAVarNameThatIsNotAnIdentifier) {
 }
 
 TEST(Ctl, CheckRejectsAVarListedTwice) {
-  const std::string policy = writePolicy("vars:\n  - vm_uuid\n  - vm_uuid\n");
+  const std::string policy = writePolicy("vars = [\"vm_uuid\", \"vm_uuid\"]\n");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -483,8 +615,11 @@ TEST(Ctl, CheckRejectsAVarListedTwice) {
 }
 
 TEST(Ctl, CheckRejectsABpfAnyThatIsNotABoolean) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    bpf-any: maybe\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.muddled]
+bpf-any = "maybe"
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -492,8 +627,11 @@ TEST(Ctl, CheckRejectsABpfAnyThatIsNotABoolean) {
 }
 
 TEST(Ctl, CheckRejectsAKillAnyThatIsNotABoolean) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    kill-any: maybe\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.muddled]
+kill-any = "maybe"
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -501,8 +639,11 @@ TEST(Ctl, CheckRejectsAKillAnyThatIsNotABoolean) {
 }
 
 TEST(Ctl, CheckRejectsAPtraceAnyThatIsNotABoolean) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    ptrace-any: maybe\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.muddled]
+ptrace-any = "maybe"
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -510,8 +651,11 @@ TEST(Ctl, CheckRejectsAPtraceAnyThatIsNotABoolean) {
 }
 
 TEST(Ctl, CheckRejectsAKeyringAnyThatIsNotABoolean) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    keyring-any: maybe\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.muddled]
+keyring-any = "maybe"
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -519,8 +663,11 @@ TEST(Ctl, CheckRejectsAKeyringAnyThatIsNotABoolean) {
 }
 
 TEST(Ctl, CheckRejectsALkmAnyThatIsNotABoolean) {
-  const std::string policy =
-      writePolicy("roles:\n  muddled:\n    lkm-any: maybe\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.muddled]
+lkm-any = "maybe"
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -529,12 +676,14 @@ TEST(Ctl, CheckRejectsALkmAnyThatIsNotABoolean) {
 
 TEST(Ctl, CheckAcceptsIndependentMessageQueuePolicies) {
   const std::string policy = writePolicy(
-      "roles:\n"
-      "  owner:\n"
-      "  client:\n"
-      "    mq-sysv-roles:\n"
-      "      - owner\n"
-      "    mq-posix-pod: true\n");
+      R"toml([roles]
+
+[roles.owner]
+
+[roles.client]
+mq-sysv-roles = ["owner"]
+mq-posix-pod = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
@@ -542,7 +691,12 @@ TEST(Ctl, CheckAcceptsIndependentMessageQueuePolicies) {
 
 TEST(Ctl, CheckRejectsMessageQueueListAndAnyTogether) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    mq-sysv-roles:\n    mq-sysv-any: true\n");
+      R"toml([roles]
+
+[roles.muddled]
+mq-sysv-roles = []
+mq-sysv-any = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -550,8 +704,11 @@ TEST(Ctl, CheckRejectsMessageQueueListAndAnyTogether) {
 }
 
 TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
-  const std::string policy =
-      writePolicy("roles:\n  client:\n    mq-posix-roles:\n      - missing\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.client]
+mq-posix-roles = ["missing"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -560,13 +717,13 @@ TEST(Ctl, CheckRejectsUnknownMessageQueueRole) {
 
 TEST(Ctl, CheckAcceptsMessageQueuePosixPatterns) {
   const std::string policy = writePolicy(
-      "vars:\n"
-      "  - UUID\n"
-      "roles:\n"
-      "  client:\n"
-      "    mq-posix-pattern:\n"
-      "      - service-*\n"
-      "      - service-${UUID}\n");
+      R"toml(vars = ["UUID"]
+
+[roles]
+
+[roles.client]
+mq-posix-pattern = ["service-*", "service-${UUID}"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
@@ -574,10 +731,12 @@ TEST(Ctl, CheckAcceptsMessageQueuePosixPatterns) {
 
 TEST(Ctl, CheckRejectsMessageQueuePatternAndAnyTogether) {
   const std::string policy = writePolicy(
-      "roles:\n"
-      "  muddled:\n"
-      "    mq-posix-pattern: service-*\n"
-      "    mq-posix-any: true\n");
+      R"toml([roles]
+
+[roles.muddled]
+mq-posix-pattern = "service-*"
+mq-posix-any = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -586,12 +745,14 @@ TEST(Ctl, CheckRejectsMessageQueuePatternAndAnyTogether) {
 
 TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
   const std::string policy = writePolicy(
-      "roles:\n"
-      "  owner:\n"
-      "  client:\n"
-      "    shm-sysv-roles:\n"
-      "      - owner\n"
-      "    shm-posix-pod: true\n");
+      R"toml([roles]
+
+[roles.owner]
+
+[roles.client]
+shm-sysv-roles = ["owner"]
+shm-posix-pod = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
@@ -599,7 +760,12 @@ TEST(Ctl, CheckAcceptsIndependentSharedMemoryPolicies) {
 
 TEST(Ctl, CheckRejectsSharedMemoryListAndAnyTogether) {
   const std::string policy = writePolicy(
-      "roles:\n  muddled:\n    shm-sysv-roles:\n    shm-sysv-any: true\n");
+      R"toml([roles]
+
+[roles.muddled]
+shm-sysv-roles = []
+shm-sysv-any = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -607,8 +773,11 @@ TEST(Ctl, CheckRejectsSharedMemoryListAndAnyTogether) {
 }
 
 TEST(Ctl, CheckRejectsUnknownSharedMemoryRole) {
-  const std::string policy =
-      writePolicy("roles:\n  client:\n    shm-posix-roles:\n      - missing\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.client]
+shm-posix-roles = ["missing"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -617,13 +786,13 @@ TEST(Ctl, CheckRejectsUnknownSharedMemoryRole) {
 
 TEST(Ctl, CheckAcceptsSharedMemoryPosixPatterns) {
   const std::string policy = writePolicy(
-      "vars:\n"
-      "  - UUID\n"
-      "roles:\n"
-      "  client:\n"
-      "    shm-posix-pattern:\n"
-      "      - service-?\n"
-      "      - service-${UUID}\n");
+      R"toml(vars = ["UUID"]
+
+[roles]
+
+[roles.client]
+shm-posix-pattern = ["service-?", "service-${UUID}"]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 0);
@@ -631,10 +800,12 @@ TEST(Ctl, CheckAcceptsSharedMemoryPosixPatterns) {
 
 TEST(Ctl, CheckRejectsSharedMemoryPatternAndAnyTogether) {
   const std::string policy = writePolicy(
-      "roles:\n"
-      "  muddled:\n"
-      "    shm-posix-pattern: service-*\n"
-      "    shm-posix-any: true\n");
+      R"toml([roles]
+
+[roles.muddled]
+shm-posix-pattern = "service-*"
+shm-posix-any = true
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -642,7 +813,11 @@ TEST(Ctl, CheckRejectsSharedMemoryPatternAndAnyTogether) {
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatIsNotAnInteger) {
-  const std::string policy = writePolicy("roles:\n  svc:\n    min-seq: 8x\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.svc]
+min-seq = "8x"
+)toml");
 
   // strtoull would read this as 8 and stop. A floor the author did not write
   // is worse than no floor, so the whole value has to be digits.
@@ -652,8 +827,11 @@ TEST(Ctl, CheckRejectsAMinSeqThatIsNotAnInteger) {
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatDoesNotFit) {
-  const std::string policy =
-      writePolicy("roles:\n  svc:\n    min-seq: 99999999999999999999999999\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.svc]
+min-seq = 99999999999999999999999999
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -661,7 +839,11 @@ TEST(Ctl, CheckRejectsAMinSeqThatDoesNotFit) {
 }
 
 TEST(Ctl, CheckRejectsAMinSeqWithNoCertificateToCheckIt) {
-  const std::string policy = writePolicy("roles:\n  svc:\n    min-seq: 5\n");
+  const std::string policy = writePolicy(R"toml([roles]
+
+[roles.svc]
+min-seq = 5
+)toml");
 
   // A sequence number is only trustworthy because a signature covers it, so a
   // floor on a role that verifies nothing would gate on an unsigned number.
@@ -671,7 +853,12 @@ TEST(Ctl, CheckRejectsAMinSeqWithNoCertificateToCheckIt) {
 }
 
 TEST(Ctl, CheckRejectsAPolicyThatDoesNotParse) {
-  const std::string policy = writePolicy("base-role: nosuch\nroles:\n  web:\n");
+  const std::string policy = writePolicy(R"toml(base-role = "nosuch"
+
+[roles]
+
+[roles.web]
+)toml");
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
@@ -726,8 +913,14 @@ TEST(Ctl, ACompiledInPolicyCarriesItsCertificates) {
   // survive the trip through rodata and still base64-decode.
   const CommandResult res = runCtl(
       {"check-compiled"},
-      "certs:\n  corp-ca: |\n    aGVsbG8gd29ybGQ=\n"
-      "roles:\n  web:\n    enforce-binary-certs:\n      - corp-ca\n");
+      R"toml([certs]
+corp-ca = "aGVsbG8gd29ybGQ=\n"
+
+[roles]
+
+[roles.web]
+enforce-binary-certs = ["corp-ca"]
+)toml");
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("the compiled-in policy: 1 role(s), 1 cert(s)"));
 }
@@ -737,7 +930,7 @@ TEST(Ctl, ACompiledInPolicyMayHoldQuotesAndBackslashes) {
   // policy holding either has to arrive as the bytes that were signed.
   const CommandResult res = runCtl(
       {"check-compiled"},
-      "# a comment with \"quotes\" and a backslash \\\nroles:\n  web:\n");
+      "# a comment with \"quotes\" and a backslash \\\n[roles.web]\n");
   ASSERT_EQ(res.status, 0);
   ASSERT(res.outHas("1 role(s)"));
 }
@@ -790,8 +983,13 @@ TEST(Ctl, EnrollRejectsAVarThePolicyDoesNotDeclare) {
 }
 
 TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
-  const std::string policy =
-      writePolicy("vars:\n  - vm_uuid\nroles:\n  role:\n    any: true\n");
+  const std::string policy = writePolicy(R"toml(vars = ["vm_uuid"]
+
+[roles]
+
+[roles.role]
+any = true
+)toml");
   ASSERT_EQ(ctl({"attach", policy}).status, 0);
 
   ASSERT_EQ(
@@ -803,15 +1001,22 @@ TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
 }
 
 TEST(Ctl, EnrollAcceptsSixteenDeclaredVars) {
-  std::string policy = "vars:\n";
+  std::string policy = "vars = [";
   std::vector<std::string> args = {"enroll", "role", "user", selfPid()};
   for (int i = 0; i < 16; ++i) {
     const std::string name = "var" + std::to_string(i);
     const std::string value = "value" + std::to_string(i);
-    policy.append("  - ").append(name).append("\n");
+    if (i != 0) {
+      policy.append(", ");
+    }
+    policy.append("\"").append(name).append("\"");
     args.push_back(name + "=" + value);
   }
-  policy.append("roles:\n  role:\n");
+  policy.append(R"toml(]
+[roles]
+
+[roles.role]
+)toml");
 
   ASSERT_EQ(ctl({"attach", writePolicy(policy)}).status, 0);
   ASSERT_EQ(ctl(std::move(args)).status, 0);

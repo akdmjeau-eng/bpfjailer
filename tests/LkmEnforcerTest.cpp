@@ -28,12 +28,16 @@ using bpfjailer::test::testPins;
 namespace {
 
 constexpr std::string_view kPolicy =
-    "roles:\n"
-    "  unrestricted:\n    lkm-any: true\n"
-    "  denied:\n";
+    R"toml([roles]
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+[roles.unrestricted]
+lkm-any = true
+
+[roles.denied]
+)toml";
+
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(LkmEnforcer::load(testPins(), policy));
 }
@@ -56,7 +60,10 @@ void attach(const std::string& yaml) {
 } // namespace
 
 TEST(LkmEnforcer, LoadAgainstAnUnconfiguredPolicySucceeds) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(!mapPinned("bpfj_role_policies"));
 }

@@ -34,17 +34,24 @@ using bpfjailer::test::testPins;
 
 namespace {
 
-constexpr std::string_view kPolicy =
-    "roles:\n"
-    "  default-deny:\n"
-    "  unrestricted:\n    any-proc: true\n"
-    "  same-pod:\n    proc-pod: true\n"
-    "  reader:\n    proc-roles:\n      - worker\n"
-    "  worker:\n"
-    "  other:\n";
+constexpr std::string_view kPolicy = R"toml([roles.default-deny]
 
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+[roles.unrestricted]
+any-proc = true
+
+[roles.same-pod]
+proc-pod = true
+
+[roles.reader]
+proc-roles = ["worker"]
+
+[roles.worker]
+
+[roles.other]
+)toml";
+
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(ProcEnforcer::load(testPins(), policy));
 }
@@ -191,7 +198,7 @@ void attach(const std::string& yaml) {
 } // namespace
 
 TEST(ProcEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
-  attach("roles:\n  svc:\n");
+  attach("[roles.svc]\n");
   ASSERT(linkPinned("bpfj_proc_file_open"));
 }
 

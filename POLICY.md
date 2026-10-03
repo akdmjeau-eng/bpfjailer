@@ -1,26 +1,27 @@
 # BpfJailer policy reference
 
-A policy is a YAML map containing `roles` and, optionally, `base-role`,
-`certs`, and `vars`. Collections must use indented block syntax; the vendored
-YAML parser does not support flow syntax such as `[a, b]`.
+A policy is a TOML document containing a `roles` table and, optionally,
+`base-role`, `certs`, and `vars`. Role options are keys in each role's table;
+path, socket, and mount maps are nested tables.
 
-```yaml
-base-role: floor
-certs:
-  release: |
-    <PEM or base64 DER certificate>
-vars:
-  - service
-roles:
-  floor:
-    any: true
-  worker:
-    paths:
-      /usr: RDEXEC
-      /etc: RDONLY
-      /srv/$service: RDWR
-      /: NONE
-    kill-pod: true
+```toml
+base-role = "floor"
+vars = ["service"]
+
+[certs]
+release = "<PEM or base64 DER certificate>"
+
+[roles.floor]
+any = true
+
+[roles.worker]
+kill-pod = true
+
+[roles.worker.paths]
+"/usr" = "RDEXEC"
+"/etc" = "RDONLY"
+"/srv/$service" = "RDWR"
+"/" = "NONE"
 ```
 
 `base-role` is applied to every process that exists when the jailer attaches;
@@ -90,8 +91,8 @@ typical allowlist includes `/: false` for pathnames or an abstract catch-all
 denial plus more specific grants. Already-connected, inherited or transferred
 Unix socket descriptors remain capabilities and are not dynamically revoked.
 
-`mount` values are block lists of filesystem type names. An empty list denies
-the destination. Use `'/': []` as the default denial for an allowlist.
+`mount` values are arrays of filesystem type names. An empty array denies the
+destination. Use `"/" = []` as the default denial for an allowlist.
 `move_mount` requires mount permission at the destination and unmount
 permission at the source; `pivot_root` applies the same pair. A standalone
 new-mount-API reconfigure has no destination in its LSM hook and is denied

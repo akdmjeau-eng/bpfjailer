@@ -23,8 +23,8 @@ namespace bpfjailer::test {
 /// @brief A pin config over the bpffs this test has to itself.
 [[nodiscard]] PinConfig testPins();
 
-/// @brief Parse `yaml`, ending the test if it does not parse.
-[[nodiscard]] Policy policyOf(const std::string& yaml);
+/// @brief Parse `toml`, ending the test if it does not parse.
+[[nodiscard]] Policy policyOf(const std::string& toml);
 
 /// @brief Bring the jailer up under testPins(), ending the test if it fails;
 /// every enforcer expects this to have created the maps it adopts.

@@ -175,15 +175,15 @@ void waitForOutput(
       "      missing: " + std::string(needle) + "\n      output was: " + text);
 }
 
-void attachKill(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+void attachKill(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(KillEnforcer::load(testPins(), policy));
 }
 
 void attachFs(const std::string& path) {
   const Policy policy =
-      policyOf("roles:\n  svc:\n    paths:\n      " + path + ": NONE\n");
+      policyOf("[roles.svc.paths]\n\"" + path + "\" = \"NONE\"\n");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 }
@@ -286,7 +286,11 @@ TEST(BpfLog, BpfjlogFailsWhenNoMapsArePinned) {
 }
 
 TEST(BpfLog, BpfjlogPrintsDeniedKillToStdoutAndStderr) {
-  attachKill("roles:\n  svc:\n    kill-roles:\n");
+  attachKill(R"toml([roles]
+
+[roles.svc]
+kill-roles = []
+)toml");
   Child target;
   enroll("svc", ::getpid());
   auto proc = spawnBpfjlog({"--bpffs-path", bpffsPath()});
@@ -308,8 +312,12 @@ TEST(BpfLog, BpfjlogPrintsDeniedKillToStdoutAndStderr) {
 }
 
 TEST(BpfLog, BpfjlogReattachesAfterReplace) {
-  const std::string yaml = "roles:\n  svc:\n    kill-roles:\n";
-  attachKill(yaml);
+  const std::string toml = R"toml([roles]
+
+[roles.svc]
+kill-roles = []
+)toml";
+  attachKill(toml);
   Child before;
   Child after;
   Child beforeActor([pid = before.pid()] { return signalErrno(pid); });
@@ -324,7 +332,7 @@ TEST(BpfLog, BpfjlogReattachesAfterReplace) {
   ASSERT_EQ(beforeActor.run(), EPERM);
   waitForOutput(proc, beforeNeedle, false);
 
-  ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT_OK(replaceJailer(testPins(), policyOf(toml)));
 
   const std::string afterNeedle =
       "Denied signal 0 to pid " + std::to_string(after.pid());

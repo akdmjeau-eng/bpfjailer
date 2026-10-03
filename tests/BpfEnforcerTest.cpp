@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -41,9 +42,9 @@ using bpfjailer::test::waitForMutationJournal;
 
 namespace {
 
-/// @brief Bring up the jailer and the BPF object enforcer over `yaml`.
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+/// @brief Bring up the jailer and the BPF object enforcer over `toml`.
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   loadJailer(policy);
   ASSERT_OK(BpfEnforcer::load(testPins(), policy));
 }
@@ -97,8 +98,8 @@ void attach(const std::string& yaml) {
 
 /// @brief Run replace in a helper process that can still call bpf(2), and
 /// leave its error on the test log if it fails.
-[[nodiscard]] int replaceErrno(const std::string& yaml) {
-  auto replaced = replaceJailer(testPins(), policyOf(yaml));
+[[nodiscard]] int replaceErrno(const std::string& toml) {
+  auto replaced = replaceJailer(testPins(), policyOf(toml));
   if (replaced) {
     return 0;
   }
@@ -134,6 +135,28 @@ void attach(const std::string& yaml) {
   return "";
 }
 
+[[nodiscard]] std::size_t ownerCount(std::string_view role) {
+  auto owners = pins::openPinnedMap(testPins(), "bpfj_bpf_map_owners");
+  if (!owners) {
+    return 0;
+  }
+
+  std::uint64_t curr = 0;
+  std::uint64_t next = 0;
+  const void* from = nullptr;
+  std::size_t count = 0;
+  while (::bpf_map_get_next_key(owners->get(), from, &next) == 0) {
+    struct bpfj_bpf_owner owner{};
+    if (::bpf_map_lookup_elem(owners->get(), &next, &owner) == 0 &&
+        role == owner.role.id) {
+      ++count;
+    }
+    curr = next;
+    from = &curr;
+  }
+  return count;
+}
+
 /// @brief Rewrite an owner's pod as the zero marker produced by v2 migration.
 [[nodiscard]] bool markOwnerLegacy(int id) {
   auto owners = pins::openPinnedMap(testPins(), "bpfj_bpf_map_owners");
@@ -163,7 +186,10 @@ void attach(const std::string& yaml) {
 } // namespace
 
 TEST(BpfEnforcer, LoadPinsItsLinksAndMaps) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(linkPinned("bpfj_bpf_syscall"));
   ASSERT(linkPinned("bpfj_bpf_map_created"));
@@ -184,13 +210,21 @@ TEST(BpfEnforcer, LoadPinsItsLinksAndMaps) {
 TEST(BpfEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
   // A policy configuring no role costs nothing, which is what lets the scheme
   // go on one role at a time.
-  attach("roles:\n  svc:\n  worker:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+
+[roles.worker]
+)toml");
 
   ASSERT(linkPinned("bpfj_bpf_syscall"));
 }
 
 TEST(BpfEnforcer, EnrollIsRefusedWhileAReplaceHasFrozenTheTree) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   auto frozen = pins::openPinnedMap(testPins(), "bpfj_replace_frozen");
   ASSERT(frozen);
@@ -208,7 +242,11 @@ TEST(BpfEnforcer, EnrollIsRefusedWhileAReplaceHasFrozenTheTree) {
 }
 
 TEST(BpfEnforcer, ForkIsRefusedWhileAReplaceHasFrozenTheTree) {
-  attach("roles:\n  svc:\n    bpf-any: true\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+bpf-any = true
+)toml");
 
   auto frozen = pins::openPinnedMap(testPins(), "bpfj_replace_frozen");
   ASSERT(frozen);
@@ -230,7 +268,10 @@ TEST(BpfEnforcer, ForkIsRefusedWhileAReplaceHasFrozenTheTree) {
 }
 
 TEST(BpfEnforcer, ADefaultRoleMayNotCallBpf) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   Child actor(mapCreateErrno);
   enroll("svc", actor.pid());
@@ -239,7 +280,7 @@ TEST(BpfEnforcer, ADefaultRoleMayNotCallBpf) {
 }
 
 TEST(BpfEnforcer, APassiveGenerationDoesNotEnforceOrClaimObjects) {
-  attach("roles:\n  denied:\n");
+  attach("[roles.denied]\n");
 
   Child actor(mapCreateErrno);
   enroll("denied", actor.pid());
@@ -264,7 +305,11 @@ TEST(BpfEnforcer, APassiveGenerationDoesNotEnforceOrClaimObjects) {
 
 TEST(BpfEnforcer, ABpfPodRoleMayCallBpf) {
   // A scoped policy permits the syscall while restricting object access.
-  attach("roles:\n  confined:\n    bpf-pod: true\n");
+  attach(R"toml([roles]
+
+[roles.confined]
+bpf-pod = true
+)toml");
 
   Child actor(mapCreateErrno);
   enroll("confined", actor.pid());
@@ -273,7 +318,11 @@ TEST(BpfEnforcer, ABpfPodRoleMayCallBpf) {
 }
 
 TEST(BpfEnforcer, ARoleThatNamedItselfMayCallBpf) {
-  attach("roles:\n  svc:\n    bpf-roles:\n      - svc\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+bpf-roles = ["svc"]
+)toml");
 
   Child actor(mapCreateErrno);
   enroll("svc", actor.pid());
@@ -282,7 +331,10 @@ TEST(BpfEnforcer, ARoleThatNamedItselfMayCallBpf) {
 }
 
 TEST(BpfEnforcer, AnUnjailedProcessIsNotSubjectToThePolicy) {
-  attach("roles:\n  denied:\n");
+  attach(R"toml([roles]
+
+[roles.denied]
+)toml");
 
   // Never enrolled, so no policy applies: the denial above is about the role,
   // not about the enforcer being loaded.
@@ -292,7 +344,11 @@ TEST(BpfEnforcer, AnUnjailedProcessIsNotSubjectToThePolicy) {
 }
 
 TEST(BpfEnforcer, AMapIsOpenableByTheRoleThatOwnsIt) {
-  attach("roles:\n  owner:\n    bpf-roles:\n      - owner\n");
+  attach(R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -309,8 +365,14 @@ TEST(BpfEnforcer, AMapIsOpenableByTheRoleThatOwnsIt) {
 
 TEST(BpfEnforcer, ALegacyOwnerWithoutAPodKeepsSameRoleAccess) {
   attach(
-      "roles:\n  owner:\n    bpf-pod: true\n"
-      "  snoop:\n    bpf-pod: true\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-pod = true
+
+[roles.snoop]
+bpf-pod = true
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -332,8 +394,14 @@ TEST(BpfEnforcer, ALegacyOwnerWithoutAPodKeepsSameRoleAccess) {
 
 TEST(BpfEnforcer, AMapIsNotOpenableByARoleTheOwnerDidNotName) {
   attach(
-      "roles:\n  owner:\n    bpf-roles:\n      - owner\n"
-      "  snoop:\n    bpf-roles:\n      - snoop\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+
+[roles.snoop]
+bpf-roles = ["snoop"]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -347,7 +415,13 @@ TEST(BpfEnforcer, AMapIsNotOpenableByARoleTheOwnerDidNotName) {
 }
 
 TEST(BpfEnforcer, ADefaultDenyRoleReachesNothingThatIsOwned) {
-  attach("roles:\n  owner:\n    bpf-roles:\n      - owner\n  bystander:\n");
+  attach(R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+
+[roles.bystander]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -364,8 +438,14 @@ TEST(BpfEnforcer, ADefaultDenyRoleReachesNothingThatIsOwned) {
 
 TEST(BpfEnforcer, AnAnyRoleMayOpenAnUnownedMap) {
   attach(
-      "roles:\n  owner:\n    bpf-roles:\n      - owner\n"
-      "  snoop:\n    bpf-any: true\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+
+[roles.snoop]
+bpf-any = true
+)toml");
 
   // Created by a process in no pod, so nothing recorded an owner and the gate
   // has nothing to check it against.
@@ -380,7 +460,10 @@ TEST(BpfEnforcer, AnAnyRoleMayOpenAnUnownedMap) {
 }
 
 TEST(BpfEnforcer, ARoleWithNoBpfMayNotCallBpf) {
-  attach("roles:\n  denied:\n");
+  attach(R"toml([roles]
+
+[roles.denied]
+)toml");
 
   Child actor(mapCreateErrno);
   enroll("denied", actor.pid());
@@ -389,7 +472,11 @@ TEST(BpfEnforcer, ARoleWithNoBpfMayNotCallBpf) {
 }
 
 TEST(BpfEnforcer, BpfPodDoesNotReachADifferentPodInTheSameRole) {
-  attach("roles:\n  confined:\n    bpf-pod: true\n");
+  attach(R"toml([roles]
+
+[roles.confined]
+bpf-pod = true
+)toml");
 
   Child creator(createOwnedMap);
   enroll("confined", creator.pid());
@@ -406,8 +493,14 @@ TEST(BpfEnforcer, BpfPodDoesNotReachADifferentPodInTheSameRole) {
 
 TEST(BpfEnforcer, ARoleThatWroteAnEmptyListReachesNothingElse) {
   attach(
-      "roles:\n  owner:\n    bpf-roles:\n"
-      "  confined:\n    bpf-roles:\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = []
+
+[roles.confined]
+bpf-roles = []
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -422,8 +515,13 @@ TEST(BpfEnforcer, ARoleThatWroteAnEmptyListReachesNothingElse) {
 
 TEST(BpfEnforcer, BpfRolesDoesNotImplicitlyNameTheSameRole) {
   attach(
-      "roles:\n  owner:\n    bpf-roles:\n      - other\n"
-      "  other:\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["other"]
+
+[roles.other]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -440,8 +538,13 @@ TEST(BpfEnforcer, BpfRolesDoesNotImplicitlyNameTheSameRole) {
 
 TEST(BpfEnforcer, NoBpfOnOneRoleDeniesATaskHoldingAPermittedRoleToo) {
   attach(
-      "roles:\n  allowed:\n    bpf-roles:\n"
-      "  denied:\n");
+      R"toml([roles]
+
+[roles.allowed]
+bpf-roles = []
+
+[roles.denied]
+)toml");
 
   // A denial a task can shed by picking up another role would deny nothing,
   // least of all under a base role.
@@ -459,9 +562,17 @@ TEST(BpfEnforcer, NoBpfOnOneRoleDeniesATaskHoldingAPermittedRoleToo) {
 
 TEST(BpfEnforcer, AnUntrackedAnyBaseLeavesOwnershipToTheRoleAboveIt) {
   attach(
-      "base-role: floor\nroles:\n"
-      "  floor:\n    bpf-any: true\n    untracked-bpf: true\n"
-      "  bpfjailer:\n    bpf-pod: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+bpf-any = true
+untracked-bpf = true
+
+[roles.bpfjailer]
+bpf-pod = true
+)toml");
 
   // [floor, bpfjailer]: the base role came from the attach above, the second
   // from the enrollment, exactly as an exec would append it.
@@ -482,8 +593,17 @@ TEST(BpfEnforcer, AConfiguredBaseRoleDoesNotTakeOwnershipFromTheRoleAboveIt) {
   // examples/signed-attach, or `floor` would also have to agree to it opening
   // what it just created.
   attach(
-      "base-role: floor\nroles:\n  floor:\n    bpf-roles:\n"
-      "  bpfjailer:\n    override-stacked: true\n    bpf-roles:\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+bpf-roles = []
+
+[roles.bpfjailer]
+override-stacked = true
+bpf-roles = []
+)toml");
 
   Child creator(createOwnedMap);
   enroll("bpfjailer", creator.pid());
@@ -508,10 +628,16 @@ TEST(BpfEnforcer, AnUnconfiguredBaseRoleLeavesWhatPredatesTheJailUnowned) {
   ASSERT(id > 0);
 
   attach(
-      "base-role: floor\n"
-      "roles:\n"
-      "  floor:\n"
-      "  upgrade:\n    override-stacked: true\n    bpf-any: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+
+[roles.upgrade]
+override-stacked = true
+bpf-any = true
+)toml");
 
   Child actor([id] { return openMapErrno(id); });
   enroll("upgrade", actor.pid());
@@ -528,10 +654,17 @@ TEST(BpfEnforcer, AConfiguredBaseRoleClaimsWhatPredatesTheJail) {
   // the walk records `floor` against every object on the host -- and
   // `upgrade`, which is in `floor` too, reaches none of them.
   attach(
-      "base-role: floor\n"
-      "roles:\n"
-      "  floor:\n    bpf-roles:\n"
-      "  upgrade:\n    override-stacked: true\n    bpf-pod: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+bpf-roles = []
+
+[roles.upgrade]
+override-stacked = true
+bpf-pod = true
+)toml");
 
   Child actor([id] { return openMapErrno(id); });
   enroll("upgrade", actor.pid());
@@ -547,10 +680,18 @@ TEST(BpfEnforcer, UntrackedBpfLeavesWhatPredatesTheJailUnowned) {
   // The same policy again with the exemption the example carries: `floor` is
   // still configured and restricted, it just does not come to own the host.
   attach(
-      "base-role: floor\n"
-      "roles:\n"
-      "  floor:\n    bpf-roles:\n    untracked-bpf: true\n"
-      "  upgrade:\n    override-stacked: true\n    bpf-any: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+bpf-roles = []
+untracked-bpf = true
+
+[roles.upgrade]
+override-stacked = true
+bpf-any = true
+)toml");
 
   Child actor([id] { return openMapErrno(id); });
   enroll("upgrade", actor.pid());
@@ -562,9 +703,15 @@ TEST(BpfEnforcer, UntrackedBpfLeavesWhatTheRoleCreatesUnowned) {
   // The create hook rather than the seeding walk, or a base role would come
   // to own the host a few seconds later instead.
   attach(
-      "roles:\n"
-      "  maker:\n    bpf-roles:\n    untracked-bpf: true\n"
-      "  other:\n    bpf-any: true\n");
+      R"toml([roles]
+
+[roles.maker]
+bpf-roles = []
+untracked-bpf = true
+
+[roles.other]
+bpf-any = true
+)toml");
 
   Child creator(createOwnedMap);
   enroll("maker", creator.pid());
@@ -581,9 +728,15 @@ TEST(BpfEnforcer, AnUntrackedRoleIsStillGrantedWhatItsListNames) {
   // What separates it from leaving BPF unspecified: default deny reaches
   // nothing, while this role still holds the grant it asked for.
   attach(
-      "roles:\n"
-      "  owner:\n    bpf-roles:\n"
-      "  reader:\n    bpf-roles:\n      - owner\n    untracked-bpf: true\n");
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = []
+
+[roles.reader]
+bpf-roles = ["owner"]
+untracked-bpf = true
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -600,10 +753,18 @@ TEST(BpfEnforcer, AnOverrideRoleStopsTheWalkBeforeTheRolesUnderIt) {
   // `strict` reaches only what it owns, but the walk evaluates the `reader`
   // stacked on top, sees override-stacked, and never reaches that denial.
   attach(
-      "roles:\n"
-      "  strict:\n    bpf-roles:\n"
-      "  owner:\n    bpf-roles:\n"
-      "  reader:\n    override-stacked: true\n    bpf-roles:\n      - owner\n");
+      R"toml([roles]
+
+[roles.strict]
+bpf-roles = []
+
+[roles.owner]
+bpf-roles = []
+
+[roles.reader]
+override-stacked = true
+bpf-roles = ["owner"]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -621,10 +782,17 @@ TEST(BpfEnforcer, WithoutOverrideTheRoleUnderneathStillDenies) {
   // The same policy with the flag dropped, so `strict` -- which every
   // configured role has to satisfy -- denies after all.
   attach(
-      "roles:\n"
-      "  strict:\n    bpf-roles:\n"
-      "  owner:\n    bpf-roles:\n"
-      "  reader:\n    bpf-roles:\n      - owner\n");
+      R"toml([roles]
+
+[roles.strict]
+bpf-roles = []
+
+[roles.owner]
+bpf-roles = []
+
+[roles.reader]
+bpf-roles = ["owner"]
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -643,7 +811,16 @@ TEST(BpfEnforcer, AConfiguredBaseRoleHasToAgreeToARoleAboveItsOwnObjects) {
   // without override-stacked cannot open even the map it just created, whose
   // fd is checked like any other.
   attach(
-      "base-role: floor\nroles:\n  floor:\n    bpf-roles:\n  owner:\n    bpf-roles:\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+bpf-roles = []
+
+[roles.owner]
+bpf-roles = []
+)toml");
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -654,10 +831,15 @@ TEST(BpfEnforcer, AConfiguredBaseRoleHasToAgreeToARoleAboveItsOwnObjects) {
 TEST(BpfEnforcer, ADefaultDenyBaseRoleBlocksTheRoleAboveIt) {
   // `floor` wrote no BPF option, so it denies before `reader` can grant.
   attach(
-      "base-role: floor\n"
-      "roles:\n"
-      "  floor:\n"
-      "  reader:\n    bpf-any: true\n");
+      R"toml(base-role = "floor"
+
+[roles]
+
+[roles.floor]
+
+[roles.reader]
+bpf-any = true
+)toml");
 
   Child actor(mapCreateErrno);
   enroll("reader", actor.pid());
@@ -665,8 +847,12 @@ TEST(BpfEnforcer, ADefaultDenyBaseRoleBlocksTheRoleAboveIt) {
 }
 
 TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
-  const std::string yaml = "roles:\n  owner:\n    bpf-roles:\n      - owner\n";
-  attach(yaml);
+  const std::string toml = R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+)toml";
+  attach(toml);
 
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
@@ -674,7 +860,7 @@ TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
   ASSERT(id > 0);
   ASSERT_EQ(ownerOf(id), std::string("owner"));
 
-  ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT_OK(replaceJailer(testPins(), policyOf(toml)));
 
   // The new tree cannot rebuild this: its seeding walk only reaches objects
   // some task holds an fd to, and a pinned object is held by its pin, so
@@ -683,9 +869,13 @@ TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
 }
 
 TEST(BpfEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
-  const std::string yaml = "roles:\n  owner:\n    bpf-roles:\n      - owner\n";
-  attach(yaml);
-  Child replacer([yaml] { return replaceErrno(yaml); });
+  const std::string toml = R"toml([roles]
+
+[roles.owner]
+bpf-any = true
+)toml";
+  attach(toml);
+  Child replacer([toml] { return replaceErrno(toml); });
   auto journalArena = bpfjailer::PodArena::open(testPins());
   ASSERT(journalArena);
   enroll("owner", ::getpid());
@@ -727,18 +917,29 @@ TEST(BpfEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   ASSERT(removedFd >= 0);
   ASSERT(keptId > 0);
   ASSERT(removedId > 0);
-  ASSERT_EQ(ownerOf(keptId), std::string("owner"));
-  ASSERT_EQ(ownerOf(removedId), std::string());
+  // Object ids are filled lazily by an open hook. A replacement can cut over
+  // between creation and that hook, so inspect the owner records directly.
+  using namespace std::chrono_literals;
+  const auto ownerDeadline = std::chrono::steady_clock::now() + 2s;
+  while (ownerCount("owner") != 1 &&
+         std::chrono::steady_clock::now() < ownerDeadline) {
+    std::this_thread::sleep_for(1ms);
+  }
+  ASSERT_EQ(ownerCount("owner"), std::size_t{1});
   ::close(keptFd);
 }
 
 TEST(BpfEnforcer, AReplaceKeepsANonLeaderThreadJailed) {
-  const std::string yaml =
-      "roles:\n"
-      "  owner:\n    bpf-roles:\n      - owner\n"
-      "  denied:\n";
-  attach(yaml);
-  Child replacer([yaml] { return replaceErrno(yaml); });
+  const std::string toml =
+      R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+
+[roles.denied]
+)toml";
+  attach(toml);
+  Child replacer([toml] { return replaceErrno(toml); });
   Child creator(createOwnedMap);
   enroll("owner", creator.pid());
   const int ownedMap = creator.run();
@@ -789,8 +990,12 @@ TEST(BpfEnforcer, AReplaceKeepsANonLeaderThreadJailed) {
 }
 
 TEST(BpfEnforcer, AReplaceIsRefusedWhenTheOwnerLayoutIsUnknown) {
-  const std::string yaml = "roles:\n  owner:\n    bpf-roles:\n      - owner\n";
-  attach(yaml);
+  const std::string toml = R"toml([roles]
+
+[roles.owner]
+bpf-roles = ["owner"]
+)toml";
+  attach(toml);
 
   ASSERT(!mapPinned("bpfj_bpf_owner_version"));
 
@@ -803,12 +1008,15 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheOwnerLayoutIsUnknown) {
   arena->ctrl()->runtime_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
       << BPFJ_BPF_OWNER_VERSION_SHIFT;
 
-  ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT(!replaceJailer(testPins(), policyOf(toml)));
 }
 
 TEST(BpfEnforcer, AReplaceIsRefusedWhenTheMembershipLayoutIsUnknown) {
-  const std::string yaml = "roles:\n  carried:\n";
-  attach(yaml);
+  const std::string toml = R"toml([roles]
+
+[roles.carried]
+)toml";
+  attach(toml);
 
   auto arena = PodArena::open(testPins());
   ASSERT(arena);
@@ -817,5 +1025,5 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheMembershipLayoutIsUnknown) {
   arena->ctrl()->runtime_versions |= (BPFJ_MEMBERSHIP_VERSION + 1)
       << BPFJ_MEMBERSHIP_VERSION_SHIFT;
 
-  ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
+  ASSERT(!replaceJailer(testPins(), policyOf(toml)));
 }

@@ -58,17 +58,12 @@ sudo chmod 600 "$KEY"
 sudo openssl req -new -x509 -key "$KEY" -out "$CERT" -outform der -days 365 \
   -subj "/CN=bpfj signed-attach example"
 
-# Indented to sit under the `|` block the template opens. The policy parser
-# skips whitespace when decoding, so where the line breaks fall does not
-# matter, only that every line is indented into the block.
+# TOML carries the base64 certificate as one quoted string.
 echo "Writing $POLICY..."
-cert_b64=$(sudo base64 -w0 "$CERT" | fold -w 64 | sed 's/^/    /')
-# The certificate placeholder is matched as a whole line so the template is
-# free to name it in comments, and the sequence placeholder is substituted only
-# where it appears in the min-seq line.
+cert_b64=$(sudo base64 -w0 "$CERT")
+# Both placeholders occur only in their TOML values.
 sudo awk -v cert="$cert_b64" -v seq="$CURRENT_SEQ" '
-  $0 == "@CERT@" { print cert; next }
-  { sub("@CURRENT_SEQ@", seq); print }
+  { sub("@CERT@", cert); sub("@CURRENT_SEQ@", seq); print }
 ' \
   "$TEMPLATE" | sudo tee "$POLICY" >/dev/null
 

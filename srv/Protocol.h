@@ -12,19 +12,19 @@
 #include "bpfj/err/Error.h"
 
 // The bpfjsrv wire format, shared by Client.h and the server. A request is one
-// YAML document and a reply is one more, each in its own SOCK_SEQPACKET
+// TOML document and a reply is one more, each in its own SOCK_SEQPACKET
 // datagram, so neither side has to frame or to read to EOF.
 //
-//   role: worker
-//   user-id: alice
-//   vars:
-//     - vm_uuid: 550e8400-e29b-41d4-a716-446655440000
+//   role = "worker"
+//   user-id = "alice"
+//   vars = [{ name = "vm_uuid", value = "550e8400-e29b-41d4-a716-446655440000"
+//   }]
 //
-//   ok: true
-//   uuid: 0f9d4c22-6a1e-4f0b-9c3a-1b2c3d4e5f60
+//   ok = true
+//   uuid = "0f9d4c22-6a1e-4f0b-9c3a-1b2c3d4e5f60"
 //
-//   ok: false
-//   error: no variable named tenant is published in this jail
+//   ok = false
+//   error = "no variable named tenant is published in this jail"
 //
 // No pid appears anywhere: the server takes it from the connection's
 // SO_PEERCRED, so a client can only ever enroll itself. Header-only and free
@@ -67,10 +67,8 @@ struct EnrollResponse {
   std::string error;
 };
 
-/// @brief Whether `value` can travel as a bare YAML scalar. The protocol
-/// carries identifiers rather than free text, so it restricts every field to a
-/// charset with no YAML metacharacter instead of quoting and escaping.
-[[nodiscard]] inline bool isBareScalar(std::string_view value) noexcept {
+/// @brief Whether `value` is an identifier this protocol carries.
+[[nodiscard]] inline bool isProtocolScalar(std::string_view value) noexcept {
   if (value.empty()) {
     return false;
   }
@@ -90,18 +88,18 @@ struct EnrollResponse {
 /// @brief Reject a request the wire format cannot carry.
 [[nodiscard]] inline Expected<> validateRequest(
     const EnrollRequest& req) noexcept {
-  if (!isBareScalar(req.role)) {
+  if (!isProtocolScalar(req.role)) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument,
-        "role must be a non-empty bare scalar, got '",
+        "role must be a non-empty protocol scalar, got '",
         req.role,
         "'"));
   }
 
-  if (!isBareScalar(req.userId)) {
+  if (!isProtocolScalar(req.userId)) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument,
-        "user-id must be a non-empty bare scalar, got '",
+        "user-id must be a non-empty protocol scalar, got '",
         req.userId,
         "'"));
   }
@@ -117,20 +115,20 @@ struct EnrollResponse {
 
   for (std::size_t i = 0; i < req.vars.size(); ++i) {
     const auto& [name, value] = req.vars[i];
-    if (!isBareScalar(name)) {
+    if (!isProtocolScalar(name)) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
-          "variable name must be a non-empty bare scalar, got '",
+          "variable name must be a non-empty protocol scalar, got '",
           name,
           "'"));
     }
 
-    if (!isBareScalar(value)) {
+    if (!isProtocolScalar(value)) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
           "value of variable ",
           name,
-          " must be a non-empty bare scalar, got '",
+          " must be a non-empty protocol scalar, got '",
           value,
           "'"));
     }
@@ -146,6 +144,44 @@ struct EnrollResponse {
   return unit;
 }
 
+/// @brief Quote a string for a TOML basic string.
+[[nodiscard]] inline std::string quoteToml(std::string_view value) noexcept {
+  std::string out{"\""};
+  out.reserve(value.size() + 2);
+  for (const char c : value) {
+    if (c == '\\' || c == '\"') {
+      out.push_back('\\');
+    }
+    out.push_back(c);
+  }
+  out.push_back('\"');
+  return out;
+}
+
+/// @brief Read the subset of TOML basic strings emitted by quoteToml().
+[[nodiscard]] inline Expected<std::string> unquoteToml(
+    std::string_view value) noexcept {
+  if (value.size() < 2 || value.front() != '\"' || value.back() != '\"') {
+    return makeUnexpected(makeError(
+        std::errc::protocol_error, "reply field is not a TOML string"));
+  }
+
+  std::string out;
+  out.reserve(value.size() - 2);
+  for (std::size_t i = 1; i + 1 < value.size(); ++i) {
+    char c = value[i];
+    if (c == '\\') {
+      if (++i + 1 >= value.size() || (value[i] != '\\' && value[i] != '\"')) {
+        return makeUnexpected(makeError(
+            std::errc::protocol_error, "reply has an invalid TOML escape"));
+      }
+      c = value[i];
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
 /// @brief Render `req` as the request document.
 [[nodiscard]] inline Expected<std::string> encodeRequest(
     const EnrollRequest& req) noexcept {
@@ -154,13 +190,25 @@ struct EnrollResponse {
   }
 
   std::string out;
-  out.append(kRoleField).append(": ").append(req.role).append("\n");
-  out.append(kUserIdField).append(": ").append(req.userId).append("\n");
+  out.append(kRoleField).append(" = ").append(quoteToml(req.role)).append("\n");
+  out.append(kUserIdField)
+      .append(" = ")
+      .append(quoteToml(req.userId))
+      .append("\n");
   if (!req.vars.empty()) {
-    out.append(kVarsField).append(":\n");
-    for (const auto& [name, value] : req.vars) {
-      out.append("  - ").append(name).append(": ").append(value).append("\n");
+    out.append(kVarsField).append(" = [");
+    for (std::size_t i = 0; i < req.vars.size(); ++i) {
+      const auto& [name, value] = req.vars[i];
+      if (i != 0) {
+        out.append(", ");
+      }
+      out.append("{ name = ")
+          .append(quoteToml(name))
+          .append(", value = ")
+          .append(quoteToml(value))
+          .append(" }");
     }
+    out.append("]\n");
   }
 
   if (out.size() > kMaxMessageBytes) {
@@ -177,7 +225,7 @@ struct EnrollResponse {
 }
 
 /// @brief Flatten `message` to one line of printable ASCII, the one field
-/// neither side controls the shape of, so the reply stays a bare scalar.
+/// neither side controls the shape of.
 [[nodiscard]] inline std::string sanitizeMessage(
     std::string_view message) noexcept {
   // Long enough for the errors this tree composes, short enough that a reply
@@ -196,8 +244,8 @@ struct EnrollResponse {
 /// @brief Render the reply for a pod that was created.
 [[nodiscard]] inline std::string encodeOk(std::string_view uuid) noexcept {
   std::string out;
-  out.append(kOkField).append(": true\n");
-  out.append(kUuidField).append(": ").append(uuid).append("\n");
+  out.append(kOkField).append(" = true\n");
+  out.append(kUuidField).append(" = ").append(quoteToml(uuid)).append("\n");
   return out;
 }
 
@@ -205,13 +253,15 @@ struct EnrollResponse {
 [[nodiscard]] inline std::string encodeError(
     std::string_view message) noexcept {
   std::string out;
-  out.append(kOkField).append(": false\n");
-  out.append(kErrorField).append(": ").append(sanitizeMessage(message));
+  out.append(kOkField).append(" = false\n");
+  out.append(kErrorField)
+      .append(" = ")
+      .append(quoteToml(sanitizeMessage(message)));
   out.append("\n");
   return out;
 }
 
-/// @brief Read a reply document, hand-parsed rather than handed to the YAML
+/// @brief Read a reply document, hand-parsed rather than handed to the TOML
 /// parser so a consumer of Client.h needs nothing but the header.
 [[nodiscard]] inline Expected<EnrollResponse> decodeResponse(
     std::string_view text) noexcept {
@@ -224,20 +274,32 @@ struct EnrollResponse {
     text = eol == std::string_view::npos ? std::string_view{}
                                          : text.substr(eol + 1);
 
-    const auto sep = line.find(": ");
+    const auto sep = line.find(" = ");
     if (sep == std::string_view::npos) {
       continue;
     }
 
     const std::string_view key = line.substr(0, sep);
-    const std::string_view value = line.substr(sep + 2);
+    const std::string_view value = line.substr(sep + 3);
     if (key == kOkField) {
+      if (value != "true" && value != "false") {
+        return makeUnexpected(makeError(
+            std::errc::protocol_error, "reply has a non-boolean 'ok' field"));
+      }
       out.ok = value == "true";
       sawOk = true;
     } else if (key == kUuidField) {
-      out.uuid = std::string(value);
+      auto decoded = unquoteToml(value);
+      if (!decoded) {
+        return makeUnexpected(decoded.error());
+      }
+      out.uuid = std::move(*decoded);
     } else if (key == kErrorField) {
-      out.error = std::string(value);
+      auto decoded = unquoteToml(value);
+      if (!decoded) {
+        return makeUnexpected(decoded.error());
+      }
+      out.error = std::move(*decoded);
     }
   }
 

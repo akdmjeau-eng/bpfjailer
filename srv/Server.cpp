@@ -16,7 +16,7 @@
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/UnprivRoles.h"
 #include "bpfj/var/bpf/types_var.h"
-#include "yaml/Yaml.h"
+#include "toml/toml.hpp"
 
 namespace bpfjailer::srv {
 
@@ -27,27 +27,28 @@ static_assert(
     "the protocol's variable ceiling has drifted from the pod's");
 
 [[nodiscard]] Expected<std::string> scalarField(
-    Yaml::Node& root,
+    const toml::table& root,
     std::string_view name) noexcept {
-  Yaml::Node& node = root[std::string(name)];
-  if (!node.IsScalar()) {
+  const auto value = root[name].value<std::string>();
+  if (!value) {
     return makeUnexpected(
         makeError(std::errc::invalid_argument, "missing '", name, "' field"));
   }
 
-  return node.As<std::string>();
+  return *value;
 }
 
 [[nodiscard]] Expected<std::vector<std::pair<std::string, std::string>>>
-varsField(Yaml::Node& root) noexcept {
+varsField(const toml::table& root) noexcept {
   std::vector<std::pair<std::string, std::string>> vars;
 
-  Yaml::Node& node = root[std::string(kVarsField)];
-  if (node.IsNone()) {
+  const toml::node* node = root.get(kVarsField);
+  if (node == nullptr) {
     return vars;
   }
 
-  if (!node.IsSequence()) {
+  const toml::array* entries = node->as_array();
+  if (entries == nullptr) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument,
         "'",
@@ -55,27 +56,27 @@ varsField(Yaml::Node& root) noexcept {
         "' must be a list of key/value pairs"));
   }
 
-  for (auto item = node.Begin(); item != node.End(); item++) {
-    Yaml::Node& entry = (*item).second;
-    if (!entry.IsMap() || entry.Size() != 1) {
+  for (const toml::node& entry : *entries) {
+    const toml::table* fields = entry.as_table();
+    if (fields == nullptr || fields->size() != 2) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
           "each entry of '",
           kVarsField,
-          "' must be one NAME: VALUE pair"));
+          "' must contain only string 'name' and 'value' fields"));
     }
 
-    auto pair = entry.Begin();
-    Yaml::Node& value = (*pair).second;
-    if (!value.IsScalar()) {
+    const auto name = (*fields)["name"].value<std::string>();
+    const auto value = (*fields)["value"].value<std::string>();
+    if (!name || !value) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
-          "variable ",
-          (*pair).first,
-          " has no scalar value"));
+          "each entry of '",
+          kVarsField,
+          "' must contain string 'name' and 'value' fields"));
     }
 
-    vars.emplace_back((*pair).first, value.As<std::string>());
+    vars.emplace_back(*name, *value);
   }
 
   return vars;
@@ -150,49 +151,46 @@ varsField(Yaml::Node& root) noexcept {
 } // namespace
 
 Expected<EnrollRequest> decodeRequest(std::string_view text) noexcept {
-  Yaml::Node root;
   try {
-    Yaml::Parse(root, std::string(text));
-  } catch (const Yaml::Exception& e) {
-    // mini-yaml reports by throwing, and this is the one place in the tree
-    // reached by input from off the host. Everything past here is Expected.
+    const toml::table root = toml::parse(text);
+
+    auto role = scalarField(root, kRoleField);
+    if (!role) {
+      return makeUnexpected(role.error());
+    }
+
+    auto userId = scalarField(root, kUserIdField);
+    if (!userId) {
+      return makeUnexpected(userId.error());
+    }
+
+    auto vars = varsField(root);
+    if (!vars) {
+      return makeUnexpected(vars.error());
+    }
+
+    EnrollRequest req{
+        .role = std::move(*role),
+        .userId = std::move(*userId),
+        .vars = std::move(*vars),
+    };
+
+    // Validated on the way in as well as out: a request that did not come from
+    // Client.h is exactly the one worth checking.
+    if (auto res = validateRequest(req); !res) {
+      return makeUnexpected(res.error());
+    }
+
+    return req;
+  } catch (const toml::parse_error& e) {
     return makeUnexpected(
-        makeError(std::errc::invalid_argument, "malformed YAML: ", e.what()));
+        makeError(std::errc::invalid_argument, "malformed TOML: ", e.what()));
   } catch (const std::exception& e) {
     return makeUnexpected(makeError(
         std::errc::invalid_argument,
         "could not parse the request: ",
         e.what()));
   }
-
-  auto role = scalarField(root, kRoleField);
-  if (!role) {
-    return makeUnexpected(role.error());
-  }
-
-  auto userId = scalarField(root, kUserIdField);
-  if (!userId) {
-    return makeUnexpected(userId.error());
-  }
-
-  auto vars = varsField(root);
-  if (!vars) {
-    return makeUnexpected(vars.error());
-  }
-
-  EnrollRequest req{
-      .role = std::move(*role),
-      .userId = std::move(*userId),
-      .vars = std::move(*vars),
-  };
-
-  // Validated on the way in as well as out: a request that did not come from
-  // Client.h is exactly the one worth checking.
-  if (auto res = validateRequest(req); !res) {
-    return makeUnexpected(res.error());
-  }
-
-  return req;
 }
 
 Expected<> authorizeEnroll(

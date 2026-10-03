@@ -20,9 +20,9 @@ BPFJCTL="$BUILD/bpfjctl"
 BPFJSRV="$BUILD/bpfjsrv"
 BPFJCLIENT="$BUILD/bpfjclient"
 
-POLICY="$here/policy.yaml"
+POLICY="$here/policy.toml"
 
-# The role in policy.yaml, and the only one this example enrolls into.
+# The role in policy.toml, and the only one this example enrolls into.
 ROLE=sandbox
 
 # Matches kDefaultSocketPath in srv/Protocol.h, so bpfjclient needs no

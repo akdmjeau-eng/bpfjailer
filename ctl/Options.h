@@ -39,7 +39,7 @@ inline constexpr std::string_view kCompiledSource = "the compiled-in policy";
 
 /// @brief Parse the policy compiled into this binary, which unlike one read
 /// from a path falls under the fs-verity digest the signature is taken over --
-/// signing a command that names /etc/bpfj/policy.yaml fixes the path and not
+/// signing a command that names /etc/bpfj/policy.toml fixes the path and not
 /// its contents. The `-compiled` commands take no path, so an empty `builtin`
 /// is an error rather than a fallback to one.
 [[nodiscard]] Expected<Policy> compiledPolicy(

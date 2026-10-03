@@ -207,7 +207,6 @@ VMLINUX  := $(BUILD)/bpf/vmlinux/vmlinux.h
 # Everything but the entry point. bpfjctl and bpfjcmd are the same program
 # either side of where its arguments come from, so only main() differs.
 COMMON_SRCS := \
-	yaml/Yaml.cpp \
 	bpfj/lib/Base64.cpp \
 	bpfj/lib/Fd.cpp \
 	bpfj/lib/Privileges.cpp \
@@ -290,6 +289,8 @@ TEST_SRCS := \
 	tests/PtraceEnforcerTest.cpp \
 	tests/ProcEnforcerTest.cpp \
 	tests/PolicyTest.cpp \
+	tests/ProtocolTest.cpp \
+	srv/Server.cpp \
 	tests/VerityEnforcerTest.cpp
 
 SRCS := $(COMMON_SRCS) $(CTL_SRCS) $(CMD_SRCS) $(SRV_SRCS) $(LOG_SRCS) $(CLIENT_SRCS) \
@@ -332,22 +333,22 @@ LIBARENA_CONFIG := $(BUILD)/.libarena-config
 # invalidating the signature. They are still plainly readable in the binary --
 # this buys integrity, not secrecy.
 #
-#   make cmd CMD_ARGS="attach /etc/bpfj/policy.yaml" SIGNING_KEY=... SIGNING_CERT=...
+#   make cmd CMD_ARGS="attach /etc/bpfj/policy.toml" SIGNING_KEY=... SIGNING_CERT=...
 #
 # CMD_ARGS splits on whitespace, which cannot express an argument containing
 # one. CMD_ARGV_RAW takes a C initialiser list instead for that case:
 #
-#   make cmd CMD_ARGV_RAW='"attach", "/etc/bpfj/policy file.yaml"' ...
+#   make cmd CMD_ARGV_RAW='"attach", "/etc/bpfj/policy file.toml"' ...
 #
 # CMD_POLICY compiles a policy file in alongside them, and closes what the
-# arguments alone leave open: signing `attach /etc/bpfj/policy.yaml` fixes
+# arguments alone leave open: signing `attach /etc/bpfj/policy.toml` fixes
 # which path is read and not what is in it, so whoever can write that file
 # rewrites the policy -- the `certs` trust store included -- against a
 # signature that still verifies. A policy in rodata cannot be changed without
 # invalidating the digest. Readable with `strings` either way; this is
 # integrity, not secrecy.
 #
-#   make cmd CMD_ARGS=attach-compiled CMD_POLICY=etc/policy.yaml SIGNING_KEY=...
+#   make cmd CMD_ARGS=attach-compiled CMD_POLICY=etc/policy.toml SIGNING_KEY=...
 #
 # The command has to be one of the -compiled ones, which take no path and read
 # what was built in. They are separate commands rather than a mode of `attach`
@@ -360,7 +361,7 @@ LIBARENA_CONFIG := $(BUILD)/.libarena-config
 # enforcer only checks a binary whose role names `enforce-binary-certs`, so
 # an unclaimed binary is not checked at all.
 #
-#   make cmd CMD_ARGS=replace-compiled CMD_POLICY=etc/policy.yaml \
+#   make cmd CMD_ARGS=replace-compiled CMD_POLICY=etc/policy.toml \
 #            CMD_ROLE=bpfjailer SIGNING_KEY=... SIGNING_CERT=...
 
 CMD_SEQ      ?=
@@ -691,7 +692,7 @@ signed:
 cmd:
 	@if [ -z "$(CMD_ARGS)$(CMD_ARGV_RAW)" ]; then \
 		echo "cmd: set CMD_ARGS to the command to build in, e.g." >&2; \
-		echo "       make cmd CMD_ARGS=\"attach /etc/bpfj/policy.yaml\" ..." >&2; \
+		echo "       make cmd CMD_ARGS=\"attach /etc/bpfj/policy.toml\" ..." >&2; \
 		echo "     a bpfjcmd with no command in it would do nothing but fail" >&2; \
 		exit 1; \
 	fi

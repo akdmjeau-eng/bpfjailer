@@ -54,9 +54,9 @@ namespace {
 /// shows up after exec succeeds and the loader maps it.
 constexpr int kRanAndFailed = -1;
 
-/// @brief Bring up the jailer and the fs-verity enforcer over `yaml`.
-void attach(const std::string& yaml) {
-  const Policy policy = policyOf(yaml);
+/// @brief Bring up the jailer and the fs-verity enforcer over `toml`.
+void attach(const std::string& toml) {
+  const Policy policy = policyOf(toml);
   auto scratchMaps = loadJailerWithScratchMaps(policy);
   ASSERT_OK(VerityEnforcer::load(testPins(), policy, scratchMaps));
 }
@@ -275,7 +275,7 @@ class Fixture {
     trust(path("libc.so.6"));
   }
 
-  /// @brief `name`'s certificate as a YAML block scalar body.
+  /// @brief `name`'s base64-encoded certificate for a TOML string.
   [[nodiscard]] std::string certBlock(const std::string& name) const {
     const std::string der = readFile(path(name + "_cert.der"));
     ASSERT(!der.empty());
@@ -283,12 +283,7 @@ class Fixture {
     const std::string b64 = bpfjailer::base64::encode(
         reinterpret_cast<const unsigned char*>(der.data()), der.size());
 
-    // Indented under the `|` the policy names it with.
-    std::string out;
-    for (std::size_t i = 0; i < b64.size(); i += 64) {
-      out += "    " + b64.substr(i, 64) + "\n";
-    }
-    return out;
+    return b64;
   }
 
  private:
@@ -297,17 +292,19 @@ class Fixture {
 
 /// @brief A policy where `svc` will only run binaries signed by `trusted`.
 [[nodiscard]] std::string signedPolicy(const Fixture& fixture) {
-  return "certs:\n  trusted: |\n" + fixture.certBlock("trusted") +
-      "roles:\n  svc:\n    any: true\n    enforce-binary-certs:\n"
-      "      - trusted\n";
+  return "[certs]\ntrusted = \"" + fixture.certBlock("trusted") +
+      R"toml("\n
+[roles.svc]
+any = true
+enforce-binary-certs = ["trusted"]
+)toml";
 }
 
 /// @brief signedPolicy, plus a `min-seq` floor on `svc`.
 [[nodiscard]] std::string sequencedPolicy(
     const Fixture& fixture,
     std::uint64_t minSeq) {
-  return signedPolicy(fixture) + "    min-seq: " + std::to_string(minSeq) +
-      "\n";
+  return signedPolicy(fixture) + "min-seq = " + std::to_string(minSeq) + "\n";
 }
 
 /// @brief The serial of the keyring the enforcer built for `role`.
@@ -400,7 +397,10 @@ class Fixture {
 } // namespace
 
 TEST(VerityEnforcer, LoadPinsBothLinksAndItsKeyMap) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(linkPinned("bpfj_verity_mmap_file"));
   ASSERT(linkPinned("bpfj_verity_bprm_check"));
@@ -408,20 +408,33 @@ TEST(VerityEnforcer, LoadPinsBothLinksAndItsKeyMap) {
 }
 
 TEST(VerityEnforcer, LoadAgainstAPolicyNamingNoCertificateSucceeds) {
-  attach("roles:\n  svc:\n  worker:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+
+[roles.worker]
+)toml");
 
   ASSERT(linkPinned("bpfj_verity_bprm_check"));
 }
 
 TEST(VerityEnforcer, ARoleNamingNoCertificateGetsNoKeyMapEntry) {
-  attach("roles:\n  svc:\n  worker:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+
+[roles.worker]
+)toml");
 
   ASSERT_EQ(keyringOf("svc"), 0);
   ASSERT_EQ(keyringOf("worker"), 0);
 }
 
 TEST(VerityEnforcer, AJailedRoleNamingNoCertificateMayNotExec) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   Child actor([] { return runProgram("/bin/true"); });
   enroll("svc", actor.pid());
@@ -430,7 +443,11 @@ TEST(VerityEnforcer, AJailedRoleNamingNoCertificateMayNotExec) {
 }
 
 TEST(VerityEnforcer, VerityAnyAllowsUnsignedExec) {
-  attach("roles:\n  svc:\n    verity-any: true\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+verity-any = true
+)toml");
 
   Child actor([] { return runProgram("/bin/true"); });
   enroll("svc", actor.pid());
@@ -439,7 +456,10 @@ TEST(VerityEnforcer, VerityAnyAllowsUnsignedExec) {
 }
 
 TEST(VerityEnforcer, AnUnjailedProcessMayStillExec) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   Child actor([] { return runProgram("/bin/true"); });
 
@@ -736,7 +756,10 @@ TEST(VerityEnforcer, AnUnsignedSharedObjectOnlyStopsAJailedProgram) {
 // Who may write the keyrings the checks above verify against.
 
 TEST(VerityEnforcer, LoadPinsTheKeyringGate) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(linkPinned("bpfj_keyring_check"));
   ASSERT(mapPinned("bpfj_keyring_owner"));
@@ -747,7 +770,7 @@ TEST(VerityEnforcer, LoadPinsTheKeyringGate) {
 
 TEST(VerityEnforcer, AKeyringAnyRoleMayWriteAKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "    keyring-any: true\n");
+  attach(signedPolicy(fixture) + "keyring-any = true\n");
   enroll("svc", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
@@ -755,7 +778,7 @@ TEST(VerityEnforcer, AKeyringAnyRoleMayWriteAKeyring) {
 
 TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAnotherRolesKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "  other:\n    keyring-roles:\n");
+  attach(signedPolicy(fixture) + "[roles.other]\nkeyring-roles = []\n");
   enroll("other", ::getpid());
 
   // The bypass this exists to close: a certificate of `other`'s in the keyring
@@ -765,7 +788,7 @@ TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAnotherRolesKeyring) {
 
 TEST(VerityEnforcer, ARestrictedRoleMayWriteItsOwnKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "    keyring-own: true\n");
+  attach(signedPolicy(fixture) + "keyring-own = true\n");
   enroll("svc", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
@@ -781,7 +804,7 @@ TEST(VerityEnforcer, ARoleWithNoKeyringMayNotWriteItsOwnKeyring) {
 
 TEST(VerityEnforcer, ARoleNamedInAKeyringListMayWriteThatKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "  admin:\n    keyring-roles:\n      - svc\n");
+  attach(signedPolicy(fixture) + "[roles.admin]\nkeyring-roles = [\"svc\"]\n");
   enroll("admin", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), 0);
@@ -790,8 +813,9 @@ TEST(VerityEnforcer, ARoleNamedInAKeyringListMayWriteThatKeyring) {
 TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAKeyringItDidNotName) {
   Fixture fixture;
   attach(
-      signedPolicy(fixture) + "  other:\n    enforce-binary-certs:\n" +
-      "      - trusted\n  admin:\n    keyring-roles:\n      - other\n");
+      signedPolicy(fixture) +
+      "[roles.other]\nenforce-binary-certs = [\"trusted\"]\n" +
+      "[roles.admin]\nkeyring-roles = [\"other\"]\n");
   enroll("admin", ::getpid());
 
   // Named one keyring, which says nothing about the other.
@@ -802,8 +826,8 @@ TEST(VerityEnforcer, ARestrictedRoleMayNotWriteAKeyringItDidNotName) {
 TEST(VerityEnforcer, EveryRoleWithAKeyringListHasToPermitTheWrite) {
   Fixture fixture;
   attach(
-      signedPolicy(fixture) + "  strict:\n    keyring-roles:\n" +
-      "  admin:\n    keyring-roles:\n      - svc\n");
+      signedPolicy(fixture) + "[roles.strict]\nkeyring-roles = []\n" +
+      "[roles.admin]\nkeyring-roles = [\"svc\"]\n");
   enroll("strict", ::getpid());
   enroll("admin", ::getpid());
 
@@ -813,8 +837,9 @@ TEST(VerityEnforcer, EveryRoleWithAKeyringListHasToPermitTheWrite) {
 TEST(VerityEnforcer, AnOverrideRoleAnswersForAKeyringWrite) {
   Fixture fixture;
   attach(
-      signedPolicy(fixture) + "  strict:\n    keyring-roles:\n" +
-      "  admin:\n    override-stacked: true\n    keyring-roles:\n      - svc\n");
+      signedPolicy(fixture) + "[roles.strict]\nkeyring-roles = []\n" +
+      "[roles.admin]\noverride-stacked = true\n" +
+      "keyring-roles = [\"svc\"]\n");
   enroll("strict", ::getpid());
   enroll("admin", ::getpid());
 
@@ -827,7 +852,7 @@ TEST(VerityEnforcer, AProtectedKeyringIsStillSearchedForVerification) {
 
   // The gate denies writes and nothing else: verification walks the keyring
   // with SEARCH, so a keyring nobody may write still runs a signed binary.
-  attach(signedPolicy(fixture) + "  other:\n    keyring-roles:\n");
+  attach(signedPolicy(fixture) + "[roles.other]\nkeyring-roles = []\n");
 
   Child actor([path = fixture.path("hello")] { return runProgram(path); });
   enroll("svc", actor.pid());
@@ -1020,7 +1045,10 @@ TEST(VerityEnforcer, ASharedObjectNeedsNoSequenceUnderAFloor) {
 // The scratch pool the checks above take their buffers from.
 
 TEST(VerityEnforcer, LoadDoesNotPinTheScratchPool) {
-  attach("roles:\n  svc:\n");
+  attach(R"toml([roles]
+
+[roles.svc]
+)toml");
 
   ASSERT(!mapPinned("bpfj_scratch_small"));
   ASSERT(!mapPinned("bpfj_scratch_large"));

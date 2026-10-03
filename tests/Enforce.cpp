@@ -20,8 +20,8 @@ PinConfig testPins() {
   return PinConfig{.bpffsPath = bpffsPath()};
 }
 
-Policy policyOf(const std::string& yaml) {
-  auto parsed = Policy::parse(yaml);
+Policy policyOf(const std::string& toml) {
+  auto parsed = Policy::parse(toml);
   ASSERT_OK(parsed);
   return *parsed;
 }
@@ -68,9 +68,10 @@ bool waitForMutationJournal(const PodArena& arena) {
   const auto deadline = std::chrono::steady_clock::now() + 60s;
   do {
     const auto* journal = static_cast<const struct bpfj_mutation_journal*>(
-        arena.ctrl()->mutation_journal);
+        __atomic_load_n(&arena.ctrl()->mutation_journal, __ATOMIC_ACQUIRE));
     if (journal != nullptr &&
-        journal->state == BPFJ_MUTATION_JOURNAL_RECORDING) {
+        __atomic_load_n(&journal->state, __ATOMIC_ACQUIRE) ==
+            BPFJ_MUTATION_JOURNAL_RECORDING) {
       return true;
     }
     std::this_thread::yield();
