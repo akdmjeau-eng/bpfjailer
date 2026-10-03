@@ -187,6 +187,7 @@ BPF_SRCS := \
 	bpfj/enforce/bpf/lkm_enforce.bpf.c \
 	bpfj/enforce/bpf/mq_enforce.bpf.c \
 	bpfj/enforce/bpf/shm_enforce.bpf.c \
+	bpfj/enforce/bpf/fs_enforce.bpf.c \
 	bpfj/enforce/bpf/enroll.bpf.c
 
 BPF_OBJS := $(BPF_SRCS:%.bpf.c=$(BUILD)/%.bpf.o)
@@ -220,6 +221,7 @@ COMMON_SRCS := \
 	bpfj/enforce/LkmEnforcer.cpp \
 	bpfj/enforce/MqEnforcer.cpp \
 	bpfj/enforce/ShmEnforcer.cpp \
+	bpfj/enforce/FsEnforcer.cpp \
 	bpfj/enforce/Pods.cpp \
 	log/BpfLog.cpp \
 	ctl/Dispatch.cpp \
@@ -258,6 +260,7 @@ TEST_SRCS := \
 	tests/CtlTest.cpp \
 	tests/Enforce.cpp \
 	tests/EnrollGateTest.cpp \
+	tests/FsEnforcerTest.cpp \
 	tests/Harness.cpp \
 	tests/HarnessTest.cpp \
 	tests/HeapTest.cpp \

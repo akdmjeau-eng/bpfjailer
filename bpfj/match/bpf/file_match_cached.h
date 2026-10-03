@@ -1334,9 +1334,9 @@ static long bpfj_file_match_cached_cache_iter(
     const void* key,
     void* value,
     void* ctx) {
+  (void)value;
   struct bpfj_file_match_cached_key* lookup_key_ptr = ctx;
   const struct bpfj_file_match_cached_key* key_ptr = key;
-  struct bpfj_file_match_cached_state* value_ptr = value;
   if (key_ptr->dev == lookup_key_ptr->dev &&
       key_ptr->ino == lookup_key_ptr->ino &&
       key_ptr->subvol == lookup_key_ptr->subvol) {

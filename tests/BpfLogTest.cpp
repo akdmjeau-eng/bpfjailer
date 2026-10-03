@@ -2,6 +2,7 @@
 
 #include "tests/Harness.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -13,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging.h"
@@ -21,6 +23,7 @@
 
 namespace {
 
+using bpfjailer::FsEnforcer;
 using bpfjailer::KillEnforcer;
 using bpfjailer::Policy;
 using bpfjailer::test::bpffsPath;
@@ -176,6 +179,13 @@ void attachKill(const std::string& yaml) {
   ASSERT_OK(KillEnforcer::load(testPins(), policy));
 }
 
+void attachFs(const std::string& path) {
+  const Policy policy =
+      policyOf("roles:\n  svc:\n    paths:\n      " + path + ": NONE\n");
+  loadJailer(policy);
+  ASSERT_OK(FsEnforcer::load(testPins(), policy));
+}
+
 [[nodiscard]] int signalErrno(pid_t pid) {
   errno = 0;
   return ::kill(pid, 0) == 0 ? 0 : errno;
@@ -243,6 +253,10 @@ TEST(BpfLog, FormatsStructuredEvents) {
   ASSERT_EQ(bpfjailer::log::formatBpfEvent(entry), expected);
 }
 
+TEST(BpfLog, NamesFilesystemEvents) {
+  ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_FS), "fs");
+}
+
 TEST(BpfLog, RejectsShortEventRecords) {
   char truncated[8]{};
   auto formatted = bpfjailer::log::formatBpfEvent(truncated, sizeof(truncated));
@@ -285,4 +299,35 @@ TEST(BpfLog, BpfjlogPrintsDeniedKillToStdoutAndStderr) {
   waitForOutput(proc, "Denied signal 0 to pid", false);
   waitForOutput(proc, "kill_enforce.bpf.c", false);
   ASSERT_EQ(proc.stop(), 0);
+}
+
+TEST(BpfLog, BpfjlogPrintsDeniedFilesystemAccess) {
+  char dir[] = "/tmp/bpfj-log-fs-test-XXXXXX";
+  ASSERT(::mkdtemp(dir) != nullptr);
+  const std::string path = std::string(dir) + "/data";
+  int fd = ::open(path.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+  ASSERT(fd >= 0);
+  ASSERT_EQ(::close(fd), 0);
+
+  attachFs(path);
+  auto proc = spawnBpfjlog({"--bpffs-path", bpffsPath()});
+  Child actor([&] {
+    errno = 0;
+    const int opened = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (opened >= 0) {
+      ::close(opened);
+      return 0;
+    }
+    return errno;
+  });
+  enroll("svc", actor.pid());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_EQ(actor.run(), EACCES);
+  waitForOutput(proc, "event type=fs", true);
+  waitForOutput(proc, "role=svc", true);
+  ASSERT_EQ(proc.stop(), 0);
+
+  ASSERT_EQ(::unlink(path.c_str()), 0);
+  ASSERT_EQ(::rmdir(dir), 0);
 }

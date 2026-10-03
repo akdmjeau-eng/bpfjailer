@@ -1,0 +1,359 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#include <bpf/vmlinux/vmlinux.h>
+
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+#include <errno.h>
+
+#include "bpfj/enforce/bpf/maps.h"
+#include "bpfj/enforce/bpf/types_fs.h"
+#include "bpfj/lib/bpf/logging_bpf.h"
+#include "bpfj/match/bpf/file_match_cached.h"
+#include "bpfj/match/bpf/glob_var_bindings.h"
+
+#define FMODE_READ BPFJ_FS_MODE_READ
+#define FMODE_WRITE BPFJ_FS_MODE_WRITE
+#define FMODE_EXEC BPFJ_FS_MODE_EXEC
+
+// Role -> matcher, one shared inode cache, and one immutable snapshot of PID
+// 1's mount namespace. Userspace builds the first two before attaching; the
+// first lookup builds the mount snapshot and later lookups reuse it until the
+// mount generation changes.
+struct bpfj_str_map __arena* bpfj_fs_matchers;
+struct bpfj_dyn_lru __arena* bpfj_fs_match_lru;
+struct bpfj_mount_cache __arena bpfj_fs_mount_cache;
+
+static __noinline struct bpfj_file_matcher __arena* bpfj_fs_matcher_for(
+    const struct bpfj_role_id* role) {
+  char key[BPFJ_FILE_MATCH_ROLE_KEY_LEN] = {};
+  __u32 i;
+  bpf_for(i, 0, ROLE_ID_LEN) {
+    key[i & (ROLE_ID_LEN - 1)] = role->id[i & (ROLE_ID_LEN - 1)];
+  }
+  key[BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1] = '\0';
+
+  void __arena* out = NULL;
+  if (bpfj_str_map_lookup_strlen(
+          bpfj_fs_matchers, key, BPFJ_FILE_MATCH_ROLE_KEY_LEN, &out) != 0) {
+    return NULL;
+  }
+  return out;
+}
+
+static __always_inline bool bpfj_fs_mode_allowed(__u32 granted, __u32 wanted) {
+  if ((wanted & FMODE_WRITE) && !(granted & FMODE_WRITE)) {
+    return false;
+  }
+  if ((wanted & FMODE_EXEC) && !(granted & FMODE_EXEC)) {
+    return false;
+  }
+  if ((wanted & FMODE_READ) && !(granted & FMODE_READ)) {
+    return false;
+  }
+  return true;
+}
+
+static __noinline bool bpfj_fs_match_allowed(
+    struct bpfj_file_match_cached_state __arena* state,
+    __u32 wanted,
+    long count) {
+  __s32 bestPos = -1;
+  struct bpfj_fs_path_entry* best = NULL;
+  __u32 i;
+  bpf_for(i, 0, BPFJ_FILE_MATCH_MAX_ITERS) {
+    if (i >= count) {
+      break;
+    }
+    struct bpfj_fs_path_entry* entry = BPFJ_FILE_MATCH_CACHED_LOOKUP(state, i);
+    if (!entry) {
+      continue;
+    }
+    const __s32 pos = BPFJ_FILE_MATCH_CACHED_GET_POS(state, i);
+    if (pos > bestPos) {
+      bestPos = pos;
+      best = entry;
+    }
+  }
+  return best == NULL || bpfj_fs_mode_allowed(best->mode, wanted);
+}
+
+// Inlined to avoid adding a ninth frame to the mount and glob walk. The pod
+// loop is ordinarily one iteration and is unrolled rather than expressed with
+// bpf_for: file_match_cached itself uses bpf_for and those iterators must never
+// be nested.
+static __always_inline int bpfj_fs_enforce(
+    struct bpfj_file_match_cached_state __arena* state,
+    uintptr_t dentry,
+    __u32 wanted) {
+  struct task_struct* task = bpf_get_current_task_btf();
+  struct bpfj_pid_data* pidData = bpfj_get_current_pid_data();
+  if (!task || !pidData || !dentry) {
+    return 0;
+  }
+
+  __u32 numPods = pidData->num_pods;
+  if (numPods > BPFJ_MAX_POD_PER_PID) {
+    numPods = BPFJ_MAX_POD_PER_PID;
+  }
+
+  for (int index = BPFJ_MAX_POD_PER_PID - 1; index >= 0; --index) {
+    if (index >= numPods) {
+      continue;
+    }
+
+    void* podPointer = (void*)pidData->pods[index];
+    if (!podPointer) {
+      continue;
+    }
+    barrier_var(podPointer);
+    struct bpfj_pod __arena* pod =
+        (struct bpfj_pod __arena*)(uintptr_t)podPointer;
+
+    struct bpfj_role_id role = {};
+    struct bpfj_uuid uuid = {};
+    bpfj_pod_read_role_id(&role, pod);
+    bpfj_pod_read_uuid(&uuid, pod);
+    struct bpfj_file_matcher __arena* matcher = bpfj_fs_matcher_for(&role);
+    if (matcher) {
+      long count = BPFJ_FILE_MATCH_CACHED(
+          state,
+          matcher,
+          &bpfj_fs_mount_cache,
+          dentry,
+          &uuid,
+          bpfj_file_match_cached_bind_var_array,
+          &pod->var_array);
+      if (count > 0 && !bpfj_fs_match_allowed(state, wanted, count)) {
+        struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
+        bpfj_event_submit(event);
+        BPFJ_LOG("Denied filesystem access for role %s", role.id);
+        return -EACCES;
+      }
+      if (count < 0 && count != -EXDEV) {
+        BPFJ_LOG_ERR(-count, "filesystem path match failed");
+      }
+    }
+    if (bpfj_is_override(pod)) {
+      break;
+    }
+  }
+  return 0;
+}
+
+#define BPFJ_FS_CHECK(_dentry, _mode)                    \
+  ({                                                     \
+    BPFJ_FILE_MATCH_CACHED_ALLOC(state);                 \
+    bpfj_fs_enforce(state, (uintptr_t)(_dentry), _mode); \
+  })
+
+SEC("lsm/file_open")
+int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  return BPFJ_FS_CHECK(
+      BPF_CORE_READ(file, f_path.dentry),
+      BPF_CORE_READ(file, f_mode) & (FMODE_READ | FMODE_WRITE | FMODE_EXEC));
+}
+
+SEC("lsm/inode_unlink")
+int BPF_PROG(
+    bpfj_fs_inode_unlink,
+    struct inode* dir,
+    struct dentry* dentry,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_link")
+int BPF_PROG(
+    bpfj_fs_inode_link,
+    struct dentry* old_dentry,
+    struct inode* dir,
+    struct dentry* new_dentry,
+    int lsm_ret) {
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  return BPFJ_FS_CHECK(new_dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_link")
+int BPF_PROG(
+    bpfj_fs_inode_link_source,
+    struct dentry* old_dentry,
+    struct inode* dir,
+    struct dentry* new_dentry,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_create")
+int BPF_PROG(
+    bpfj_fs_inode_create,
+    struct inode* dir,
+    struct dentry* dentry,
+    umode_t mode,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_mknod")
+int BPF_PROG(
+    bpfj_fs_inode_mknod,
+    struct inode* dir,
+    struct dentry* dentry,
+    umode_t mode,
+    dev_t dev,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_rename")
+int BPF_PROG(
+    bpfj_fs_inode_rename,
+    struct inode* old_dir,
+    struct dentry* old_dentry,
+    struct inode* new_dir,
+    struct dentry* new_dentry,
+    int lsm_ret) {
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  return BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_rename")
+int BPF_PROG(
+    bpfj_fs_inode_rename_destination,
+    struct inode* old_dir,
+    struct dentry* old_dentry,
+    struct inode* new_dir,
+    struct dentry* new_dentry,
+    int lsm_ret) {
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  int ret = BPFJ_FS_CHECK(BPF_CORE_READ(new_dentry, d_parent), FMODE_WRITE);
+  if (ret) {
+    return ret;
+  }
+
+  long invalidate = BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(
+      bpfj_fs_match_lru, old_dentry);
+  if (invalidate < 0) {
+    BPFJ_LOG_ERR(-invalidate, "filesystem rename cache invalidation failed");
+  }
+  return 0;
+}
+
+SEC("lsm/inode_rmdir")
+int BPF_PROG(
+    bpfj_fs_inode_rmdir,
+    struct inode* dir,
+    struct dentry* dentry,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_mkdir")
+int BPF_PROG(
+    bpfj_fs_inode_mkdir,
+    struct inode* dir,
+    struct dentry* dentry,
+    umode_t mode,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(BPF_CORE_READ(dentry, d_parent), FMODE_WRITE);
+}
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(
+    bpfj_fs_inode_setattr,
+    struct mnt_idmap* idmap,
+    struct dentry* dentry,
+    struct iattr* attr,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_getattr")
+int BPF_PROG(bpfj_fs_inode_getattr, const struct path* path, int lsm_ret) {
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(BPF_CORE_READ(path, dentry), FMODE_READ);
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(
+    bpfj_fs_inode_setxattr,
+    struct mnt_idmap* idmap,
+    struct dentry* dentry,
+    const char* name,
+    const void* value,
+    size_t size,
+    int flags,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/inode_getxattr")
+int BPF_PROG(
+    bpfj_fs_inode_getxattr,
+    struct dentry* dentry,
+    const char* name,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_READ);
+}
+
+SEC("lsm/inode_listxattr")
+int BPF_PROG(bpfj_fs_inode_listxattr, struct dentry* dentry, int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_READ);
+}
+
+SEC("lsm/inode_removexattr")
+int BPF_PROG(
+    bpfj_fs_inode_removexattr,
+    struct mnt_idmap* idmap,
+    struct dentry* dentry,
+    const char* name,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+}
+
+SEC("lsm/file_truncate")
+int BPF_PROG(bpfj_fs_file_truncate, struct file* file, int lsm_ret) {
+  return lsm_ret
+      ? lsm_ret
+      : BPFJ_FS_CHECK(BPF_CORE_READ(file, f_path.dentry), FMODE_WRITE);
+}
+
+SEC("lsm/inode_symlink")
+int BPF_PROG(
+    bpfj_fs_inode_symlink,
+    struct inode* dir,
+    struct dentry* dentry,
+    const char* old_name,
+    int lsm_ret) {
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(BPF_CORE_READ(dentry, d_parent), FMODE_WRITE);
+}
+
+SEC("lsm/file_ioctl")
+int BPF_PROG(
+    bpfj_fs_file_ioctl,
+    struct file* file,
+    unsigned int cmd,
+    unsigned long arg,
+    int lsm_ret) {
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  __u32 mode = BPF_CORE_READ(file, f_mode);
+  mode = (mode & FMODE_WRITE) ? FMODE_WRITE : FMODE_READ;
+  return BPFJ_FS_CHECK(BPF_CORE_READ(file, f_path.dentry), mode);
+}
+
+char LICENSE[] SEC("license") = "Dual MIT/GPL";

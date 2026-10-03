@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "bpfj/enforce/BpfEnforcer.h"
+#include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/LkmEnforcer.h"
@@ -98,6 +99,12 @@ int attachPolicy(
 
   if (auto res = ShmEnforcer::load(pin, policy); !res) {
     std::cerr << "shared-memory enforcer load failed: " << res.error()
+              << std::endl;
+    return 1;
+  }
+
+  if (auto res = FsEnforcer::load(pin, policy); !res) {
+    std::cerr << "filesystem enforcer load failed: " << res.error()
               << std::endl;
     return 1;
   }

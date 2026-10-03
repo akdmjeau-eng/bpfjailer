@@ -14,6 +14,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,17 @@
 namespace bpfjailer {
 
 namespace detail {
+
+__attribute__((no_sanitize("address"))) inline void
+fileMatchArenaWrite(void* destination, const void* source, std::size_t size) {
+  std::memcpy(destination, source, size);
+}
+
+__attribute__((no_sanitize("address"))) inline void fileMatchArenaZero(
+    void* destination,
+    std::size_t size) {
+  std::memset(destination, 0, size);
+}
 
 inline std::string fileMatchGlobEscape(std::string_view value) {
   std::string out;
@@ -140,13 +152,21 @@ class FileMatchCached {
 
   FileMatchCached() = default;
   ~FileMatchCached() {
-    destroy();
+    if (!released_) {
+      destroy();
+    }
   }
 
   FileMatchCached(const FileMatchCached&) = delete;
   FileMatchCached& operator=(const FileMatchCached&) = delete;
   FileMatchCached(FileMatchCached&&) = delete;
   FileMatchCached& operator=(FileMatchCached&&) = delete;
+
+  // Hand the published blocks to a pinned arena map. Container destructors
+  // remain non-owning; the pin now determines their lifetime.
+  void release() noexcept {
+    released_ = true;
+  }
 
   template <typename Paths>
   Expected<> init(
@@ -173,7 +193,7 @@ class FileMatchCached {
     if (matcher_ == nullptr) {
       return Error(std::errc::not_enough_memory, "matcher allocation failed");
     }
-    std::memset(matcher_, 0, sizeof(*matcher_));
+    detail::fileMatchArenaZero(matcher_, sizeof(*matcher_));
     *matcherSlot_ = matcher_;
 
     if (matchLru_ != nullptr && matchLru_->get() == nullptr) {
@@ -305,7 +325,7 @@ class FileMatchCached {
       std::memcpy(&packed, &indexes, sizeof(indexes));
       entries.emplace(pattern, packed);
     }
-    globMap_.emplace(obj_, matcher_->glob_map);
+    globMap_.emplace(obj_, matcher_->glob_map, false);
     return globMap_->init(std::move(resolveKey), std::move(entries));
   }
 
@@ -323,14 +343,14 @@ class FileMatchCached {
         inner.emplace(key, 1);
       }
       innerHeaders_.push_back(nullptr);
-      PerfMap<Skel> map{obj_, innerHeaders_.back()};
+      PerfMap<Skel> map{obj_, innerHeaders_.back(), false};
       if (auto res = map.init(inner); !res) {
         return res.error();
       }
       outer.emplace(static_cast<__u64>(nodeId), map.offset());
       nodeMaps_.push_back(std::move(map));
     }
-    nodesMap_.emplace(obj_, matcher_->nodes_perf_map);
+    nodesMap_.emplace(obj_, matcher_->nodes_perf_map, false);
     return nodesMap_->init(outer);
   }
 
@@ -348,18 +368,22 @@ class FileMatchCached {
             std::errc::not_enough_memory, "initializer allocation failed");
       }
       initializerValues_.push_back(values);
-      std::copy(paths.begin(), paths.end(), values);
-      values[paths.size()] = -1;
+      detail::fileMatchArenaWrite(
+          values, paths.data(), paths.size() * sizeof(paths.front()));
+      const std::int32_t sentinel = -1;
+      detail::fileMatchArenaWrite(
+          &values[paths.size()], &sentinel, sizeof(sentinel));
       entries.emplace(
           static_cast<__u64>(initializerId),
           static_cast<__u64>(heap::ptrToOffset(heap::base(obj_), values)));
     }
-    initMap_.emplace(obj_, matcher_->initializer_perf_map);
+    initMap_.emplace(obj_, matcher_->initializer_perf_map, false);
     return initMap_->init(entries);
   }
 
   template <typename Value>
   Expected<> initValues(const std::map<std::int32_t, Value>& values) {
+    static_assert(std::is_trivially_copyable_v<Value>);
     if (values.empty()) {
       return unit;
     }
@@ -369,7 +393,7 @@ class FileMatchCached {
     }
     dataVec_ = data;
     for (const auto& [pathId, value] : values) {
-      std::memcpy(&data[pathId], &value, sizeof(value));
+      detail::fileMatchArenaWrite(&data[pathId], &value, sizeof(value));
     }
     matcher_->data_vec = data;
     matcher_->data_entry_size = sizeof(Value);
@@ -388,6 +412,7 @@ class FileMatchCached {
   std::optional<PerfMap<Skel>> initMap_;
   std::vector<std::int32_t*> initializerValues_;
   void* dataVec_ = nullptr;
+  bool released_ = false;
 };
 
 } // namespace bpfjailer

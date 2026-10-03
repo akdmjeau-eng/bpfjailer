@@ -39,7 +39,15 @@ class DynLru {
   DynLru& operator=(DynLru&&) = delete;
 
   ~DynLru() {
-    destroy();
+    if (destroyOnDestruct_) {
+      destroy();
+    }
+  }
+
+  // Leave the arena allocation published for a pinned BPF object. The map pin
+  // owns its lifetime after the loading process exits.
+  void release() noexcept {
+    destroyOnDestruct_ = false;
   }
 
   // Release everything the map owns: the bpfj_dyn_map every live entry holds,
@@ -273,6 +281,7 @@ class DynLru {
   // so it is alive when the reference binds.
   struct bpfj_dyn_lru* ownedHdr_ = nullptr;
   struct bpfj_dyn_lru*& hdr_;
+  bool destroyOnDestruct_ = true;
 };
 
 } // namespace bpfjailer

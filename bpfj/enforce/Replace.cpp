@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "bpfj/enforce/BpfEnforcer.h"
+#include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/LkmEnforcer.h"
@@ -899,6 +900,10 @@ struct BackfillStats {
   }
 
   if (auto res = ShmEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = FsEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 
