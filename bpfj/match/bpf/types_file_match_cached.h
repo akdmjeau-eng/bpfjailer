@@ -13,18 +13,6 @@
 // index's arena footprint, and init rejects anything above it.
 #define BPFJ_FILE_MATCH_CACHED_CACHE_SIZE BPFJ_DYN_LRU_MAX_CAPACITY
 
-// How many pods one file's cache entry holds before it is wiped and started
-// over.
-//
-// A file every pod on the host opens gets an entry per pod uuid, and until this
-// cap nothing retired them short of the mount or rename view moving: uuids
-// never repeat, pods come and go, and the outer LRU's clock hand protects
-// exactly the hot files whose entries grow. This is the backstop, not a tuning
-// knob -- 128 pods on one file is already far past anything a host should be
-// doing, and the cost of hitting it is that the next open of that file walks
-// again, which is what a miss costs anyway.
-#define BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS 128
-
 struct bpfj_file_matcher {
   // Maps a path component (a single dentry name) to the set of pattern nodes it
   // matches. A single bit-parallel glob NFA replaces the former literal
@@ -55,11 +43,6 @@ struct bpfj_file_matcher {
   struct bpfj_file_match_cached_pattern_str __arena*
       pattern_strs; // arena ptr to pattern_str[]
   __u32 num_pattern_strs;
-  // How many pods one file's cache entry may hold before it is wiped and
-  // started over. See BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS. Zero means
-  // the default: the matcher block is value-initialized, so a matcher built by
-  // something that does not know about this field still gets the cap.
-  __u32 max_cache_pods;
   // Non-zero when at least one of this role's paths asks for a signature.
   //
   // bpfj_fs2_file_post_open_sig works out what to verify from the cache entry

@@ -40,14 +40,10 @@ struct bpfj_file_match_cached_pattern_str {
 struct bpfj_file_match_cached_key {
   __u64 ino;
   __u64 subvol;
+  struct bpfj_uuid uuid;
+  __u64 rename_counter;
   __u32 dev;
-  // __u32 rename_counter;
-  // __u32 mount_lock;
-  __u32 _pad;
-  // Identifies the variable bindings used for this match (a single pod). Two
-  // matches against the same file with the same uuid resolve variables
-  // identically, so they can share a cache entry.
-  // struct bpfj_uuid uuid;
+  __u32 mount_lock;
 };
 
 struct bpfj_file_match_cached_locks {

@@ -49,7 +49,8 @@ inline bool valid(bpfj_shared_ptr sp) {
 
 // The current reference count, 0 for an invalid pointer. Observability only:
 // the free decision is the atomic decrement in release().
-inline __u32 useCount(bpfj_shared_ptr sp) {
+__attribute__((no_sanitize("address"))) inline __u32 useCount(
+    bpfj_shared_ptr sp) {
   if (sp.refcount == nullptr) {
     return 0;
   }
@@ -57,7 +58,8 @@ inline __u32 useCount(bpfj_shared_ptr sp) {
 }
 
 // Take an additional reference; the returned copy aliases the original.
-inline bpfj_shared_ptr acquire(bpfj_shared_ptr sp) {
+__attribute__((no_sanitize("address"))) inline bpfj_shared_ptr acquire(
+    bpfj_shared_ptr sp) {
   if (sp.refcount != nullptr) {
     __atomic_add_fetch(sp.refcount, 1, __ATOMIC_ACQ_REL);
   }
@@ -69,7 +71,8 @@ inline bpfj_shared_ptr acquire(bpfj_shared_ptr sp) {
 // then the buffer itself. It is BPFJ_SHARED_PTR_RELEASE's destructor on this
 // side. Clears `*sp` so a second release is a no-op.
 template <typename Skel, typename Destroy>
-inline void release(Skel&& skel, bpfj_shared_ptr* sp, Destroy&& destroy) {
+__attribute__((no_sanitize("address"))) inline void
+release(Skel&& skel, bpfj_shared_ptr* sp, Destroy&& destroy) {
   if (sp->refcount == nullptr) {
     return;
   }
@@ -88,7 +91,9 @@ inline void release(Skel&& skel, bpfj_shared_ptr* sp, Destroy&& destroy) {
 // Drop this reference, freeing the buffer and count at 0, for a buffer that
 // owns nothing else.
 template <typename Skel>
-inline void release(Skel&& skel, bpfj_shared_ptr* sp) {
+__attribute__((no_sanitize("address"))) inline void release(
+    Skel&& skel,
+    bpfj_shared_ptr* sp) {
   release(std::forward<Skel>(skel), sp, [](auto& skelRef, void* buf) {
     heap::free(skelRef, buf);
   });

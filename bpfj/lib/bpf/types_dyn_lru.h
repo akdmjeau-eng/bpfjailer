@@ -6,10 +6,9 @@
 #include <linux/types.h>
 #endif
 
-#include "bpfj/lib/bpf/types_dyn_map.h"
 #include "bpfj/lib/bpf/types_shared_ptr.h"
 
-// Fixed-size, thread-safe LRU map: fixed-width key -> bpfj_dyn_map value. A
+// Fixed-size, thread-safe LRU map: fixed-width key -> opaque arena value. A
 // key is bpfj_dyn_lru::key_size bytes, fixed by DynLru::init, and is hashed,
 // compared and copied a __u64 at a time, so the size must be a whole number of
 // words.
@@ -45,25 +44,24 @@
 #define BPFJ_DYN_LRU_REF_LOOKUP 2
 #define BPFJ_DYN_LRU_REF_INSERT 1
 
-// Entries the pool holds over `capacity`, covering the one an overflowing
-// insert is briefly over by plus slack against a sweep that finds no victim.
-#define BPFJ_DYN_LRU_POOL_SLACK 32
-
 struct bpfj_dyn_lru_entry {
   // A slice of bpfj_dyn_lru::key_pool assigned at init and kept across
   // recycles, so an insert copies its key in rather than allocating.
   __u64 __arena* key;
 
-  // Pointer to bpfj_dyn_map
+  // Shared opaque arena value. Lookups retain this while outside the lock, so
+  // replacement and eviction cannot free a value still in use.
   struct bpfj_shared_ptr val;
 
   // Eviction credit; see BPFJ_DYN_LRU_REF_LOOKUP. Read and written under the
   // lock of the slot pointing at this entry.
   __u32 ref;
 
-  // The slot `key` hashes to, cached because re-deriving it would nest the
-  // key's word loop inside bpfj_dyn_lru_close_hole's walk.
+  // The slot `key` hashes to and the slot currently holding the entry. Both
+  // are cached so eviction can jump from the entry pool into the index and
+  // hole closing need not re-hash keys.
   __u32 home;
+  __u32 slot;
 
   // Next free entry while this one is in the pool, NULL while it is live.
   struct bpfj_dyn_lru_entry __arena* next_free;
@@ -80,7 +78,7 @@ struct bpfj_dyn_lru {
   // slot[arr_size], one flat arena block.
   struct bpfj_dyn_lru_slot __arena* slots;
 
-  // entry[pool_size] and pool_size * key_size bytes, each one flat arena block
+  // entry[capacity] and capacity * key_size bytes, each one flat arena block
   // owned for the map's lifetime, leaving an insert to allocate only the
   // reference count on its value. Preallocated for the reason
   // kernel/bpf/hashtab.c prealloc_init() is: the map's size is fixed, so the
@@ -94,7 +92,6 @@ struct bpfj_dyn_lru {
 
   __u32 arr_size; // index slots; power of two, capacity * INDEX_SLACK
   __u32 capacity; // N; fixed
-  __u32 pool_size; // entries in entry_pool; capacity + POOL_SLACK
   __u32 size; // live entries; changed only under `lock`
   __u32 key_size; // bytes per key; a non-zero multiple of sizeof(__u64)
   __u32 clock_hand; // where the next eviction sweep starts
@@ -117,17 +114,12 @@ enum lru_ins_type {
 // Length of the instruction stream and of the result arrays BPF writes back.
 #define BPFJ_DYN_LRU_TEST_MAX_INS 32
 
-// Every inner bpfj_dyn_map the script inserts holds one entry under this key,
-// so a lookup can prove it got the map stored under that LRU key.
-#define BPFJ_DYN_LRU_TEST_PROBE_KEY 0x5eedULL
-
 // One word, which the BPF side stages into an arena scratch buffer per op.
 #define BPFJ_DYN_LRU_TEST_KEY_SIZE ((__u32)sizeof(__u64))
 
 struct lru_ins {
   enum lru_ins_type ins;
   __u64 key;
-  // LRU_INSERT: tagged into the inserted map under
-  // BPFJ_DYN_LRU_TEST_PROBE_KEY.
+  // LRU_INSERT: value stored directly in an arena block.
   __u64 val;
 };

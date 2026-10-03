@@ -205,7 +205,6 @@ class FileMatchCached {
       }
     }
     matcher_->lru = matchLru_ != nullptr ? matchLru_->get() : nullptr;
-    matcher_->max_cache_pods = BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS;
 
     if (auto res = compile(std::move(resolveKey), paths); !res) {
       return res.error();

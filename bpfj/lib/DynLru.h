@@ -13,7 +13,6 @@
 #include "bpfj/lib/Lock.h"
 #include "bpfj/lib/SharedPtr.h"
 #include "bpfj/lib/bpf/types_dyn_lru.h"
-#include "bpfj/lib/bpf/types_dyn_map.h"
 
 namespace bpfjailer {
 
@@ -50,21 +49,19 @@ class DynLru {
     destroyOnDestruct_ = false;
   }
 
-  // Release everything the map owns: the bpfj_dyn_map every live entry holds,
-  // which is an allocation of its own that freeing the entry pool would not
-  // reach, then the four blocks the map is made of. Idempotent, and unlocked
-  // since this runs where the map is no longer shared.
+  // Release every live opaque value, then the four blocks the map is made of.
+  // Idempotent, and unlocked since this runs where the map is no longer shared.
   __attribute__((no_sanitize("address"))) void destroy() {
     if (hdr_ == nullptr) {
       return;
     }
 
-    for (__u32 i = 0; i < hdr_->arr_size; ++i) {
-      auto& slot = hdr_->slots[i];
-      if (slot.entry == nullptr) {
+    for (__u32 i = 0; i < hdr_->capacity; ++i) {
+      auto& entry = hdr_->entry_pool[i];
+      if (entry.val.refcount == nullptr) {
         continue;
       }
-      releaseVal(&slot.entry->val);
+      shared_ptr::release(skel_, &entry.val);
     }
 
     heap::free(skel_, hdr_->key_pool);
@@ -100,8 +97,7 @@ class DynLru {
           std::errc::not_enough_memory, "dyn lru header allocation failed");
     }
 
-    // Value-initialized, so every slot starts empty with its lock free; a heap
-    // block otherwise comes back dirty and the lock reads as held.
+    // Value-initialized, so every slot starts empty.
     auto* slots = heap::allocArray<struct bpfj_dyn_lru_slot>(skel_, arrSize);
     if (slots == nullptr) {
       heap::free(skel_, hdr);
@@ -111,7 +107,7 @@ class DynLru {
 
     // Every entry and key buffer in one block each, so BPF takes them off a
     // free list and keeps the shared arena heap off the insert path.
-    const __u32 poolSize = capacity + BPFJ_DYN_LRU_POOL_SLACK;
+    const __u32 poolSize = capacity;
     auto* entries =
         heap::allocArray<struct bpfj_dyn_lru_entry>(skel_, poolSize);
     if (entries == nullptr) {
@@ -146,7 +142,6 @@ class DynLru {
     hdr->free_list = &entries[0];
     hdr->capacity = capacity;
     hdr->arr_size = arrSize;
-    hdr->pool_size = poolSize;
     hdr->size = 0;
     hdr->key_size = keySize;
     hdr->clock_hand = 0;
@@ -166,12 +161,9 @@ class DynLru {
   template <typename K>
   struct Entry {
     K key;
-    // bpfj_dyn_map::extra of the value stored under `key`, or zero if the
-    // entry holds no map.
-    __u64 extra;
   };
 
-  // Snapshot of the entries currently resident, in index rather than recency
+  // Snapshot of the entries currently resident, in pool rather than recency
   // order, the LRU keeping no recency list. This is diagnostic-only and must
   // not run while BPF is attached: BPF waits with interrupts disabled, so it
   // must never wait for a userspace holder that can be descheduled.
@@ -198,18 +190,14 @@ class DynLru {
       return err::Error(std::errc::timed_out, "timed out taking dyn lru lock");
     }
 
-    for (__u32 i = 0; i < hdr_->arr_size; ++i) {
-      auto& slot = hdr_->slots[i];
-
-      if (slot.entry == nullptr || slot.entry->key == nullptr) {
+    for (__u32 i = 0; i < hdr_->capacity; ++i) {
+      auto& entry = hdr_->entry_pool[i];
+      if (entry.val.refcount == nullptr || entry.key == nullptr) {
         continue;
       }
 
       Entry<K> e{};
-      std::memcpy(&e.key, slot.entry->key, sizeof(K));
-      const auto* dyn =
-          static_cast<const struct bpfj_dyn_map*>(slot.entry->val.buf);
-      e.extra = dyn != nullptr ? dyn->extra : 0;
+      std::memcpy(&e.key, entry.key, sizeof(K));
       out.emplace_back(e);
     }
 
@@ -217,50 +205,6 @@ class DynLru {
   }
 
  private:
-  // Drop one reference to an entry's map, releasing the slot buffers the last
-  // reference owns first, as bpfj_dyn_lru_destroy_val does on the BPF side.
-  __attribute__((no_sanitize("address"))) void releaseVal(
-      struct bpfj_shared_ptr* val) {
-    if (val->refcount == nullptr) {
-      return;
-    }
-
-    if (shared_ptr::useCount(*val) == 1) {
-      auto* dyn = static_cast<struct bpfj_dyn_map*>(val->buf);
-      if (dyn != nullptr) {
-        releaseSlots(dyn->slots_ptr, dyn->capacity);
-        // Set only mid-grow, which cannot happen here: nothing is walking a
-        // map the LRU is dropping.
-        releaseSlots(dyn->growing_slots_ptr, dyn->growing_capacity);
-        dyn->capacity = 0;
-        dyn->growing_capacity = 0;
-      }
-    }
-
-    shared_ptr::release(skel_, val);
-  }
-
-  // Release one of a map's slot buffers and the key block and value reference
-  // each entry holds, which freeing the buffer reaches neither of. Mirrors
-  // bpfj_dyn_map_release_entries and bpfj_dyn_map_destroy on the BPF side.
-  void releaseSlots(struct bpfj_shared_ptr& slotsPtr, __u32 capacity) {
-    auto* slots = static_cast<struct bpfj_dyn_map_slot*>(slotsPtr.buf);
-    if (slots == nullptr) {
-      return;
-    }
-
-    for (__u32 i = 0; i < capacity; ++i) {
-      auto& slot = slots[i];
-      if (slot.state != BPFJ_DYN_SLOT_OCCUPIED) {
-        continue;
-      }
-      heap::free(skel_, slot.key);
-      shared_ptr::release(skel_, &slot.val_ptr);
-    }
-
-    shared_ptr::release(skel_, &slotsPtr);
-  }
-
   static __u32 roundUpPow2(__u32 v) {
     if (v <= 8) {
       return 8;

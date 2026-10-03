@@ -42,9 +42,6 @@ extern const void btrfs_dir_inode_operations __ksym;
 
 volatile __u64 bpfj_file_match_cached_cache_hit_counter;
 volatile __u64 bpfj_file_match_cached_cache_miss_counter;
-// Times a file's cache entry was wiped for holding max_cache_pods pods. A
-// backstop firing is worth seeing, so it is a counter and not just a log line.
-volatile __u64 bpfj_file_match_cached_cache_pod_cap_counter;
 
 // Public API
 
@@ -267,15 +264,13 @@ static __always_inline s32 bpfj_file_match_cached_pos(
 // What the cache holds for one (file, pod): the counts, then the iters, then
 // the dentries, in a single block sized to what the walk actually produced.
 //
-// One block and not a copy of the run state, which is what it used to be. Two
-// reasons. A run state carries vecs now, and dyn_map releases a value as an
-// opaque refcounted block -- bpfj_shared_ptr_release_arena, no destructor hook,
-// on a chain already at the eight-frame limit -- so anything the value pointed
-// at elsewhere would leak on eviction. And a state is ~216 bytes before its
+// One block and not a copy of the run state, which is what it used to be. A run
+// state carries vecs whose backing allocations would leak on eviction, while
+// the LRU deliberately releases a value as one opaque refcounted block. A state
+// is also ~216 bytes before its
 // buffers, where a typical match needs the counts plus three iters and a dozen
 // dentries: well under two hundred, against the 1336 a cache entry used to
-// cost. The map's val_size is recorded at init and never read again, so entries
-// of differing sizes are already fine.
+// cost. LRU values are opaque, so entries of differing sizes are fine.
 //
 // The dentries come before the iters because they need eight-byte alignment and
 // an iter is ten bytes: putting the odd-sized array last keeps both aligned,
@@ -306,20 +301,6 @@ bpfj_file_match_cached_entry_iters(
       bpfj_file_match_cached_iter __arena*)(bpfj_file_match_cached_entry_dentries(
                                                 entry) +
                                             entry->dentry_count);
-}
-
-// The pod cap this matcher was built with. Zero means the field was never set,
-// which is the case for a matcher built by something older than it: fall back
-// to the default rather than reading that as "no cap".
-static __always_inline __u32
-bpfj_file_match_cached_max_pods(struct bpfj_file_matcher __arena* matcher) {
-  if (matcher == NULL) {
-    return BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS;
-  }
-
-  __u32 max_pods = matcher->max_cache_pods;
-  return max_pods != 0 ? max_pods
-                       : BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS;
 }
 
 // Allocate a run state with both its vecs init'd. __noinline so the allocation
@@ -371,7 +352,7 @@ struct bpfj_file_match_cached_glob_results {
 
 // Cache generation advanced by an enrolled rename. The kernel rename seqcount
 // below still protects an individual path walk from racing a rename anywhere.
-static __u64 bpfj_file_match_cached_rename_counter = 0;
+volatile __u64 bpfj_file_match_cached_rename_counter = 0;
 
 // __noinline for the same reason as bpfj_mount_seqcount: its BPF_CORE_READ
 // scratch would otherwise sit in file_match_cached's frame, which is on the
@@ -932,12 +913,14 @@ static u64 bpfj_file_match_cached_subvol(struct inode* inode) {
 long bpfj_file_match_cached_build_key(
     struct bpfj_file_match_cached_key __arena* key __arg_arena,
     struct bpfj_file_match_cached_state __arena* state __arg_arena) {
-  // Field-wise: a memset of arena memory drops the address space. _pad matters
-  // -- the key is hashed as raw words, so its padding has to be deterministic.
+  // Field-wise: a memset of arena memory drops the address space. The key is
+  // hashed as raw words, so every byte is explicitly initialized.
   key->ino = 0;
   key->subvol = 0;
+  bpfj_heap_copy_arena(&key->uuid, &state->uuid, sizeof(key->uuid));
+  key->rename_counter = bpfj_file_match_cached_rename_counter;
   key->dev = 0;
-  key->_pad = 0;
+  key->mount_lock = bpfj_mount_seqcount();
 
   struct dentry* dentry = state->leaf;
 
@@ -995,11 +978,6 @@ long bpfj_file_match_cached_check_file_cache(
     bpfj_file_match_cached_log_key(key, false);
   }
 
-  struct bpfj_file_match_cached_locks locks = {
-      .mount_lock = bpfj_mount_seqcount(),
-      .rename_counter = bpfj_file_match_cached_rename_counter,
-  };
-
   BPFJ_DYN_LRU_LOOKUP_GUARD(cached_results_ptr);
   long ret = BPFJ_DYN_LRU_LOOKUP(
       cached_results_ptr, state->matcher->lru, (u64 __arena*)key);
@@ -1008,29 +986,7 @@ long bpfj_file_match_cached_check_file_cache(
     return ret;
   }
 
-  struct bpfj_dyn_map __arena* cached_results = cached_results_ptr.buf;
-
-  // Check locks
-  if (cached_results->extra != locks.key) {
-    // Lock mismatch
-    __sync_fetch_and_add(&bpfj_file_match_cached_cache_miss_counter, 1);
-    return -ENOENT;
-  }
-
-  // state->uuid is already arena memory of exactly the key's width, and the
-  // map copies whatever key it is given, so there is nothing to stage: the
-  // block this used to allocate cost a frame slot on the deep chain and an
-  // alloc/free pair per lookup.
-  BPFJ_SHARED_PTR_GUARD(cached_state_ptr, NULL);
-  ret = bpfj_dyn_map_lookup(
-      cached_results, (u64 __arena*)&state->uuid, &cached_state_ptr.ptr);
-  if (ret < 0) {
-    __sync_fetch_and_add(&bpfj_file_match_cached_cache_miss_counter, 1);
-    return ret;
-  }
-
-  struct bpfj_file_match_cached_entry __arena* entry =
-      BPFJ_SHARED_PTR_BUF(cached_state_ptr);
+  struct bpfj_file_match_cached_entry __arena* entry = cached_results_ptr.buf;
 
   __u32 iter_count = entry->iter_count;
   __u32 dentry_count = entry->dentry_count;
@@ -1080,38 +1036,12 @@ long bpfj_file_match_cached_save_file_cache(
     bpfj_file_match_cached_log_key(key, true);
   }
 
-  // Check if a cached val exists already
-  BPFJ_DYN_LRU_LOOKUP_GUARD(cached_results_ptr);
-  long ret = BPFJ_DYN_LRU_LOOKUP(
-      cached_results_ptr, state->matcher->lru, (u64 __arena*)key);
-  if (ret < 0 && ret != -ENOENT) {
-    // Error
-    return ret;
-  }
-
-  struct bpfj_file_match_cached_locks locks = {
-      .mount_lock = bpfj_mount_seqcount(),
-      .rename_counter = bpfj_file_match_cached_rename_counter,
-  };
-
-  // bpfj_dyn_map_insert takes ownership of both blocks it is handed, so each
-  // gets its own allocation with exactly one owner. Neither the run state nor a
-  // pointer into it will do: that block belongs to the caller's scope guard,
-  // which frees it when the hook returns, leaving the cached entry pointing at
-  // memory the next match reallocates.
-  struct bpfj_uuid __arena* uuid = BPFJ_HEAP_ALLOC(sizeof(*uuid));
-  if (!uuid) {
-    return -ENOMEM;
-  }
-  bpfj_heap_copy_arena(uuid, &state->uuid, sizeof(*uuid));
-
   __u32 iter_count = bpfj_file_match_cached_count(state);
   __u32 dentry_count = bpfj_vec_size(&state->saved_dentries);
 
   struct bpfj_file_match_cached_entry __arena* cached = BPFJ_HEAP_ALLOC(
       bpfj_file_match_cached_entry_size(iter_count, dentry_count));
   if (!cached) {
-    BPFJ_HEAP_FREE(uuid);
     return -ENOMEM;
   }
 
@@ -1130,71 +1060,9 @@ long bpfj_file_match_cached_save_file_cache(
         iter_count * (__u32)sizeof(struct bpfj_file_match_cached_iter));
   }
 
-  if (ret == 0) {
-    // Only now: on -ENOENT the guard holds NULL, and the lock check below
-    // would be reading through it.
-    struct bpfj_dyn_map __arena* cached_results = cached_results_ptr.buf;
-
-    if (cached_results->extra != locks.key) {
-      // Everything under this key was resolved against a mount/rename view
-      // that has since moved, so drop it and re-stamp.
-      bpfj_dyn_map_wipe(cached_results);
-      cached_results->extra = locks.key;
-    } else if (
-        BPFJ_DYN_READ_ONCE(cached_results->size) >=
-        bpfj_file_match_cached_max_pods(state->matcher)) {
-      // This file has collected as many pods as it is allowed to. Nothing else
-      // retires them -- see the cap's own comment -- so the entry starts over
-      // rather than growing without a bound. Wiping rather than evicting one
-      // pod because there is no recency here to evict by, and because a wipe is
-      // what this map already knows how to do.
-      __sync_fetch_and_add(&bpfj_file_match_cached_cache_pod_cap_counter, 1);
-      BPFJ_DBG_LOG("file_match_cached: Pod cap reached, wiping cache entry");
-      bpfj_dyn_map_wipe(cached_results);
-      cached_results->extra = locks.key;
-    }
-
-    // TODO avoid overwriting state each time
-    return bpfj_dyn_map_insert(cached_results, (u64 __arena*)uuid, cached);
-  }
-
-  // Need to insert a new map
-  struct bpfj_dyn_map __arena* map = BPFJ_HEAP_ALLOC(sizeof(*map));
-  if (!map) {
-    BPFJ_HEAP_FREE(cached);
-    BPFJ_HEAP_FREE(uuid);
-    return -ENOMEM;
-  }
-  ret = bpfj_dyn_map_init(
-      map,
-      BPFJ_DYN_MAP_MIN_CAPACITY,
-      sizeof(*uuid),
-      // The smallest an entry can be, not the width of one: entries are tail
-      // allocated and vary. The map records this and never reads it back -- the
-      // block header is what the free goes by -- but init rejects a zero.
-      sizeof(struct bpfj_file_match_cached_entry));
-  if (ret < 0) {
-    BPFJ_HEAP_FREE(map);
-    BPFJ_HEAP_FREE(cached);
-    BPFJ_HEAP_FREE(uuid);
-    return ret;
-  }
-
-  // Stamp the view this map was built under, before it is reachable: a lookup
-  // compares against this to decide the entry is still valid, so an unstamped
-  // map would read as permanently stale and never hit.
-  map->extra = locks.key;
-
-  ret = bpfj_dyn_map_insert(map, (u64 __arena*)uuid, cached);
-  if (ret < 0) {
-    bpfj_dyn_map_free(map);
-    return ret;
-  }
-
-  // map is cleaned up on insert fail
-  // This can drop another write at the same time. That is fine because this is
-  // just a cache
-  return bpfj_dyn_lru_insert(state->matcher->lru, (u64 __arena*)key, map);
+  // The LRU takes ownership whether insertion succeeds or fails. A concurrent
+  // writer may replace this value; that is fine because this is only a cache.
+  return bpfj_dyn_lru_insert(state->matcher->lru, (u64 __arena*)key, cached);
 }
 
 __noinline long bpfj_file_match_cached_dbg_print(
