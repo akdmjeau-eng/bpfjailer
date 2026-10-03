@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <string>
+#include <thread>
 
 #include "bpfj/enforce/MqEnforcer.h"
 #include "bpfj/enforce/Replace.h"
@@ -30,6 +31,7 @@ using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
+using bpfjailer::test::waitForMutationJournal;
 
 namespace {
 
@@ -389,6 +391,65 @@ TEST(MqEnforcer, PosixOwnershipSurvivesAReplace) {
   ASSERT_OK(replaceJailer(testPins(), policyOf(yaml)));
   ASSERT_EQ(acquirePosix(name), 0);
   ASSERT_EQ(::mq_unlink(name.c_str()), 0);
+}
+
+TEST(MqEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
+  const key_t keptSysv = uniqueKey();
+  const key_t removedSysv = uniqueKey();
+  const std::string keptPosix = uniquePosixName();
+  const std::string removedPosix = uniquePosixName();
+  const std::string yaml =
+      "roles:\n  owner:\n    any: true\n  client:\n"
+      "    mq-sysv-roles:\n      - owner\n"
+      "    mq-posix-roles:\n      - owner\n";
+  attach(yaml);
+  enroll("owner", ::getpid());
+
+  Child replacer([yaml] {
+    auto replaced = replaceJailer(testPins(), policyOf(yaml));
+    if (!replaced) {
+      bpfjailer::test::noteDiagnostic(
+          "      " + replaced.error().message() + "\n");
+      const int code = replaced.error().code().value();
+      return code == 0 ? 1 : code;
+    }
+    return 0;
+  });
+  int replaceStatus = -1;
+  std::thread replacing([&] { replaceStatus = replacer.run(); });
+
+  const bool recording = waitForMutationJournal();
+  const int createKeptSysv = createSysv(keptSysv);
+  const int createRemovedSysv = createSysv(removedSysv);
+  const int removedSysvId = ::msgget(removedSysv, 0);
+  const int removeSysv = removedSysvId >= 0
+      ? (::msgctl(removedSysvId, IPC_RMID, nullptr) == 0 ? 0 : errno)
+      : errno;
+  const int createKeptPosix = createPosix(keptPosix);
+  const int createRemovedPosix = createPosix(removedPosix);
+  errno = 0;
+  const int removePosix = ::mq_unlink(removedPosix.c_str()) == 0 ? 0 : errno;
+  replacing.join();
+
+  ASSERT(recording);
+  ASSERT_EQ(createKeptSysv, 0);
+  ASSERT_EQ(createRemovedSysv, 0);
+  ASSERT_EQ(removeSysv, 0);
+  ASSERT_EQ(createKeptPosix, 0);
+  ASSERT_EQ(createRemovedPosix, 0);
+  ASSERT_EQ(removePosix, 0);
+  ASSERT_EQ(replaceStatus, 0);
+
+  enroll("client", ::getpid());
+  ASSERT_EQ(acquireSysv(keptSysv), 0);
+  ASSERT_EQ(acquireSysv(removedSysv), ENOENT);
+  ASSERT_EQ(acquirePosix(keptPosix), 0);
+  ASSERT_EQ(acquirePosix(removedPosix), ENOENT);
+
+  const int keptSysvId = ::msgget(keptSysv, 0);
+  ASSERT(keptSysvId >= 0);
+  ASSERT_EQ(::msgctl(keptSysvId, IPC_RMID, nullptr), 0);
+  ASSERT_EQ(::mq_unlink(keptPosix.c_str()), 0);
 }
 
 TEST(MqEnforcer, PosixDescriptorReceiptChecksTheReceivingPod) {

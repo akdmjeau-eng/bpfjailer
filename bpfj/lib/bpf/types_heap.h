@@ -89,6 +89,15 @@ struct bpfj_heap_control {
   __u32 grow_gen; // bumped by whichever side grows the arena
   __u32 metadata_reserved;
   void __arena* var_catalog;
+  void __arena* mutation_journal;
+};
+
+struct bpfj_vec {
+  void __arena* buf;
+  __u32 elem_size;
+  __u32 size;
+  __u32 capacity;
+  __u32 _pad;
 };
 
 enum bpfj_heap_syscall_op {

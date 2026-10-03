@@ -35,7 +35,11 @@ Expected<> MqEnforcer::load(
   if (auto res = pins::pinSharedMaps(skel, mapDir); !res) {
     return res;
   }
-  for (const auto name : {"bpfj_mq_sysv_owners", "bpfj_mq_posix_owners"}) {
+  for (const auto name : {
+           "bpfj_mq_sysv_owners",
+           "bpfj_mq_posix_owners",
+           "bpfj_mq_posix_pending",
+       }) {
     if (auto res = pins::pinMap(skel, name, mapDir, kMaxOwners); !res) {
       return res;
     }

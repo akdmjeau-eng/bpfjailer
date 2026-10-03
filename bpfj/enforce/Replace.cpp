@@ -40,6 +40,7 @@
 #include "bpfj/enforce/VerityEnforcer.h"
 #include "bpfj/enforce/bpf/replace.skel.h"
 #include "bpfj/lib/Heap.h"
+#include "bpfj/lib/Lock.h"
 #include "bpfj/lib/ScopeGuard.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
@@ -60,10 +61,12 @@ constexpr std::string_view kProgOwners = "bpfj_bpf_prog_owners";
 constexpr std::string_view kOwnerVersion = "bpfj_bpf_owner_version";
 constexpr std::string_view kMqSysvOwners = "bpfj_mq_sysv_owners";
 constexpr std::string_view kMqPosixOwners = "bpfj_mq_posix_owners";
+constexpr std::string_view kMqPosixPending = "bpfj_mq_posix_pending";
 constexpr std::string_view kMqSysvOwnerVersion = "bpfj_mq_sysv_owner_version";
 constexpr std::string_view kMqPosixOwnerVersion = "bpfj_mq_posix_owner_version";
 constexpr std::string_view kShmSysvOwners = "bpfj_shm_sysv_owners";
 constexpr std::string_view kShmPosixOwners = "bpfj_shm_posix_owners";
+constexpr std::string_view kShmPosixPending = "bpfj_shm_posix_pending";
 constexpr std::string_view kShmSysvOwnerVersion = "bpfj_shm_sysv_owner_version";
 constexpr std::string_view kShmPosixOwnerVersion =
     "bpfj_shm_posix_owner_version";
@@ -565,6 +568,313 @@ template <typename T>
   return false;
 }
 
+struct MutationJournal {
+  PodArena arena;
+  struct bpfj_mutation_journal* journal = nullptr;
+  std::uint32_t replayed = 0;
+};
+
+[[nodiscard]] Expected<> lockJournal(
+    struct bpfj_mutation_journal& journal,
+    std::optional<lock::Guard>& guard) noexcept {
+  using namespace std::chrono_literals;
+  guard.emplace(journal.lock, 5s);
+  if (!guard->owns()) {
+    return makeUnexpected(makeError(
+        std::errc::timed_out, "timed out taking the ownership journal lock"));
+  }
+  return unit;
+}
+
+[[nodiscard]] Expected<MutationJournal> startMutationJournal(
+    const PinConfig& cfg) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+
+  auto* ctrl = arena->ctrl();
+  auto* journal =
+      static_cast<struct bpfj_mutation_journal*>(ctrl->mutation_journal);
+  if (journal != nullptr) {
+    std::optional<lock::Guard> guard;
+    if (auto res = lockJournal(*journal, guard); !res) {
+      return makeUnexpected(res.error());
+    }
+    journal->state = BPFJ_MUTATION_JOURNAL_CLOSING;
+    if (journal->entries.capacity != BPFJ_MUTATION_JOURNAL_CAPACITY ||
+        journal->entries.elem_size != sizeof(struct bpfj_mutation_record) ||
+        journal->entries.buf == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::not_supported,
+          "the running arena has an incompatible ownership journal"));
+    }
+  } else {
+    auto journalMem = arena->alloc(sizeof(struct bpfj_mutation_journal));
+    if (!journalMem) {
+      return makeUnexpected(journalMem.error());
+    }
+    journal = static_cast<struct bpfj_mutation_journal*>(*journalMem);
+
+    constexpr std::uint32_t kRecordsSize =
+        BPFJ_MUTATION_JOURNAL_CAPACITY * sizeof(struct bpfj_mutation_record);
+    auto records = arena->alloc(kRecordsSize);
+    if (!records) {
+      (void)arena->free(journal);
+      return makeUnexpected(records.error());
+    }
+    lock::init(journal->lock);
+    journal->state = BPFJ_MUTATION_JOURNAL_OFF;
+    journal->next = 0;
+    journal->failure = BPFJ_MUTATION_JOURNAL_OK;
+    journal->reserved = 0;
+    journal->entries.buf = *records;
+    journal->entries.elem_size = sizeof(struct bpfj_mutation_record);
+    journal->entries.size = 0;
+    journal->entries.capacity = BPFJ_MUTATION_JOURNAL_CAPACITY;
+    journal->entries._pad = 0;
+    ctrl->mutation_journal = journal;
+  }
+
+  std::optional<lock::Guard> guard;
+  if (auto res = lockJournal(*journal, guard); !res) {
+    return makeUnexpected(res.error());
+  }
+  std::memset(
+      journal->entries.buf,
+      0,
+      journal->entries.capacity * sizeof(struct bpfj_mutation_record));
+  journal->entries.size = 0;
+  journal->next = 0;
+  journal->failure = BPFJ_MUTATION_JOURNAL_OK;
+  journal->state = BPFJ_MUTATION_JOURNAL_RECORDING;
+  return MutationJournal{.arena = std::move(*arena), .journal = journal};
+}
+
+void disableMutationJournal(MutationJournal& owner) noexcept {
+  if (owner.journal == nullptr) {
+    return;
+  }
+  using namespace std::chrono_literals;
+  lock::Guard guard{owner.journal->lock, 5s};
+  if (guard.owns()) {
+    owner.journal->state = BPFJ_MUTATION_JOURNAL_OFF;
+  }
+}
+
+[[nodiscard]] Expected<> closeMutationJournal(MutationJournal& owner) noexcept {
+  std::optional<lock::Guard> guard;
+  if (auto res = lockJournal(*owner.journal, guard); !res) {
+    return res;
+  }
+  owner.journal->state = BPFJ_MUTATION_JOURNAL_CLOSING;
+  return unit;
+}
+
+struct MutationReplayMaps {
+  std::map<std::uint8_t, Fd> maps;
+  Fd rolePolicies;
+};
+
+[[nodiscard]] Expected<MutationReplayMaps> openMutationReplayMaps(
+    const PinConfig& cfg) noexcept {
+  MutationReplayMaps out;
+  auto policies = pins::openPinnedMap(cfg, "bpfj_role_policies");
+  if (!policies) {
+    return makeUnexpected(policies.error());
+  }
+  out.rolePolicies = std::move(*policies);
+
+  const std::pair<std::uint8_t, std::string_view> names[] = {
+      {BPFJ_MUTATION_BPF_MAP_OWNER, kMapOwners},
+      {BPFJ_MUTATION_BPF_PROG_OWNER, kProgOwners},
+      {BPFJ_MUTATION_MQ_SYSV_OWNER, kMqSysvOwners},
+      {BPFJ_MUTATION_MQ_POSIX_OWNER, kMqPosixOwners},
+      {BPFJ_MUTATION_MQ_POSIX_PENDING, kMqPosixPending},
+      {BPFJ_MUTATION_SHM_SYSV_OWNER, kShmSysvOwners},
+      {BPFJ_MUTATION_SHM_POSIX_OWNER, kShmPosixOwners},
+      {BPFJ_MUTATION_SHM_POSIX_PENDING, kShmPosixPending},
+  };
+  for (const auto& [domain, name] : names) {
+    auto map = pins::openPinnedMap(cfg, name);
+    if (!map) {
+      return makeUnexpected(map.error());
+    }
+    out.maps.emplace(domain, std::move(*map));
+  }
+  return out;
+}
+
+[[nodiscard]] Expected<const struct bpfj_role_policy*> replayPolicy(
+    const MutationReplayMaps& maps,
+    const struct bpfj_mutation_record& record) noexcept {
+  auto policy = lookupRolePolicy(maps.rolePolicies, record.role);
+  if (!policy) {
+    return makeUnexpected(policy.error());
+  }
+  if (!*policy) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "ownership journal names a role missing from the new policy"));
+  }
+  return *policy;
+}
+
+[[nodiscard]] Expected<> replayMutation(
+    const MutationReplayMaps& maps,
+    const struct bpfj_mutation_record& record) noexcept {
+  const auto found = maps.maps.find(record.domain);
+  if (found == maps.maps.end()) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "ownership journal has an unknown domain"));
+  }
+  const int fd = found->second.get();
+  if (record.operation == BPFJ_MUTATION_DELETE) {
+    if (::bpf_map_delete_elem(fd, record.key) != 0 && errno != ENOENT) {
+      return makeUnexpected(
+          makeErrnoError("failed to replay an ownership deletion"));
+    }
+    return unit;
+  }
+  if (record.operation != BPFJ_MUTATION_UPSERT) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "ownership journal has an unknown operation"));
+  }
+
+  const struct bpfj_role_policy* policy = nullptr;
+  if (record.owned) {
+    auto translated = replayPolicy(maps, record);
+    if (!translated) {
+      return makeUnexpected(translated.error());
+    }
+    policy = *translated;
+  }
+
+  int result = -1;
+  switch (record.domain) {
+    case BPFJ_MUTATION_BPF_MAP_OWNER:
+    case BPFJ_MUTATION_BPF_PROG_OWNER: {
+      const struct bpfj_bpf_owner owner = {
+          .role = record.role,
+          .id = record.object_id,
+          .pod = record.pod,
+          .policy = policy,
+      };
+      result = ::bpf_map_update_elem(fd, record.key, &owner, BPF_ANY);
+      break;
+    }
+    case BPFJ_MUTATION_MQ_SYSV_OWNER:
+    case BPFJ_MUTATION_MQ_POSIX_OWNER: {
+      const struct bpfj_mq_owner owner = {
+          .role = record.role,
+          .pod = record.pod,
+          .policy = policy,
+      };
+      result = ::bpf_map_update_elem(fd, record.key, &owner, BPF_ANY);
+      break;
+    }
+    case BPFJ_MUTATION_MQ_POSIX_PENDING: {
+      const struct bpfj_mq_pending_owner pending = {
+          .owner =
+              {
+                  .role = record.role,
+                  .pod = record.pod,
+                  .policy = policy,
+              },
+          .owned = record.owned,
+      };
+      result = ::bpf_map_update_elem(fd, record.key, &pending, BPF_ANY);
+      break;
+    }
+    case BPFJ_MUTATION_SHM_SYSV_OWNER:
+    case BPFJ_MUTATION_SHM_POSIX_OWNER: {
+      const struct bpfj_shm_owner owner = {
+          .role = record.role,
+          .pod = record.pod,
+          .policy = policy,
+      };
+      result = ::bpf_map_update_elem(fd, record.key, &owner, BPF_ANY);
+      break;
+    }
+    case BPFJ_MUTATION_SHM_POSIX_PENDING: {
+      const struct bpfj_shm_pending_owner pending = {
+          .owner =
+              {
+                  .role = record.role,
+                  .pod = record.pod,
+                  .policy = policy,
+              },
+          .owned = record.owned,
+      };
+      result = ::bpf_map_update_elem(fd, record.key, &pending, BPF_ANY);
+      break;
+    }
+    default:
+      break;
+  }
+  if (result != 0) {
+    return makeUnexpected(makeErrnoError("failed to replay ownership state"));
+  }
+  return unit;
+}
+
+[[nodiscard]] Expected<std::uint32_t> journalEnd(
+    MutationJournal& owner) noexcept {
+  std::optional<lock::Guard> guard;
+  if (auto res = lockJournal(*owner.journal, guard); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (owner.journal->failure == BPFJ_MUTATION_JOURNAL_FULL) {
+    return makeUnexpected(makeError(
+        std::errc::no_buffer_space,
+        "ownership mutation journal exhausted its capacity during "
+        "replacement"));
+  }
+  if (owner.journal->failure == BPFJ_MUTATION_JOURNAL_CONTENDED) {
+    return makeUnexpected(makeError(
+        std::errc::device_or_resource_busy,
+        "an ownership mutation could not acquire the replacement journal "
+        "lock"));
+  }
+  if (owner.journal->failure != BPFJ_MUTATION_JOURNAL_OK) {
+    return makeUnexpected(makeError(
+        std::errc::state_not_recoverable,
+        "ownership mutation journal has an unknown failure state"));
+  }
+  const std::uint32_t end = owner.journal->next;
+  if (end > owner.journal->entries.capacity) {
+    return makeUnexpected(makeError(
+        std::errc::no_buffer_space,
+        "ownership mutation journal exceeded its capacity"));
+  }
+  return end;
+}
+
+[[nodiscard]] Expected<std::size_t> replayMutationJournal(
+    MutationJournal& owner,
+    const MutationReplayMaps& maps,
+    std::uint32_t end) noexcept {
+  auto* records =
+      static_cast<struct bpfj_mutation_record*>(owner.journal->entries.buf);
+  std::size_t applied = 0;
+  while (owner.replayed < end) {
+    auto& record = records[owner.replayed];
+    if (record.committed == 0) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "ownership journal contains an uncommitted record"));
+    }
+    if (auto res = replayMutation(maps, record); !res) {
+      return makeUnexpected(res.error());
+    }
+    ++owner.replayed;
+    ++applied;
+  }
+  return applied;
+}
+
 [[nodiscard]] Expected<std::uint32_t> readRuntimeVersions(
     const PinConfig& cfg) noexcept {
   auto arena = PodArena::open(cfg);
@@ -678,7 +988,8 @@ template <typename T>
     int to,
     std::string_view what,
     const Fd* rolePolicies = nullptr,
-    std::size_t policyOffset = 0) noexcept {
+    std::size_t policyOffset = 0,
+    std::optional<std::size_t> ownedOffset = std::nullopt) noexcept {
   static_assert(offsetof(struct bpfj_mq_owner, role) == 0);
   static_assert(offsetof(struct bpfj_shm_owner, role) == 0);
   struct bpf_map_info info{};
@@ -702,7 +1013,9 @@ template <typename T>
     const bool firstVisit = seen.insert(next).second;
     if (firstVisit &&
         ::bpf_map_lookup_elem(from, next.data(), value.data()) == 0) {
-      if (rolePolicies != nullptr) {
+      const bool owned = !ownedOffset ||
+          (*ownedOffset < value.size() && value[*ownedOffset] != 0);
+      if (rolePolicies != nullptr && owned) {
         struct bpfj_role_id role{};
         std::memcpy(&role, value.data(), sizeof(role));
         auto policy = lookupRolePolicy(*rolePolicies, role);
@@ -805,6 +1118,54 @@ template <typename T>
     copied += *one;
   }
   return copied;
+}
+
+[[nodiscard]] Expected<> copyPendingOwnership(
+    const PinConfig& oldCfg,
+    const PinConfig& newCfg) noexcept {
+  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
+  if (!rolePolicies) {
+    return makeUnexpected(rolePolicies.error());
+  }
+
+  const struct {
+    std::string_view name;
+    std::size_t policyOffset;
+    std::size_t ownedOffset;
+  } pendingMaps[] = {
+      {kMqPosixPending,
+       offsetof(struct bpfj_mq_pending_owner, owner) +
+           offsetof(struct bpfj_mq_owner, policy),
+       offsetof(struct bpfj_mq_pending_owner, owned)},
+      {kShmPosixPending,
+       offsetof(struct bpfj_shm_pending_owner, owner) +
+           offsetof(struct bpfj_shm_owner, policy),
+       offsetof(struct bpfj_shm_pending_owner, owned)},
+  };
+  for (const auto& pending : pendingMaps) {
+    if (!hasPinnedMap(oldCfg, pending.name)) {
+      continue;
+    }
+    auto from = pins::openPinnedMap(oldCfg, pending.name);
+    auto to = pins::openPinnedMap(newCfg, pending.name);
+    if (!from) {
+      return makeUnexpected(from.error());
+    }
+    if (!to) {
+      return makeUnexpected(to.error());
+    }
+    auto copied = copyRawMap(
+        from->get(),
+        to->get(),
+        pending.name,
+        &*rolePolicies,
+        pending.policyOffset,
+        pending.ownedOffset);
+    if (!copied) {
+      return makeUnexpected(copied.error());
+    }
+  }
+  return unit;
 }
 
 /// @brief Read one of the iterator's single-slot counters.
@@ -1139,6 +1500,20 @@ struct BackfillStats {
     }
   }
 
+  std::optional<MutationJournal> mutationJournal;
+  if (hasOld) {
+    auto started = startMutationJournal(cfg);
+    if (!started) {
+      return makeUnexpected(started.error());
+    }
+    mutationJournal.emplace(std::move(*started));
+  }
+  auto stopJournal = makeGuard([&] {
+    if (mutationJournal) {
+      disableMutationJournal(*mutationJournal);
+    }
+  });
+
   // Destructive, which clears a tree left by a run that died before its swap,
   // and seeds the new base role onto every task before the backfill merges the
   // old membership on top.
@@ -1230,12 +1605,44 @@ struct BackfillStats {
     }
     stats.owners += *shmState;
 
+    if (auto res = copyPendingOwnership(cfg, newCfg); !res) {
+      return makeUnexpected(res.error());
+    }
+
+    auto replayMaps = openMutationReplayMaps(newCfg);
+    if (!replayMaps) {
+      return makeUnexpected(replayMaps.error());
+    }
+    auto initialEnd = journalEnd(*mutationJournal);
+    if (!initialEnd) {
+      return makeUnexpected(initialEnd.error());
+    }
+    if (auto replayed =
+            replayMutationJournal(*mutationJournal, *replayMaps, *initialEnd);
+        !replayed) {
+      return makeUnexpected(replayed.error());
+    }
+    if (auto res = closeMutationJournal(*mutationJournal); !res) {
+      return makeUnexpected(res.error());
+    }
+    auto finalEnd = journalEnd(*mutationJournal);
+    if (!finalEnd) {
+      return makeUnexpected(finalEnd.error());
+    }
+    if (auto replayed =
+            replayMutationJournal(*mutationJournal, *replayMaps, *finalEnd);
+        !replayed) {
+      return makeUnexpected(replayed.error());
+    }
+
     // Exchange the complete trees before touching the old one. A failed
     // exchange leaves the original path and enforcement intact; after a
     // successful exchange cfg names the new tree and newCfg names the old.
     if (auto res = exchangePinTrees(cfg, newCfg); !res) {
       return makeUnexpected(res.error());
     }
+    disableMutationJournal(*mutationJournal);
+    stopJournal.dismiss();
     thaw.dismiss();
 
     if (auto res = setReplaceFrozen(cfg, false); !res) {

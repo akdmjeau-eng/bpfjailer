@@ -7,7 +7,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/Pods.h"
@@ -59,6 +61,30 @@ bool pinnedMapIsEmpty(std::string_view name) {
   const bool empty = ::bpf_map_get_next_key(fd, nullptr, key) != 0;
   ::close(fd);
   return empty;
+}
+
+bool waitForMutationJournal() {
+  using namespace std::chrono_literals;
+  auto arena = PodArena::open(testPins());
+  if (!arena) {
+    fail(
+        __FILE__,
+        __LINE__,
+        "PodArena::open(testPins())",
+        "      " + arena.error().message());
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  do {
+    const auto* journal = static_cast<const struct bpfj_mutation_journal*>(
+        arena->ctrl()->mutation_journal);
+    if (journal != nullptr &&
+        journal->state == BPFJ_MUTATION_JOURNAL_RECORDING) {
+      return true;
+    }
+    std::this_thread::sleep_for(1ms);
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
 }
 
 void enroll(std::string_view role, pid_t pid) {

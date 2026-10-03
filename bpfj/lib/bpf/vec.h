@@ -17,20 +17,6 @@
 // fixed array is not paying for slots nobody uses.
 #define BPFJ_VEC_MIN_CAPACITY 4
 
-struct bpfj_vec {
-  // The backing array, or NULL while the vec has never grown; element i is at
-  // buf + i * elem_size.
-  void __arena* buf;
-  // Bytes per slot, fixed at init; zero means never initialized, which
-  // bpfj_vec_reserve refuses rather than allocating a zero-stride buffer.
-  __u32 elem_size;
-  __u32 size;
-  __u32 capacity;
-  // Named rather than implicit, since a vec is copied word-wise and
-  // uninitialized padding would make equal structs read as different.
-  __u32 _pad;
-};
-
 // Round up to a power of two. Undefined for 0, which reserve never passes.
 static __always_inline __u32 bpfj_vec_round_capacity(__u32 capacity) {
   --capacity;

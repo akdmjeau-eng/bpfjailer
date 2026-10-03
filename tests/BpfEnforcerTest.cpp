@@ -37,6 +37,7 @@ using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
+using bpfjailer::test::waitForMutationJournal;
 
 namespace {
 
@@ -655,6 +656,55 @@ TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
   // some task holds an fd to, and a pinned object is held by its pin, so
   // without carrying the records across this map comes out unowned.
   ASSERT_EQ(ownerOf(id), std::string("owner"));
+}
+
+TEST(BpfEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
+  const std::string yaml = "roles:\n  owner:\n    bpf-roles:\n      - owner\n";
+  attach(yaml);
+  enroll("owner", ::getpid());
+
+  Child replacer([yaml] { return replaceErrno(yaml); });
+  int replaceStatus = -1;
+  std::thread replacing([&] { replaceStatus = replacer.run(); });
+
+  const bool recording = waitForMutationJournal();
+  const int keptFd = ::bpf_map_create(
+      BPF_MAP_TYPE_HASH,
+      "bpfj_race_keep",
+      sizeof(int),
+      sizeof(int),
+      1,
+      nullptr);
+  const int removedFd = ::bpf_map_create(
+      BPF_MAP_TYPE_HASH,
+      "bpfj_race_free",
+      sizeof(int),
+      sizeof(int),
+      1,
+      nullptr);
+  auto mapId = [](int fd) {
+    struct bpf_map_info info{};
+    __u32 len = sizeof(info);
+    return fd >= 0 && ::bpf_obj_get_info_by_fd(fd, &info, &len) == 0
+        ? static_cast<int>(info.id)
+        : -1;
+  };
+  const int keptId = mapId(keptFd);
+  const int removedId = mapId(removedFd);
+  if (removedFd >= 0) {
+    ::close(removedFd);
+  }
+  replacing.join();
+
+  ASSERT(recording);
+  ASSERT(keptFd >= 0);
+  ASSERT(removedFd >= 0);
+  ASSERT(keptId > 0);
+  ASSERT(removedId > 0);
+  ASSERT_EQ(replaceStatus, 0);
+  ASSERT_EQ(ownerOf(keptId), std::string("owner"));
+  ASSERT_EQ(ownerOf(removedId), std::string());
+  ::close(keptFd);
 }
 
 TEST(BpfEnforcer, AReplaceKeepsANonLeaderThreadJailed) {

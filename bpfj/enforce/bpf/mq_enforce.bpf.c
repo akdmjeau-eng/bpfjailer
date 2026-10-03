@@ -15,6 +15,7 @@
 
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/mq_gate.h"
+#include "bpfj/enforce/bpf/mutation_journal.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
@@ -35,16 +36,8 @@ struct {
   __type(value, struct bpfj_mq_owner);
 } bpfj_mq_posix_owners SEC(".maps");
 
-struct bpfj_mq_pending_owner {
-  struct bpfj_mq_owner owner;
-  __u8 owned;
-};
-
-// Creation starts before mqueuefs has a stable inode number. Remember the
-// inode pointer until file_open can resolve it to the persistent key. This is
-// deliberately ephemeral rather than pinned: inode allocation and file open
-// are one in-flight operation, and two trees attached during replacement each
-// observe both hooks.
+// Pin the inode-to-owner handoff so replacement preserves an allocation whose
+// file_open has not resolved its persistent key yet.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 16384);
@@ -96,6 +89,8 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
         0) {
       return -ENOMEM;
     }
+    bpfj_mutation_mq_owner(
+        BPFJ_MUTATION_MQ_SYSV_OWNER, BPFJ_MUTATION_UPSERT, key, 0, &owner, 1);
   }
   return 0;
 }
@@ -105,6 +100,8 @@ int BPF_PROG(bpfj_mq_sysv_free, struct kern_ipc_perm* msq) {
   if (msq) {
     const __u64 key = (__u64)msq;
     bpf_map_delete_elem(&bpfj_mq_sysv_owners, &key);
+    bpfj_mutation_mq_owner(
+        BPFJ_MUTATION_MQ_SYSV_OWNER, BPFJ_MUTATION_DELETE, key, 0, NULL, 0);
   }
   return 0;
 }
@@ -185,10 +182,18 @@ int BPF_PROG(bpfj_mq_posix_alloc, struct inode* inode, int lsm_ret) {
   }
 
   const __u64 key = (__u64)inode;
-  return bpf_map_update_elem(&bpfj_mq_posix_pending, &key, &pending, BPF_ANY) ==
-          0
-      ? 0
-      : -ENOMEM;
+  if (bpf_map_update_elem(&bpfj_mq_posix_pending, &key, &pending, BPF_ANY) !=
+      0) {
+    return -ENOMEM;
+  }
+  bpfj_mutation_mq_owner(
+      BPFJ_MUTATION_MQ_POSIX_PENDING,
+      BPFJ_MUTATION_UPSERT,
+      key,
+      0,
+      &pending.owner,
+      pending.owned);
+  return 0;
 }
 
 static __always_inline int bpfj_mq_posix_check(struct file* file) {
@@ -244,7 +249,21 @@ int BPF_PROG(bpfj_mq_posix_open, struct file* file, int lsm_ret) {
           &bpfj_mq_posix_owners, &key, &pending->owner, BPF_ANY) != 0) {
     return -ENOMEM;
   }
+  bpfj_mutation_mq_owner(
+      BPFJ_MUTATION_MQ_POSIX_OWNER,
+      BPFJ_MUTATION_UPSERT,
+      key.dev,
+      key.ino,
+      &pending->owner,
+      pending->owned);
   bpf_map_delete_elem(&bpfj_mq_posix_pending, &pending_key);
+  bpfj_mutation_mq_owner(
+      BPFJ_MUTATION_MQ_POSIX_PENDING,
+      BPFJ_MUTATION_DELETE,
+      pending_key,
+      0,
+      NULL,
+      0);
   return 0;
 }
 
@@ -257,6 +276,13 @@ SEC("lsm/inode_free_security")
 int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
   const __u64 pending_key = (__u64)inode;
   bpf_map_delete_elem(&bpfj_mq_posix_pending, &pending_key);
+  bpfj_mutation_mq_owner(
+      BPFJ_MUTATION_MQ_POSIX_PENDING,
+      BPFJ_MUTATION_DELETE,
+      pending_key,
+      0,
+      NULL,
+      0);
 
   struct super_block* sb = inode ? BPF_CORE_READ(inode, i_sb) : NULL;
   if (sb && BPF_CORE_READ(sb, s_magic) == BPFJ_MQUEUE_MAGIC) {
@@ -266,6 +292,13 @@ int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
     };
     if (key.ino != 0) {
       bpf_map_delete_elem(&bpfj_mq_posix_owners, &key);
+      bpfj_mutation_mq_owner(
+          BPFJ_MUTATION_MQ_POSIX_OWNER,
+          BPFJ_MUTATION_DELETE,
+          key.dev,
+          key.ino,
+          NULL,
+          0);
     }
   }
   return 0;

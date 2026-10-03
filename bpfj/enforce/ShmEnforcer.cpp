@@ -177,7 +177,11 @@ Expected<> ShmEnforcer::load(
   if (auto res = pins::pinSharedMaps(skel, mapDir); !res) {
     return res;
   }
-  for (const auto name : {"bpfj_shm_sysv_owners", "bpfj_shm_posix_owners"}) {
+  for (const auto name : {
+           "bpfj_shm_sysv_owners",
+           "bpfj_shm_posix_owners",
+           "bpfj_shm_posix_pending",
+       }) {
     if (auto res = pins::pinMap(skel, name, mapDir, kMaxOwners); !res) {
       return res;
     }

@@ -14,6 +14,7 @@
 #include <errno.h>
 
 #include "bpfj/enforce/bpf/maps.h"
+#include "bpfj/enforce/bpf/mutation_journal.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/shm_gate.h"
 #include "bpfj/enforce/bpf/types.h"
@@ -38,11 +39,8 @@ struct {
   __type(value, struct bpfj_shm_owner);
 } bpfj_shm_posix_owners SEC(".maps");
 
-struct bpfj_shm_pending_owner {
-  struct bpfj_shm_owner owner;
-  __u8 owned;
-};
-
+// Pin the inode-to-owner handoff so replacement preserves an allocation whose
+// file_open has not resolved its persistent key yet.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 16384);
@@ -112,6 +110,8 @@ int BPF_PROG(bpfj_shm_sysv_alloc, struct kern_ipc_perm* shp, int lsm_ret) {
         0) {
       return -ENOMEM;
     }
+    bpfj_mutation_shm_owner(
+        BPFJ_MUTATION_SHM_SYSV_OWNER, BPFJ_MUTATION_UPSERT, key, 0, &owner, 1);
   }
   return 0;
 }
@@ -121,6 +121,8 @@ int BPF_PROG(bpfj_shm_sysv_free, struct kern_ipc_perm* shp) {
   if (shp) {
     const __u64 key = (__u64)shp;
     bpf_map_delete_elem(&bpfj_shm_sysv_owners, &key);
+    bpfj_mutation_shm_owner(
+        BPFJ_MUTATION_SHM_SYSV_OWNER, BPFJ_MUTATION_DELETE, key, 0, NULL, 0);
   }
   return 0;
 }
@@ -264,10 +266,18 @@ int BPF_PROG(bpfj_shm_posix_alloc, struct inode* inode, int lsm_ret) {
   }
 
   const __u64 key = (__u64)inode;
-  return bpf_map_update_elem(
-             &bpfj_shm_posix_pending, &key, &pending, BPF_ANY) == 0
-      ? 0
-      : -ENOMEM;
+  if (bpf_map_update_elem(&bpfj_shm_posix_pending, &key, &pending, BPF_ANY) !=
+      0) {
+    return -ENOMEM;
+  }
+  bpfj_mutation_shm_owner(
+      BPFJ_MUTATION_SHM_POSIX_PENDING,
+      BPFJ_MUTATION_UPSERT,
+      key,
+      0,
+      &pending.owner,
+      pending.owned);
+  return 0;
 }
 
 SEC("lsm/file_open")
@@ -315,7 +325,21 @@ int BPF_PROG(bpfj_shm_posix_open, struct file* file, int lsm_ret) {
           &bpfj_shm_posix_owners, &object, &pending->owner, BPF_ANY) != 0) {
     return -ENOMEM;
   }
+  bpfj_mutation_shm_owner(
+      BPFJ_MUTATION_SHM_POSIX_OWNER,
+      BPFJ_MUTATION_UPSERT,
+      object.dev,
+      object.ino,
+      &pending->owner,
+      pending->owned);
   bpf_map_delete_elem(&bpfj_shm_posix_pending, &pending_key);
+  bpfj_mutation_shm_owner(
+      BPFJ_MUTATION_SHM_POSIX_PENDING,
+      BPFJ_MUTATION_DELETE,
+      pending_key,
+      0,
+      NULL,
+      0);
   return 0;
 }
 
@@ -412,10 +436,24 @@ int BPF_PROG(bpfj_shm_posix_free, struct inode* inode) {
   }
   const __u64 pending_key = (__u64)inode;
   bpf_map_delete_elem(&bpfj_shm_posix_pending, &pending_key);
+  bpfj_mutation_shm_owner(
+      BPFJ_MUTATION_SHM_POSIX_PENDING,
+      BPFJ_MUTATION_DELETE,
+      pending_key,
+      0,
+      NULL,
+      0);
 
   struct bpfj_posix_shm_key key = {};
   if (bpfj_posix_shm_key_from_inode(inode, &key)) {
     bpf_map_delete_elem(&bpfj_shm_posix_owners, &key);
+    bpfj_mutation_shm_owner(
+        BPFJ_MUTATION_SHM_POSIX_OWNER,
+        BPFJ_MUTATION_DELETE,
+        key.dev,
+        key.ino,
+        NULL,
+        0);
   }
   return 0;
 }

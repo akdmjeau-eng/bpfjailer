@@ -15,6 +15,7 @@
 #include <errno.h>
 
 #include "bpfj/enforce/bpf/maps.h"
+#include "bpfj/enforce/bpf/mutation_journal.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 
@@ -243,7 +244,8 @@ static __always_inline bool bpfj_bpf_access_allowed(
 /// from the create hooks, since bpf_map_new_fd also runs for a GET_FD_BY_ID
 /// and an open of a pin; the id is unassigned here, so the first fd fills it
 /// in.
-static __always_inline void bpfj_bpf_take_ownership(void* owners, __u64 addr) {
+static __always_inline void
+bpfj_bpf_take_ownership(void* owners, __u8 domain, __u64 addr) {
   struct bpfj_bpf_owner record = {};
   if (!bpfj_bpf_owning_role(bpfj_get_current_pid_data(), &record)) {
     // Unjailed, denied, or explicitly untracked. Nothing to record.
@@ -253,12 +255,14 @@ static __always_inline void bpfj_bpf_take_ownership(void* owners, __u64 addr) {
   if (bpf_map_update_elem(owners, &addr, &record, BPF_NOEXIST) < 0) {
     // Loud, because the object stays unowned and so openable by anyone.
     BPFJ_LOG_ERR(ENOSPC, "No room to record the owner of a new BPF object");
+    return;
   }
+  bpfj_mutation_bpf_owner(domain, BPFJ_MUTATION_UPSERT, addr, &record);
 }
 
 /// @brief Check an fd being created for an object against the caller's policy.
 static __always_inline int
-bpfj_bpf_check_object(void* owners, __u64 addr, __u32 id) {
+bpfj_bpf_check_object(void* owners, __u8 domain, __u64 addr, __u32 id) {
   if (bpfj_bpf_is_loader()) {
     return 0;
   }
@@ -283,6 +287,7 @@ bpfj_bpf_check_object(void* owners, __u64 addr, __u32 id) {
   // The id exists by the first fd, so record it for userspace.
   if (owner->id == 0) {
     owner->id = id;
+    bpfj_mutation_bpf_owner(domain, BPFJ_MUTATION_UPSERT, addr, owner);
   }
 
   return 0;
@@ -341,7 +346,8 @@ int BPF_PROG(
   }
 
   if (map) {
-    bpfj_bpf_take_ownership(&bpfj_bpf_map_owners, (__u64)map);
+    bpfj_bpf_take_ownership(
+        &bpfj_bpf_map_owners, BPFJ_MUTATION_BPF_MAP_OWNER, (__u64)map);
   }
   return 0;
 }
@@ -359,7 +365,8 @@ int BPF_PROG(
   }
 
   if (prog) {
-    bpfj_bpf_take_ownership(&bpfj_bpf_prog_owners, (__u64)prog);
+    bpfj_bpf_take_ownership(
+        &bpfj_bpf_prog_owners, BPFJ_MUTATION_BPF_PROG_OWNER, (__u64)prog);
   }
   return 0;
 }
@@ -378,7 +385,8 @@ int BPF_PROG(
     return 0;
   }
 
-  return bpfj_bpf_check_object(&bpfj_bpf_map_owners, (__u64)map, map->id);
+  return bpfj_bpf_check_object(
+      &bpfj_bpf_map_owners, BPFJ_MUTATION_BPF_MAP_OWNER, (__u64)map, map->id);
 }
 
 // No fmode here, unlike bpf_map: security_bpf_prog() takes the program alone.
@@ -393,24 +401,31 @@ int BPF_PROG(bpfj_bpf_prog_check, struct bpf_prog* prog, int lsm_ret) {
   }
 
   return bpfj_bpf_check_object(
-      &bpfj_bpf_prog_owners, (__u64)prog, prog->aux->id);
+      &bpfj_bpf_prog_owners,
+      BPFJ_MUTATION_BPF_PROG_OWNER,
+      (__u64)prog,
+      prog->aux->id);
 }
 
 // Cleanup. Both hooks return void, so there is nothing to decide here.
 
-static __always_inline void bpfj_bpf_forget(void* owners, __u64 addr) {
+static __always_inline void
+bpfj_bpf_forget(void* owners, __u8 domain, __u64 addr) {
   bpf_map_delete_elem(owners, &addr);
+  bpfj_mutation_bpf_owner(domain, BPFJ_MUTATION_DELETE, addr, NULL);
 }
 
 SEC("lsm/bpf_map_free")
 int BPF_PROG(bpfj_bpf_map_free, struct bpf_map* map) {
-  bpfj_bpf_forget(&bpfj_bpf_map_owners, (__u64)map);
+  bpfj_bpf_forget(
+      &bpfj_bpf_map_owners, BPFJ_MUTATION_BPF_MAP_OWNER, (__u64)map);
   return 0;
 }
 
 SEC("lsm/bpf_prog_free")
 int BPF_PROG(bpfj_bpf_prog_free, struct bpf_prog* prog) {
-  bpfj_bpf_forget(&bpfj_bpf_prog_owners, (__u64)prog);
+  bpfj_bpf_forget(
+      &bpfj_bpf_prog_owners, BPFJ_MUTATION_BPF_PROG_OWNER, (__u64)prog);
   return 0;
 }
 

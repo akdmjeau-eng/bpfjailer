@@ -3,6 +3,8 @@
 #pragma once
 
 #include "bpfj/fsverity/bpf/types_fsverity.h"
+#include "bpfj/lib/bpf/types_heap.h"
+#include "bpfj/lib/bpf/types_lock.h"
 #include "bpfj/lib/bpf/types_role.h"
 #include "bpfj/lib/bpf/types_uuid.h"
 #include "bpfj/var/bpf/types_var.h"
@@ -26,7 +28,7 @@
 
 // The persisted task-storage and arena-pod layouts replaced as one unit.
 // Bump this whenever either bpfj_pid_data or bpfj_pod changes shape.
-#define BPFJ_MEMBERSHIP_VERSION 1
+#define BPFJ_MEMBERSHIP_VERSION 2
 
 // The layout of the bpfj_bpf_owner records below, which a replace reads
 // through the running tree's pin to decide whether it can carry them across;
@@ -229,6 +231,11 @@ struct bpfj_mq_owner {
   const struct bpfj_role_policy __arena* policy;
 };
 
+struct bpfj_mq_pending_owner {
+  struct bpfj_mq_owner owner;
+  __u8 owned;
+};
+
 // mqueuefs inode identity. s_dev separates mounts/filesystems and i_ino names
 // the queue within one of them; unlike an fd, the pair survives close/open.
 struct bpfj_posix_mq_key {
@@ -242,6 +249,11 @@ struct bpfj_shm_owner {
   const struct bpfj_role_policy __arena* policy;
 };
 
+struct bpfj_shm_pending_owner {
+  struct bpfj_shm_owner owner;
+  __u8 owned;
+};
+
 struct bpfj_posix_shm_key {
   __u64 dev;
   __u64 ino;
@@ -251,6 +263,61 @@ struct bpfj_posix_shm_key {
 struct bpfj_shm_mount_key {
   __u64 namespace_ino;
   __u64 mount_id;
+};
+
+#define BPFJ_MUTATION_JOURNAL_CAPACITY 65536U
+
+enum bpfj_mutation_journal_state {
+  BPFJ_MUTATION_JOURNAL_OFF = 0,
+  BPFJ_MUTATION_JOURNAL_RECORDING = 1,
+  BPFJ_MUTATION_JOURNAL_CLOSING = 2,
+};
+
+enum bpfj_mutation_journal_failure {
+  BPFJ_MUTATION_JOURNAL_OK = 0,
+  BPFJ_MUTATION_JOURNAL_FULL = 1,
+  BPFJ_MUTATION_JOURNAL_CONTENDED = 2,
+};
+
+enum bpfj_mutation_domain {
+  BPFJ_MUTATION_BPF_MAP_OWNER = 1,
+  BPFJ_MUTATION_BPF_PROG_OWNER = 2,
+  BPFJ_MUTATION_MQ_SYSV_OWNER = 3,
+  BPFJ_MUTATION_MQ_POSIX_OWNER = 4,
+  BPFJ_MUTATION_MQ_POSIX_PENDING = 5,
+  BPFJ_MUTATION_SHM_SYSV_OWNER = 6,
+  BPFJ_MUTATION_SHM_POSIX_OWNER = 7,
+  BPFJ_MUTATION_SHM_POSIX_PENDING = 8,
+};
+
+enum bpfj_mutation_operation {
+  BPFJ_MUTATION_UPSERT = 1,
+  BPFJ_MUTATION_DELETE = 2,
+};
+
+// Stable ownership data only. Policy pointers are resolved against the new
+// arena while replaying the journal.
+struct bpfj_mutation_record {
+  __u32 committed;
+  __u8 domain;
+  __u8 operation;
+  __u8 owned;
+  __u8 reserved;
+  __u64 key[2];
+  __u32 object_id;
+  struct bpfj_role_id role;
+  struct bpfj_uuid pod;
+};
+
+// An append-only MPSC log during replacement. The vec is fully reserved
+// before RECORDING is published; BPF writers never grow or free its buffer.
+struct bpfj_mutation_journal {
+  struct bpfj_lock lock;
+  __u32 state;
+  __u32 next;
+  __u32 failure;
+  __u32 reserved;
+  struct bpfj_vec entries;
 };
 
 struct bpfj_pid_data {
