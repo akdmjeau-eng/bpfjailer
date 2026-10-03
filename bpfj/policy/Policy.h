@@ -26,6 +26,12 @@ enum class AccessMode : std::uint8_t {
   Any,
 };
 
+struct ExecPathPolicy {
+  bool allowExec = false;
+  bool allowSetuid = false;
+  bool allowSharedObject = false;
+};
+
 /// @brief What one role is subject to.
 struct RolePolicy {
   /// @brief Open every operation not configured more narrowly below.
@@ -36,6 +42,12 @@ struct RolePolicy {
   std::map<std::string, FileMode> paths;
   bool hasPaths = false;
   bool fsAny = false;
+
+  /// @brief Path pattern to the executable-code operations permitted there.
+  /// Matching is performed in PID 1's mount namespace.
+  std::map<std::string, ExecPathPolicy> execPaths;
+  bool hasExecPaths = false;
+  bool execAny = false;
 
   /// @brief Unix-socket pathname or abstract-name rules. Pathname matches are
   /// recursive with the longest path winning; abstract names (spelled with a

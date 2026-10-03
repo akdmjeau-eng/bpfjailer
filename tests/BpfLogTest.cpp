@@ -260,6 +260,7 @@ TEST(BpfLog, NamesFilesystemEvents) {
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_UNIX), "unix");
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_MOUNT), "mount");
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_PROC), "proc");
+  ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_EXEC), "exec");
 }
 
 TEST(BpfLog, RejectsShortEventRecords) {

@@ -94,6 +94,7 @@ enum bpfj_event_type {
   BPFJ_EVENT_UNIX = 9,
   BPFJ_EVENT_MOUNT = 10,
   BPFJ_EVENT_PROC = 11,
+  BPFJ_EVENT_EXEC = 12,
 };
 
 struct bpfj_role_id {
@@ -136,6 +137,7 @@ enum bpfj_policy_mode {
 #define BPFJ_POLICY_VERITY_ANY (1U << 6)
 #define BPFJ_POLICY_HAS_UMOUNT (1U << 7)
 #define BPFJ_POLICY_UMOUNT_ANY (1U << 8)
+#define BPFJ_POLICY_EXEC_ANY (1U << 9)
 
 struct bpfj_role_policy;
 struct bpfj_glob_map;
@@ -181,6 +183,7 @@ struct bpfj_role_policy {
   struct bpfj_glob_map __arena* unix_bind_abstract;
   struct bpfj_glob_map __arena* unix_connect_abstract;
   struct bpfj_glob_map __arena* unix_dgram_abstract;
+  struct bpfj_file_matcher __arena* exec_matcher;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };
 

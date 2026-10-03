@@ -15,6 +15,8 @@ then decides what each role may do:
 
 - **Signed binaries** — a role can require that every binary it executes
   carries an fs-verity signature from one of a named set of certificates.
+- **Executable paths** — a role can independently allow executing a file,
+  executing a setuid/setgid file, and mapping a file as executable code.
 - **`kill` and `ptrace`** — which roles' processes a role may signal or attach
   to.
 - **`bpf`** — which roles' eBPF maps and programs a role may open, or whether it
@@ -151,6 +153,15 @@ roles:
   webserver:
     enforce-binary-certs:      # execs must be signed by one of these
       - corp-ca
+    exec-paths:                # longest matching path wins
+      /usr/bin/webserver:
+        allow-exec: true
+        allow-setuid: false
+        allow-shared-object: false
+      /usr/lib/**:
+        allow-exec: false
+        allow-setuid: false
+        allow-shared-object: true
     kill-roles:                # may signal its own pod, plus these roles
       - floor
     ptrace-pod: true           # its own pod only
@@ -218,6 +229,11 @@ are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
 component expands a variable carried by the pod. Path results are cached by
 mount identity and pod variable bindings and invalidated across filesystem
 mutation. `fs-any` and `paths` are mutually exclusive.
+
+`exec-paths` maps path patterns to three independent permissions. Missing
+permissions are false, an unmatched path is denied, and the longest matching
+path supplies all three permissions. `allow-setuid` is checked in addition to
+`allow-exec` for files carrying either the setuid or setgid bit.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its

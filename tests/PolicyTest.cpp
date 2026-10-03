@@ -56,6 +56,75 @@ TEST(Policy, RejectsDuplicatePaths) {
       std::string::npos);
 }
 
+TEST(Policy, ParsesExecPathPermissions) {
+  auto policy = Policy::parse(
+      "roles:\n"
+      "  svc:\n"
+      "    exec-paths:\n"
+      "      /usr/bin/svc:\n"
+      "        allow-exec: true\n"
+      "        allow-setuid: false\n"
+      "        allow-shared-object: false\n"
+      "      /usr/lib/**:\n"
+      "        allow-shared-object: true\n");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("svc");
+  ASSERT(role.hasExecPaths);
+  ASSERT(role.execPaths.at("/usr/bin/svc").allowExec);
+  ASSERT(!role.execPaths.at("/usr/bin/svc").allowSetuid);
+  ASSERT(!role.execPaths.at("/usr/bin/svc").allowSharedObject);
+  ASSERT(!role.execPaths.at("/usr/lib/**").allowExec);
+  ASSERT(role.execPaths.at("/usr/lib/**").allowSharedObject);
+}
+
+TEST(Policy, RejectsUnknownExecPathPermission) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc:\n"
+      "        allow-jit: true\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("unknown option 'allow-jit'") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsNonBooleanExecPathPermission) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc:\n"
+      "        allow-exec: sometimes\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("neither true nor false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsScalarExecPathEntry) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    exec-paths:\n      /usr/bin/svc: true\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must be a permissions map") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsBlankExecPaths) {
+  auto policy = Policy::parse("roles:\n  svc:\n    exec-paths:\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must contain at least one path pattern") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsRelativeExecPath) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    exec-paths:\n      usr/bin/svc:\n"
+      "        allow-exec: true\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must start with '/'") !=
+      std::string::npos);
+}
+
 TEST(Policy, ParsesUnixSocketRules) {
   auto policy = Policy::parse(
       "roles:\n"
@@ -177,6 +246,7 @@ TEST(Policy, MissingOperationsDefaultToDeny) {
   ASSERT(role.enrollMode == AccessMode::Deny);
   ASSERT(!role.fsAny);
   ASSERT(!role.verityAny);
+  ASSERT(!role.execAny);
   ASSERT(!role.lkmAny);
 }
 
@@ -192,6 +262,7 @@ TEST(Policy, AnyOpensUnspecifiedOperations) {
   ASSERT(role.enrollMode == AccessMode::Any);
   ASSERT(role.fsAny);
   ASSERT(role.verityAny);
+  ASSERT(role.execAny);
   ASSERT(role.lkmAny);
 }
 
@@ -241,4 +312,15 @@ TEST(Policy, ExplicitFalseOverridesAny) {
   ASSERT(!role.lkmAny);
   ASSERT(!role.fsAny);
   ASSERT(!role.verityAny);
+}
+
+TEST(Policy, ExecPathsOverrideAny) {
+  auto policy = Policy::parse(
+      "roles:\n  sandbox:\n    any: true\n    exec-paths:\n"
+      "      /usr/bin/only:\n        allow-exec: true\n");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("sandbox");
+  ASSERT(role.hasExecPaths);
+  ASSERT(!role.execAny);
 }

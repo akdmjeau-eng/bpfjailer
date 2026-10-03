@@ -2,7 +2,7 @@
 
 ## Overview
 
-BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. Policy covers fs-verity, filesystem paths, BPF objects, kernel loading, signals, ptrace, message queues, shared memory, Unix sockets, mounts, keyrings and enrollment. See README.md for the user-facing overview and POLICY.md for the option reference.
+BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. Policy covers executable paths, fs-verity, filesystem paths, BPF objects, kernel loading, signals, ptrace, process files, message queues, shared memory, Unix sockets, mounts, keyrings and enrollment. See README.md for the user-facing overview and POLICY.md for the option reference.
 
 ## Layout
 

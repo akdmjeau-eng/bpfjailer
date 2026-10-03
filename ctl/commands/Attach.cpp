@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "bpfj/enforce/BpfEnforcer.h"
+#include "bpfj/enforce/ExecEnforcer.h"
 #include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
@@ -76,6 +77,11 @@ int attachPolicy(
   // removing the pin tree.
   if (auto res = VerityEnforcer::load(pin, policy, *scratchMaps); !res) {
     std::cerr << "fs-verity enforcer load failed: " << res.error() << std::endl;
+    return 1;
+  }
+
+  if (auto res = ExecEnforcer::load(pin, policy); !res) {
+    std::cerr << "exec enforcer load failed: " << res.error() << std::endl;
     return 1;
   }
 

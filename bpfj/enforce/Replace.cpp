@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "bpfj/enforce/BpfEnforcer.h"
+#include "bpfj/enforce/ExecEnforcer.h"
 #include "bpfj/enforce/FsEnforcer.h"
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
@@ -1658,6 +1659,10 @@ struct BackfillStats {
   }
 
   if (auto res = VerityEnforcer::load(newCfg, policy, *scratchMaps); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = ExecEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 

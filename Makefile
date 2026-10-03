@@ -181,6 +181,7 @@ BPF_SRCS := \
 	bpfj/enforce/bpf/jailer.bpf.c \
 	bpfj/enforce/bpf/replace.bpf.c \
 	bpfj/enforce/bpf/verity_enforce.bpf.c \
+	bpfj/enforce/bpf/exec_enforce.bpf.c \
 	bpfj/enforce/bpf/bpf_enforce.bpf.c \
 	bpfj/enforce/bpf/kill_enforce.bpf.c \
 	bpfj/enforce/bpf/ptrace_enforce.bpf.c \
@@ -223,6 +224,7 @@ COMMON_SRCS := \
 	bpfj/enforce/Jailer.cpp \
 	bpfj/enforce/Replace.cpp \
 	bpfj/enforce/VerityEnforcer.cpp \
+	bpfj/enforce/ExecEnforcer.cpp \
 	bpfj/enforce/BpfEnforcer.cpp \
 	bpfj/enforce/KillEnforcer.cpp \
 	bpfj/enforce/PtraceEnforcer.cpp \
@@ -271,6 +273,7 @@ TEST_SRCS := \
 	tests/CtlTest.cpp \
 	tests/Enforce.cpp \
 	tests/EnrollGateTest.cpp \
+	tests/ExecEnforcerTest.cpp \
 	tests/FsEnforcerTest.cpp \
 	tests/GlobMapTest.cpp \
 	tests/Harness.cpp \

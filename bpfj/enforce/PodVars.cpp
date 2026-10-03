@@ -196,7 +196,8 @@ Expected<PublishedPolicyGraph> publishPolicyGraph(
         (source.fsAny ? BPFJ_POLICY_FS_ANY : 0) |
         (source.verityAny ? BPFJ_POLICY_VERITY_ANY : 0) |
         (source.hasUmount ? BPFJ_POLICY_HAS_UMOUNT : 0) |
-        (source.hasUmount && source.umount ? BPFJ_POLICY_UMOUNT_ANY : 0);
+        (source.hasUmount && source.umount ? BPFJ_POLICY_UMOUNT_ANY : 0) |
+        (source.execAny ? BPFJ_POLICY_EXEC_ANY : 0);
     out->bpf_mode = static_cast<__u8>(source.bpfMode);
     out->mq_sysv_mode = static_cast<__u8>(source.mqSysvMode);
     out->mq_posix_mode = static_cast<__u8>(source.mqPosixMode);

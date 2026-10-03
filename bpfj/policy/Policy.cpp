@@ -63,6 +63,10 @@ constexpr std::string_view kOverrideStacked = "override-stacked";
 constexpr std::string_view kUntrackedBpf = "untracked-bpf";
 constexpr std::string_view kMinSeq = "min-seq";
 constexpr std::string_view kPaths = "paths";
+constexpr std::string_view kExecPaths = "exec-paths";
+constexpr std::string_view kAllowExec = "allow-exec";
+constexpr std::string_view kAllowSetuid = "allow-setuid";
+constexpr std::string_view kAllowSharedObject = "allow-shared-object";
 constexpr std::string_view kUnixBind = "unix-bind";
 constexpr std::string_view kUnixConnect = "unix-connect";
 constexpr std::string_view kUnixDgram = "unix-dgram";
@@ -423,6 +427,86 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   return paths;
 }
 
+[[nodiscard]] err::Expected<std::map<std::string, ExecPathPolicy>>
+parseExecPaths(const std::string& role, Yaml::Node& node) noexcept {
+  const std::string what = "role '" + role + "': exec-paths";
+  if (isBlank(node)) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must contain at least one path pattern");
+  }
+  if (auto res = checkNotFlow(node, what); res.hasError()) {
+    return res.error();
+  }
+  if (!node.IsMap()) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must be a map of path pattern to permissions");
+  }
+
+  std::map<std::string, ExecPathPolicy> paths;
+  for (auto it = node.Begin(); it != node.End(); it++) {
+    const auto& [writtenPath, value] = *it;
+    std::string path = writtenPath;
+    if (path.size() >= 2 &&
+        ((path.front() == '\'' && path.back() == '\'') ||
+         (path.front() == '"' && path.back() == '"'))) {
+      path = path.substr(1, path.size() - 2);
+    }
+    if (path.empty() || path.front() != '/') {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " key '" + path + "' must start with '/'");
+    }
+    if (auto res = checkNotFlow(value, what + " entry for '" + path + "'");
+        res.hasError()) {
+      return res.error();
+    }
+    if (!value.IsMap()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " entry for '" + path + "' must be a permissions map");
+    }
+
+    ExecPathPolicy parsed;
+    const std::set<std::string_view> allowedKeys = {
+        kAllowExec, kAllowSetuid, kAllowSharedObject};
+    std::set<std::string_view> seenKeys;
+    for (auto field = value.Begin(); field != value.End(); field++) {
+      const auto& [key, child] = *field;
+      if (!allowedKeys.contains(key)) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " entry for '" + path + "' has unknown option '" + key +
+                "'");
+      }
+      if (!seenKeys.insert(key).second) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " entry for '" + path + "' contains duplicate option '" +
+                key + "'");
+      }
+      auto flag = parseRoleFlag(role, key, child);
+      if (flag.hasError()) {
+        return flag.error();
+      }
+      if (key == kAllowExec) {
+        parsed.allowExec = *flag;
+      } else if (key == kAllowSetuid) {
+        parsed.allowSetuid = *flag;
+      } else {
+        parsed.allowSharedObject = *flag;
+      }
+    }
+    if (!paths.emplace(path, parsed).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains duplicate path '" + path + "'");
+    }
+  }
+  return paths;
+}
+
 [[nodiscard]] err::Expected<std::map<std::string, bool>> parseUnixRules(
     const std::string& role,
     std::string_view key,
@@ -624,7 +708,7 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
           kKeyringOwn,    kKeyringRoles, kKeyringAny,      kEnrollRoles,
           kEnrollAny,     kUnprivEnroll, kOverrideStacked, kUntrackedBpf,
           kMinSeq,        kUnixBind,     kUnixConnect,     kUnixDgram,
-          kMount,         kUmount,
+          kMount,         kUmount,       kExecPaths,
       };
       for (auto field = value.Begin(); field != value.End(); field++) {
         const auto& [key, child] = *field;
@@ -723,6 +807,14 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
         }
         policy.paths = std::move(*parsed);
         policy.hasPaths = true;
+      }
+      if (Yaml::Node* paths = findChild(value, kExecPaths)) {
+        auto parsed = parseExecPaths(id, *paths);
+        if (parsed.hasError()) {
+          return parsed.error();
+        }
+        policy.execPaths = std::move(*parsed);
+        policy.hasExecPaths = true;
       }
       const auto parseUnix =
           [&](std::string_view key,
@@ -963,6 +1055,9 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
         if (!findChild(value, kEnforceBinaryCerts) &&
             !findChild(value, kVerityAny)) {
           policy.verityAny = true;
+        }
+        if (!findChild(value, kExecPaths)) {
+          policy.execAny = true;
         }
       }
       if (policy.untrackedBpf && policy.bpfMode == AccessMode::Deny) {
