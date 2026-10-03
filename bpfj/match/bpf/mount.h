@@ -1,6 +1,7 @@
 #pragma once
 
 #include <errno.h>
+#include "bpfj/lib/bpf/const_map.h"
 #include "bpfj/lib/bpf/heap.h"
 #include "bpfj/lib/bpf/lock.h"
 #include "bpfj/lib/bpf/shared_ptr.h"
@@ -19,17 +20,6 @@ static __always_inline void bpfj_mount_task_cleanup(struct task_struct** task) {
   }
 }
 
-static __always_inline struct bpfj_mount_snapshot_slot __arena*
-bpfj_mount_snapshot_slot_at(
-    struct bpfj_mount_snapshot __arena* snapshot,
-    __u32 index) {
-  __u32 off = bpfj_heap_clamp_off(
-      index * (__u32)sizeof(struct bpfj_mount_snapshot_slot));
-  return (
-      struct bpfj_mount_snapshot_slot __arena*)((char __arena*)snapshot->slots +
-                                                off);
-}
-
 static __always_inline long bpfj_mount_snapshot_insert(
     struct bpfj_mount_snapshot __arena* snapshot,
     __u64 root,
@@ -39,15 +29,22 @@ static __always_inline long bpfj_mount_snapshot_insert(
   if (!root) {
     return -EINVAL;
   }
-  if (snapshot->count >= snapshot->capacity) {
-    return -ENOSPC;
+  long plan = bpfj_const_map_insert_u64(&snapshot->roots, root);
+  if (plan < 0) {
+    return plan;
   }
-  struct bpfj_mount_snapshot_slot __arena* slot =
-      bpfj_mount_snapshot_slot_at(snapshot, snapshot->count++);
-  slot->root = root;
-  slot->parent_vfsmount = parent_vfsmount;
-  slot->mountpoint = mountpoint;
-  slot->mount_id = mount_id;
+
+  struct bpfj_mount_snapshot_value __arena* value = bpfj_const_map_value_at(
+      &snapshot->roots, BPFJ_CONST_MAP_PLAN_INDEX(plan));
+  if (!value) {
+    return -EFAULT;
+  }
+  if (BPFJ_CONST_MAP_PLAN_KIND(plan) == BPFJ_CONST_MAP_INSERTED ||
+      mount_id < value->mount_id) {
+    value->parent_vfsmount = parent_vfsmount;
+    value->mountpoint = mountpoint;
+    value->mount_id = mount_id;
+  }
   return 0;
 }
 
@@ -102,19 +99,32 @@ static __noinline long bpfj_mount_snapshot_build(
     return -E2BIG;
   }
 
-  __u64 bytes = sizeof(struct bpfj_mount_snapshot) +
-      (__u64)mounts * sizeof(struct bpfj_mount_snapshot_slot);
-  if (bytes > BPFJ_HEAP_MAX_ARENA_SIZE) {
+  __u32 map_bytes = bpfj_const_map_allocation_size(
+      mounts, sizeof(__u64), sizeof(struct bpfj_mount_snapshot_value));
+  if (map_bytes == 0 ||
+      map_bytes > BPFJ_HEAP_MAX_ARENA_SIZE -
+              (__u32) __builtin_offsetof(struct bpfj_mount_snapshot, roots)) {
     return -E2BIG;
   }
+  __u32 bytes =
+      (__u32) __builtin_offsetof(struct bpfj_mount_snapshot, roots) + map_bytes;
 
-  struct bpfj_shared_ptr snapshot_ptr = bpfj_shared_ptr_calloc((__u32)bytes);
+  struct bpfj_shared_ptr snapshot_ptr = bpfj_shared_ptr_make(bytes);
   if (!bpfj_shared_ptr_valid(snapshot_ptr)) {
     return -ENOMEM;
   }
   struct bpfj_mount_snapshot __arena* snapshot = snapshot_ptr.buf;
   snapshot->mount_lock = generation;
-  snapshot->capacity = mounts;
+  snapshot->reserved = 0;
+  long ret = bpfj_const_map_init(
+      &snapshot->roots,
+      mounts,
+      sizeof(__u64),
+      sizeof(struct bpfj_mount_snapshot_value));
+  if (ret < 0) {
+    bpfj_shared_ptr_release(&snapshot_ptr);
+    return ret;
+  }
 
   __attribute((cleanup(bpfj_heap_free_ptr))) void __arena* stack_buf =
       BPFJ_HEAP_ALLOC(sizeof(struct rb_node*) * BPFJ_MOUNT_MAX_TREE_BREADTH);
@@ -138,7 +148,7 @@ static __noinline long bpfj_mount_snapshot_build(
     ++visited;
   }
 
-  long ret = depth < 0 ? depth : 0;
+  ret = depth < 0 ? depth : 0;
   // A concurrent mount-tree update can change both the traversal shape and
   // nr_mounts. Retry any result from a stale generation, including apparent
   // breadth overflow, rather than reporting a permanent policy error.
@@ -146,6 +156,9 @@ static __noinline long bpfj_mount_snapshot_build(
     ret = -EBUSY;
   } else if (ret == 0 && visited != mounts) {
     ret = -EIO;
+  }
+  if (ret == 0) {
+    ret = bpfj_const_map_seal(&snapshot->roots);
   }
   if (ret < 0) {
     bpfj_shared_ptr_release(&snapshot_ptr);
@@ -245,35 +258,6 @@ __noinline long bpfj_mount_load(
   return (long)ns_ino;
 }
 
-struct bpfj_mount_snapshot_lookup_ctx {
-  struct bpfj_mount_snapshot __arena* snapshot;
-  __u64 root;
-  __u64 parent_vfsmount;
-  __u64 mountpoint;
-  __u64 mount_id;
-  bool found;
-};
-
-static long bpfj_mount_snapshot_lookup(__u32 index, void* data) {
-  struct bpfj_mount_snapshot_lookup_ctx* ctx = data;
-  struct bpfj_mount_snapshot __arena* snapshot = ctx->snapshot;
-  if (index >= snapshot->count) {
-    return 1;
-  }
-  struct bpfj_mount_snapshot_slot __arena* slot =
-      bpfj_mount_snapshot_slot_at(snapshot, index);
-  if (slot->root != ctx->root) {
-    return 0;
-  }
-  if (!ctx->found || slot->mount_id < ctx->mount_id) {
-    ctx->parent_vfsmount = slot->parent_vfsmount;
-    ctx->mountpoint = slot->mountpoint;
-    ctx->mount_id = slot->mount_id;
-    ctx->found = true;
-  }
-  return 0;
-}
-
 // Lookup the canonical transition for a true filesystem or subvolume root.
 __noinline long bpfj_mount_find_parent(
     struct bpfj_mount_snapshot __arena* snapshot __arg_arena,
@@ -281,22 +265,20 @@ __noinline long bpfj_mount_find_parent(
     struct bpfj_mount_fallback __arena* out __arg_arena) {
   out->parent_vfsmount = 0;
   out->mountpoint = 0;
-  if (!snapshot || !root_i || snapshot->count == 0 ||
-      snapshot->count > snapshot->capacity ||
-      snapshot->capacity > BPFJ_MOUNT_MAX_MOUNTS) {
+  if (!snapshot || !root_i) {
     return -EINVAL;
   }
 
-  struct bpfj_mount_snapshot_lookup_ctx ctx = {
-      .snapshot = snapshot,
-      .root = root_i,
-      .mount_id = ~0ULL,
-  };
-  bpf_loop(snapshot->count, bpfj_mount_snapshot_lookup, &ctx, 0);
-  if (!ctx.found) {
-    return -ENOENT;
+  long index = bpfj_const_map_lookup_u64(&snapshot->roots, root_i);
+  if (index < 0) {
+    return index;
   }
-  out->parent_vfsmount = ctx.parent_vfsmount;
-  out->mountpoint = ctx.mountpoint;
+  struct bpfj_mount_snapshot_value __arena* value =
+      bpfj_const_map_value_at(&snapshot->roots, (__u32)index);
+  if (!value) {
+    return -EFAULT;
+  }
+  out->parent_vfsmount = value->parent_vfsmount;
+  out->mountpoint = value->mountpoint;
   return 0;
 }

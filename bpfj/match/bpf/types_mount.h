@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bpfj/lib/bpf/types_const_map.h"
 #include "bpfj/lib/bpf/types_lock.h"
 #include "bpfj/lib/bpf/types_shared_ptr.h"
 
@@ -23,9 +24,10 @@ struct bpfj_mount_val {
   struct mount* mount;
 };
 
-// One entry in an immutable generation of the target namespace's mounts.
-struct bpfj_mount_snapshot_slot {
-  __u64 root;
+// The canonical transition for one root dentry. During construction duplicate
+// roots retain the transition with the lowest mount ID, excluding later bind
+// aliases from path walks.
+struct bpfj_mount_snapshot_value {
   __u64 parent_vfsmount;
   __u64 mountpoint;
   __u64 mount_id;
@@ -33,10 +35,8 @@ struct bpfj_mount_snapshot_slot {
 
 struct bpfj_mount_snapshot {
   __u32 mount_lock;
-  __u32 capacity;
-  __u32 count;
   __u32 reserved;
-  struct bpfj_mount_snapshot_slot slots[];
+  struct bpfj_const_map roots;
 };
 
 // Stable storage supplied by the caller. The shared pointer lets a generation
