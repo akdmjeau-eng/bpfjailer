@@ -9,8 +9,8 @@
 #include "bpfj/lib/bpf/types_dyn_lru.h"
 
 // Fixed-size LRU of `bpfj_dyn_map`s keyed by caller-owned fixed-width byte
-// strings; lookups lock one slot at a time, inserts and erases hold map->lock,
-// and allocation or free stays outside those locks.
+// strings. One waiting map lock protects the index and recency state, while
+// allocation and free stay outside it.
 static __always_inline void bpfj_dyn_lru_destroy_val(void __arena* p) {
   struct bpfj_dyn_map __arena* dyn = (struct bpfj_dyn_map __arena*)p;
   if (!dyn) {
@@ -99,40 +99,8 @@ static __always_inline bool bpfj_dyn_lru_usable(
   return map != NULL && map->key_size != 0 && map->arr_size != 0;
 }
 
-// What one step of a walk found; the two actionable ones leave the slot locked.
-enum {
-  BPFJ_DYN_LRU_TRY_MATCH = 0, // holds this key -- LOCKED
-  BPFJ_DYN_LRU_TRY_FREE = 1, // holds nothing, ends the chain -- LOCKED
-  BPFJ_DYN_LRU_TRY_MISS = 2, // holds another key
-};
-
-// Lock one slot and say what is in it. A global subprogram so the verifier
-// checks it once rather than per step of every walk.
-__noinline long bpfj_dyn_lru_try_slot(
-    struct bpfj_dyn_lru_slot __arena* slot __arg_arena,
-    const __u64 __arena* key __arg_arena,
-    __u32 key_words) {
-  BPFJ_LOCK_GUARD(dl, &slot->lock);
-  if (!BPFJ_LOCK_IS_ACQUIRED(dl)) {
-    return -EBUSY;
-  }
-
-  struct bpfj_dyn_lru_entry __arena* stored = slot->entry;
-  if (!stored) {
-    BPFJ_LOCK_GUARD_RELEASE(dl);
-    return BPFJ_DYN_LRU_TRY_FREE;
-  }
-
-  if (bpfj_dyn_map_key_eq(stored->key, key, key_words)) {
-    BPFJ_LOCK_GUARD_RELEASE(dl);
-    return BPFJ_DYN_LRU_TRY_MATCH;
-  }
-  return BPFJ_DYN_LRU_TRY_MISS;
-}
-
-// The slot holding `key`, or -ENOENT/-EBUSY; on a miss with `free_out`, the
-// terminating empty slot is returned there still locked. Unrolled because the
-// call in the body leaves the verifier a fresh state every step.
+// The slot holding `key`, or -ENOENT. On a miss, `free_out` receives the
+// terminating empty slot. The caller holds map->lock throughout.
 static __always_inline long bpfj_dyn_lru_probe(
     struct bpfj_dyn_lru __arena* map,
     const __u64 __arena* key,
@@ -145,21 +113,15 @@ static __always_inline long bpfj_dyn_lru_probe(
   for (__u32 p = 0; p < BPFJ_DYN_LRU_MAX_PROBES; ++p) {
     struct bpfj_dyn_lru_slot __arena* slot = bpfj_dyn_lru_slot_at(map, off);
 
-    long found = bpfj_dyn_lru_try_slot(slot, key, key_words);
-    if (found < 0) {
-      return found;
-    }
-    if (found == BPFJ_DYN_LRU_TRY_MATCH) {
-      return off; // handed to the caller locked
-    }
-    if (found == BPFJ_DYN_LRU_TRY_FREE) {
-      // An insert wants the terminating slot and keeps the lock.
+    struct bpfj_dyn_lru_entry __arena* stored = slot->entry;
+    if (!stored) {
       if (free_out) {
         *free_out = off;
-      } else {
-        bpfj_lock_unlock(&slot->lock);
       }
       return -ENOENT;
+    }
+    if (bpfj_dyn_map_key_eq(stored->key, key, key_words)) {
+      return off;
     }
     off = (off + 1) & mask;
   }
@@ -167,8 +129,7 @@ static __always_inline long bpfj_dyn_lru_probe(
 }
 
 // Close the hole left at `start` by pulling back entries still on that probe
-// chain; a contended slot stops the walk with the chain intact but less
-// compact.
+// chain. The caller holds map->lock, so the chain cannot move underneath it.
 static __noinline void bpfj_dyn_lru_close_hole(
     struct bpfj_dyn_lru __arena* map,
     __u32 start) {
@@ -181,13 +142,8 @@ static __noinline void bpfj_dyn_lru_close_hole(
     probe = (probe + 1) & mask;
     struct bpfj_dyn_lru_slot __arena* from = bpfj_dyn_lru_slot_at(map, probe);
 
-    if (!bpfj_lock_trylock(&from->lock)) {
-      return; // a lookup is reading it; leave the rest of the run in place
-    }
-
     struct bpfj_dyn_lru_entry __arena* stored = from->entry;
     if (!stored) {
-      bpfj_lock_unlock(&from->lock);
       return; // end of the run; everything after it is already reachable
     }
 
@@ -196,17 +152,10 @@ static __noinline void bpfj_dyn_lru_close_hole(
         bpfj_dyn_lru_dist(home, probe, map->arr_size)) {
       // The hole is still on this entry's probe path, so it can move back.
       struct bpfj_dyn_lru_slot __arena* to = bpfj_dyn_lru_slot_at(map, hole);
-      if (!bpfj_lock_trylock(&to->lock)) {
-        bpfj_lock_unlock(&from->lock);
-        return;
-      }
       to->entry = stored;
       from->entry = NULL;
-      bpfj_lock_unlock(&to->lock);
       hole = probe;
     }
-
-    bpfj_lock_unlock(&from->lock);
   }
 }
 
@@ -232,13 +181,8 @@ static __noinline struct bpfj_dyn_lru_entry __arena* bpfj_dyn_lru_evict(
     }
 
     struct bpfj_dyn_lru_slot __arena* slot = bpfj_dyn_lru_slot_at(map, off);
-    if (!bpfj_lock_trylock(&slot->lock)) {
-      continue; // mid-lookup; the hand has no reason to wait on it
-    }
-
     struct bpfj_dyn_lru_entry __arena* cand = slot->entry;
     if (!cand) {
-      bpfj_lock_unlock(&slot->lock);
       continue;
     }
 
@@ -248,13 +192,11 @@ static __noinline struct bpfj_dyn_lru_entry __arena* bpfj_dyn_lru_evict(
       if (first_used == kNone) {
         first_used = off;
       }
-      bpfj_lock_unlock(&slot->lock);
       continue;
     }
 
     victim = cand;
     slot->entry = NULL;
-    bpfj_lock_unlock(&slot->lock);
     taken = off;
     break;
   }
@@ -265,13 +207,10 @@ static __noinline struct bpfj_dyn_lru_entry __arena* bpfj_dyn_lru_evict(
     // gives up on the reference bit the same way.
     struct bpfj_dyn_lru_slot __arena* slot =
         bpfj_dyn_lru_slot_at(map, first_used);
-    if (bpfj_lock_trylock(&slot->lock)) {
-      victim = slot->entry;
-      if (victim) {
-        slot->entry = NULL;
-        taken = first_used;
-      }
-      bpfj_lock_unlock(&slot->lock);
+    victim = slot->entry;
+    if (victim) {
+      slot->entry = NULL;
+      taken = first_used;
     }
   }
 
@@ -310,8 +249,8 @@ long bpfj_dyn_lru_insert(
   long rc = 0;
 
   {
-    BPFJ_LOCK_GUARD(dlm, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(dlm)) {
+    BPFJ_LOCK_WAIT_GUARD(dlm, &map->lock);
+    if (!BPFJ_LOCK_WAIT_HELD(dlm)) {
       rc = -EBUSY;
       goto unlocked;
     }
@@ -338,12 +277,6 @@ long bpfj_dyn_lru_insert(
 
     __u32 free_slot = kNoSlot;
     long existing = bpfj_dyn_lru_probe(map, key, key_words, &free_slot);
-    if (existing == -EBUSY) {
-      bpfj_dyn_lru_retire(map, entry, &val_sp);
-      rc = -EBUSY;
-      goto unlocked;
-    }
-
     if (existing >= 0) {
       struct bpfj_dyn_lru_slot __arena* slot =
           bpfj_dyn_lru_slot_at(map, (__u32)existing);
@@ -358,7 +291,6 @@ long bpfj_dyn_lru_insert(
 
       cur->ref = BPFJ_DYN_LRU_REF_LOOKUP; // a re-insert is a use
 
-      bpfj_lock_unlock(&slot->lock);
       bpfj_dyn_lru_retire(map, entry, &val_sp);
       goto unlocked;
     }
@@ -370,11 +302,9 @@ long bpfj_dyn_lru_insert(
       goto unlocked;
     }
 
-    // The probe handed the empty slot over locked.
     struct bpfj_dyn_lru_slot __arena* slot =
         bpfj_dyn_lru_slot_at(map, free_slot);
     slot->entry = entry;
-    bpfj_lock_unlock(&slot->lock);
     map->size++;
 
     // Enforced only now the new entry is in: evicting first would drop a live
@@ -406,8 +336,8 @@ long bpfj_dyn_lru_erase(
   struct bpfj_shared_ptr dead = {0};
 
   {
-    BPFJ_LOCK_GUARD(dlm, &map->lock);
-    if (!BPFJ_LOCK_IS_ACQUIRED(dlm)) {
+    BPFJ_LOCK_WAIT_GUARD(dlm, &map->lock);
+    if (!BPFJ_LOCK_WAIT_HELD(dlm)) {
       return -EBUSY;
     }
 
@@ -423,7 +353,6 @@ long bpfj_dyn_lru_erase(
         bpfj_dyn_lru_slot_at(map, (__u32)idx);
     struct bpfj_dyn_lru_entry __arena* entry = slot->entry;
     slot->entry = NULL;
-    bpfj_lock_unlock(&slot->lock);
 
     bpfj_dyn_lru_close_hole(map, (__u32)idx);
     bpfj_dyn_lru_retire(map, entry, &dead);
@@ -443,6 +372,11 @@ long bpfj_dyn_lru_lookup(
     return -ENOENT;
   }
 
+  BPFJ_LOCK_WAIT_GUARD(dlm, &map->lock);
+  if (!BPFJ_LOCK_WAIT_HELD(dlm)) {
+    return -EBUSY;
+  }
+
   __u32 key_words = bpfj_dyn_map_key_words(map->key_size);
   long idx = bpfj_dyn_lru_probe(map, key, key_words, NULL);
   if (idx < 0) {
@@ -453,8 +387,8 @@ long bpfj_dyn_lru_lookup(
       bpfj_dyn_lru_slot_at(map, (__u32)idx);
   struct bpfj_dyn_lru_entry __arena* entry = slot->entry;
 
-  // Under the lock the probe left held, so an erase or eviction cannot be
-  // dropping the map's reference at the same time.
+  // Under the map lock, so an erase or eviction cannot drop the map's
+  // reference at the same time.
   __sync_fetch_and_add(entry->val.refcount, 1);
   val->buf = entry->val.buf;
   val->refcount = entry->val.refcount;
@@ -465,6 +399,5 @@ long bpfj_dyn_lru_lookup(
     entry->ref = BPFJ_DYN_LRU_REF_LOOKUP;
   }
 
-  bpfj_lock_unlock(&slot->lock);
   return 0;
 }

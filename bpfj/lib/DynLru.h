@@ -172,9 +172,9 @@ class DynLru {
   };
 
   // Snapshot of the entries currently resident, in index rather than recency
-  // order, the LRU keeping no recency list. A snapshot rather than a lazy
-  // range, because BPF keeps inserting and evicting while this runs; each slot
-  // is read under its own lock, which is what stops a mid-read free.
+  // order, the LRU keeping no recency list. This is diagnostic-only and must
+  // not run while BPF is attached: BPF waits with interrupts disabled, so it
+  // must never wait for a userspace holder that can be descheduled.
   template <typename K>
   err::Expected<std::vector<Entry<K>>> entries() const {
     if (hdr_ == nullptr) {
@@ -192,15 +192,14 @@ class DynLru {
 
     std::vector<Entry<K>> out;
     out.reserve(hdr_->size);
+
+    lock::Guard guard{hdr_->lock, heap::kLockTimeout};
+    if (!guard.owns()) {
+      return err::Error(std::errc::timed_out, "timed out taking dyn lru lock");
+    }
+
     for (__u32 i = 0; i < hdr_->arr_size; ++i) {
       auto& slot = hdr_->slots[i];
-
-      lock::Guard guard{slot.lock, heap::kLockTimeout};
-      if (!guard.owns()) {
-        return err::Error(
-            std::errc::timed_out,
-            "timed out taking dyn lru slot " + std::to_string(i));
-      }
 
       if (slot.entry == nullptr || slot.entry->key == nullptr) {
         continue;

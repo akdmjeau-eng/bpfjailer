@@ -14,25 +14,13 @@
 // compared and copied a __u64 at a time, so the size must be a whole number of
 // words.
 //
-// Concurrency, which is the whole shape of this thing:
+// One waiting arena spinlock serializes every operation. In particular, a
+// lookup cannot race the backward-shift deletion that keeps probe chains
+// intact. The former per-slot trylocks turned contention into false misses and
+// could leave an empty slot in front of a live entry when hole closing gave up.
 //
-//   - lookup takes one slot's lock and nothing else, since it runs on every
-//     file access on every CPU and every arena lock is a trylock.
-//
-//   - insert, erase and eviction take bpfj_dyn_lru::lock. Serializing the only
-//     three things that move an entry between slots is what lets removal close
-//     its hole by backshift (bpfj_dyn_lru_close_hole); this index never
-//     rehashes, so tombstones would accumulate until inserts failed.
-//
-//   - a slot's lock is still taken for every read and write of that slot.
-//
-// Recency is approximate, which is what keeps a lookup off the map-wide lock:
-// a hit restores the entry's `ref` credit rather than moving it, and eviction
-// spends it down as a clock hand sweeps -- kernel/bpf/bpf_lru_list.c's trade
-// reduced to one sweep. The only thing a lookup can then observe is a removal
-// shifting an entry back past its cursor, reading as a miss for a resident
-// key; keys are compared under the slot's lock, so it can never read a wrong
-// entry.
+// Recency remains approximate: a hit restores the entry's `ref` credit and
+// eviction spends it down as a clock hand sweeps.
 
 // Upper bound on capacity, which bounds the destroy loop for the verifier and
 // caps the arena footprint.
@@ -82,13 +70,10 @@ struct bpfj_dyn_lru_entry {
 };
 
 struct bpfj_dyn_lru_slot {
-  // The entry in this slot, or NULL. There is no tombstone state: removal
-  // closes its hole, so an empty slot always ends a probe chain.
+  // The entry in this slot, or NULL. Protected by bpfj_dyn_lru::lock. There is
+  // no tombstone state: removal closes its hole, so an empty slot always ends
+  // a probe chain.
   struct bpfj_dyn_lru_entry __arena* entry;
-
-  // Guards `entry` and the fields it reaches, held only for the few
-  // instructions a probe spends here or the write that follows.
-  struct bpfj_lock lock;
 };
 
 struct bpfj_dyn_lru {
@@ -114,8 +99,8 @@ struct bpfj_dyn_lru {
   __u32 key_size; // bytes per key; a non-zero multiple of sizeof(__u64)
   __u32 clock_hand; // where the next eviction sweep starts
 
-  // Serializes insert, erase and eviction, the three operations that move
-  // entries between slots; a lookup never takes it.
+  // Serializes lookup, insert, erase and eviction. BPF waits for this lock;
+  // userspace only initializes before attach and destroys after detach.
   struct bpfj_lock lock;
 };
 
