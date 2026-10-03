@@ -265,7 +265,8 @@ TEST(MqEnforcer, RestrictedSysvPolicyRejectsAQueueWithNoKnownOwner) {
 TEST(MqEnforcer, SysvOwnershipSurvivesAReplace) {
   const key_t key = uniqueKey();
   const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-sysv-roles:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
+      "    mq-sysv-roles:\n      - owner\n";
   attach(yaml);
   Child creator([key] { return createSysv(key); });
   enroll("owner", creator.pid());
@@ -377,7 +378,8 @@ TEST(MqEnforcer, RestrictedPosixPolicyRejectsAQueueWithNoKnownOwner) {
 TEST(MqEnforcer, PosixOwnershipSurvivesAReplace) {
   const std::string name = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    mq-posix-roles:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
+      "    mq-posix-roles:\n      - owner\n";
   attach(yaml);
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());

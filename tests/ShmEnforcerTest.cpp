@@ -481,7 +481,8 @@ TEST(ShmEnforcer, NoShmPosixDoesNotCoverMemfd) {
 TEST(ShmEnforcer, OwnershipSurvivesAReplace) {
   const std::string name = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n    shm-posix-roles:\n      - owner\n";
+      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
+      "    shm-posix-roles:\n      - owner\n";
   attach(yaml);
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());

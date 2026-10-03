@@ -24,8 +24,6 @@
 // VM_WRITE, and VM_EXEC. vmlinux.h does not carry the preprocessor macros.
 #define BPFJ_VM_ACCESS_FLAGS 7UL
 
-struct bpfj_glob_map __arena* bpfj_shm_posix_patterns;
-
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1);
@@ -87,7 +85,6 @@ static __always_inline int bpfj_shm_sysv_check(struct kern_ipc_perm* shp) {
              BPFJ_POLICY_GATE_SHM_SYSV,
              bpfj_get_current_pid_data(),
              owner,
-             NULL,
              NULL)
       ? 0
       : bpfj_shm_deny("System V");
@@ -105,7 +102,6 @@ int BPF_PROG(bpfj_shm_sysv_alloc, struct kern_ipc_perm* shp, int lsm_ret) {
           BPFJ_POLICY_GATE_SHM_SYSV,
           bpfj_get_current_pid_data(),
           owned ? &owner : NULL,
-          NULL,
           NULL)) {
     return bpfj_shm_deny("System V");
   }
@@ -239,7 +235,6 @@ static __always_inline int bpfj_posix_shm_check(
              BPFJ_POLICY_GATE_SHM_POSIX,
              bpfj_get_current_pid_data(),
              owner,
-             bpfj_shm_posix_patterns,
              name)
       ? 0
       : bpfj_shm_deny("POSIX");
@@ -261,7 +256,6 @@ int BPF_PROG(bpfj_shm_posix_alloc, struct inode* inode, int lsm_ret) {
           BPFJ_POLICY_GATE_SHM_POSIX,
           bpfj_get_current_pid_data(),
           pending.owned ? &pending.owner : NULL,
-          NULL,
           NULL)) {
     return bpfj_shm_deny("POSIX");
   }
@@ -312,7 +306,6 @@ int BPF_PROG(bpfj_shm_posix_open, struct file* file, int lsm_ret) {
           BPFJ_POLICY_GATE_SHM_POSIX,
           bpfj_get_current_pid_data(),
           pending->owned ? &pending->owner : NULL,
-          bpfj_shm_posix_patterns,
           name)) {
     return bpfj_shm_deny("POSIX");
   }
@@ -387,7 +380,6 @@ static __always_inline int bpfj_posix_shm_path_check(
              BPFJ_POLICY_GATE_SHM_POSIX,
              bpfj_get_current_pid_data(),
              owner,
-             bpfj_shm_posix_patterns,
              name)
       ? 0
       : bpfj_shm_deny("POSIX");

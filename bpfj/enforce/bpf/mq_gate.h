@@ -53,7 +53,6 @@ struct bpfj_mq_allow_ctx {
   enum bpfj_policy_gate gate;
   struct bpfj_pid_data* actor;
   const struct bpfj_mq_owner* owner;
-  const struct bpfj_glob_map __arena* patterns;
   const struct qstr* name;
   __u32 next;
   __u8 allowed;
@@ -95,11 +94,10 @@ static long bpfj_mq_allow_cb(__u32 index, void* data) {
          (mode == BPFJ_POLICY_ROLES &&
           bpfj_role_set_contains(
               policy->gates[ctx->gate], ctx->owner->policy)));
-    const __u32 pattern_id = ctx->gate == BPFJ_POLICY_GATE_MQ_POSIX
-        ? policy->mq_posix_pattern_id
-        : 0;
-    if (!permitted &&
-        !bpfj_ipc_glob_matches(ctx->patterns, pod, ctx->name, pattern_id)) {
+    const struct bpfj_ipc_pattern_set __arena* patterns =
+        ctx->gate == BPFJ_POLICY_GATE_MQ_POSIX ? policy->mq_posix_patterns
+                                               : NULL;
+    if (!permitted && !bpfj_ipc_glob_matches(patterns, pod, ctx->name)) {
       ctx->allowed = 0;
       return 1;
     }
@@ -112,7 +110,6 @@ static __always_inline bool bpfj_mq_allowed(
     enum bpfj_policy_gate gate,
     struct bpfj_pid_data* actor,
     const struct bpfj_mq_owner* owner,
-    const struct bpfj_glob_map __arena* patterns,
     const struct qstr* name) {
   if (!actor) {
     return true;
@@ -122,7 +119,6 @@ static __always_inline bool bpfj_mq_allowed(
       .gate = gate,
       .actor = actor,
       .owner = owner,
-      .patterns = patterns,
       .name = name,
       .next = bpfj_gate_num_pods(actor),
       .allowed = 1,

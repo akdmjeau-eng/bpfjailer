@@ -123,6 +123,7 @@ enum bpfj_policy_mode {
 #define BPFJ_POLICY_VERITY_ANY (1U << 6)
 
 struct bpfj_role_policy;
+struct bpfj_glob_map;
 struct bpfj_file_matcher;
 
 // A role list used only with BPFJ_POLICY_ROLES. An empty set permits the
@@ -131,6 +132,13 @@ struct bpfj_file_matcher;
 struct bpfj_role_set {
   __u32 count;
   const struct bpfj_role_policy __arena* policies[1];
+};
+
+// One role's contiguous accept range in a shared compiled IPC glob matcher.
+struct bpfj_ipc_pattern_set {
+  const struct bpfj_glob_map __arena* map;
+  __u32 first_accept;
+  __u32 num_accepts;
 };
 
 // Policy shared by every pod carrying one role, with sparse arena allocations
@@ -149,8 +157,8 @@ struct bpfj_role_policy {
   __u8 ptrace_mode;
   __u8 keyring_mode;
   __u8 enroll_mode;
-  __u32 mq_posix_pattern_id;
-  __u32 shm_posix_pattern_id;
+  const struct bpfj_ipc_pattern_set __arena* mq_posix_patterns;
+  const struct bpfj_ipc_pattern_set __arena* shm_posix_patterns;
   struct bpfj_file_matcher __arena* fs_matcher;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };

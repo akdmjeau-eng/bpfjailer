@@ -192,20 +192,15 @@ Expected<> ShmEnforcer::load(
   if (auto res = skel.load(); !res) {
     return res;
   }
-  auto patterns = compileIpcPatterns(
-      created.value(),
-      skel.bss().bpfj_shm_posix_patterns,
-      skel.bss().bpfj_ipc_glob_run0,
-      skel.bss().bpfj_ipc_glob_run1,
-      skel.bss().bpfj_ipc_glob_run2,
-      skel.bss().bpfj_ipc_glob_run3,
-      policy,
-      &RolePolicy::shmPosixPatterns);
-  if (!patterns) {
-    return makeUnexpected(patterns.error());
-  }
-  if (auto res = publishIpcPatternIds(
-          cfg, *patterns, &bpfj_role_policy::shm_posix_pattern_id);
+  if (auto res = compileIpcPatterns(
+          created.value(),
+          skel.bss().bpfj_ipc_glob_run0,
+          skel.bss().bpfj_ipc_glob_run1,
+          skel.bss().bpfj_ipc_glob_run2,
+          skel.bss().bpfj_ipc_glob_run3,
+          policy,
+          &RolePolicy::shmPosixPatterns,
+          &bpfj_role_policy::shm_posix_patterns);
       !res) {
     return res;
   }

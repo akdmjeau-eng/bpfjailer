@@ -120,11 +120,11 @@ static __always_inline void bpfj_ipc_glob_bind_pod(
 }
 
 static __always_inline bool bpfj_ipc_glob_matches(
-    const struct bpfj_glob_map __arena* map,
+    const struct bpfj_ipc_pattern_set __arena* patterns,
     const struct bpfj_pod __arena* pod,
-    const struct qstr* name,
-    __u32 pattern_id) {
-  if (map == NULL || pod == NULL || name == NULL || pattern_id == 0) {
+    const struct qstr* name) {
+  if (patterns == NULL || patterns->map == NULL || pod == NULL ||
+      name == NULL || patterns->num_accepts == 0) {
     return false;
   }
 
@@ -140,10 +140,11 @@ static __always_inline bool bpfj_ipc_glob_matches(
   if (run == NULL) {
     return false;
   }
-  bpfj_ipc_glob_bind_pod(run, map, pod);
+  bpfj_ipc_glob_bind_pod(run, patterns->map, pod);
   if (!bpfj_ipc_glob_bindings_complete(run) ||
       bpfj_heap_read_kernel(run->str, len, (__u64)chars) < 0) {
     return false;
   }
-  return bpfj_glob_map_contains(run, len, pattern_id) > 0;
+  return bpfj_glob_map_contains_range(
+             run, len, patterns->first_accept, patterns->num_accepts) > 0;
 }

@@ -206,9 +206,9 @@ __noinline int bpfj_glob_step(
   return 0;
 }
 
-// GLOBAL function: initialize state, run the single pass over the input, and
-// collect each matching pattern's value into the run state.
-__noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
+// GLOBAL function: initialize state and run the single pass over the input.
+__noinline long bpfj_glob_eval_state(
+    __arena struct bpfj_glob_run* run __arg_arena) {
   u32 num_words = run->map->num_words;
 
   // A separate frame, to stay within the bpf2bpf stack budget.
@@ -235,6 +235,16 @@ __noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
     }
     bpfj_glob_step(run, (u8)run->str[i]);
     bpfj_glob_close(run);
+  }
+
+  return 0;
+}
+
+// GLOBAL function: evaluate the NFA and collect each matching pattern's value.
+__noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
+  long ret = bpfj_glob_eval_state(run);
+  if (ret < 0) {
+    return ret;
   }
 
   // Stopping once the result buffer is full bounds `count` and lets the
@@ -375,6 +385,39 @@ bpfj_glob_map_contains(struct bpfj_glob_run __arena* run, u32 len, u64 wanted) {
     u32 bit = run->map->accept_bit[i] & 63;
     if (((run->state[word] >> bit) & 1ULL) != 0 &&
         run->map->accept_val[i] == wanted) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Match only one contiguous range of compiled accepts without collecting or
+// scanning matches belonging to other callers sharing the same NFA.
+static __noinline long bpfj_glob_map_contains_range(
+    struct bpfj_glob_run __arena* run,
+    u32 len,
+    u32 first,
+    u32 count) {
+  if (run == NULL || run->map == NULL || len > BPFJ_GLOB_MAP_MAX_STR_LEN ||
+      first > run->map->num_accepts || count > run->map->num_accepts - first) {
+    return 0;
+  }
+
+  run->len = len;
+  long ret = bpfj_glob_eval_state(run);
+  if (ret < 0) {
+    return ret;
+  }
+
+  u32 i = 0;
+  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
+    if (i >= count) {
+      break;
+    }
+    u32 accept = first + i;
+    u32 word = run->map->accept_word[accept] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
+    u32 bit = run->map->accept_bit[accept] & 63;
+    if (((run->state[word] >> bit) & 1ULL) != 0) {
       return 1;
     }
   }

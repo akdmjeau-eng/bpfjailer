@@ -3,14 +3,14 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "bpfj/enforce/PodVars.h"
+#include "bpfj/enforce/bpf/types.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/lib/GlobMap.h"
 #include "bpfj/lib/Heap.h"
@@ -18,36 +18,62 @@
 
 namespace bpfjailer {
 
+inline struct bpfj_role_policy* findIpcRolePolicy(
+    struct bpfj_policy_catalog* catalog,
+    std::string_view role) noexcept {
+  if (catalog == nullptr || role.size() >= ROLE_ID_LEN) {
+    return nullptr;
+  }
+  for (__u32 i = 0; i < catalog->count; ++i) {
+    auto& candidate = catalog->policies[i];
+    if (std::memcmp(candidate.role_id.id, role.data(), role.size()) == 0 &&
+        candidate.role_id.id[role.size()] == '\0') {
+      return &candidate;
+    }
+  }
+  return nullptr;
+}
+
 template <heap::BpfSkelWithHeap Skel>
-Expected<std::map<std::string, std::uint32_t>> compileIpcPatterns(
+Expected<> compileIpcPatterns(
     const std::shared_ptr<Skel>& skel,
-    struct bpfj_glob_map*& slot,
     struct bpfj_glob_run*& run0,
     struct bpfj_glob_run*& run1,
     struct bpfj_glob_run*& run2,
     struct bpfj_glob_run*& run3,
     const Policy& policy,
-    std::vector<std::string> RolePolicy::* patterns) noexcept {
-  std::map<std::string, std::uint32_t> ids;
+    std::vector<std::string> RolePolicy::* patterns,
+    const struct bpfj_ipc_pattern_set __arena* bpfj_role_policy::*
+        published) noexcept {
+  struct RoleRange {
+    std::string_view role;
+    std::uint32_t first;
+    std::uint32_t count;
+  };
+  std::vector<RoleRange> ranges;
   std::vector<std::pair<std::string, std::uint64_t>> entries;
-  std::uint32_t nextId = 1;
   for (const auto& [role, rolePolicy] : policy.roles) {
     const auto& rolePatterns = rolePolicy.*patterns;
     if (rolePatterns.empty()) {
       continue;
     }
-    ids.emplace(role, nextId);
+    const auto first = static_cast<std::uint32_t>(entries.size());
     for (const auto& pattern : rolePatterns) {
-      entries.emplace_back(pattern, nextId);
+      entries.emplace_back(pattern, 0);
     }
-    ++nextId;
+    ranges.push_back(
+        RoleRange{
+            .role = role,
+            .first = first,
+            .count = static_cast<std::uint32_t>(rolePatterns.size()),
+        });
   }
 
   if (auto res = heap::init(skel); res.hasError()) {
     return makeUnexpected(res.error());
   }
   if (entries.empty()) {
-    return ids;
+    return unit;
   }
 
   const GlobKeyResolver resolve =
@@ -62,11 +88,25 @@ Expected<std::map<std::string, std::uint32_t>> compileIpcPatterns(
         "glob references undeclared variable '" + std::string(name) + "'");
   };
 
-  GlobMap<Skel> compiled(skel, slot, false);
+  struct bpfj_glob_map* matcher = nullptr;
+  GlobMap<Skel> compiled(skel, matcher, false);
   if (auto res = compiled.init(resolve, std::move(entries)); res.hasError()) {
     return makeUnexpected(res.error());
   }
   struct bpfj_glob_run** runs[] = {&run0, &run1, &run2, &run3};
+  std::vector<std::pair<struct bpfj_role_policy*, struct bpfj_ipc_pattern_set*>>
+      selectors;
+  auto cleanup = makeGuard([&] {
+    for (auto [rolePolicy, selector] : selectors) {
+      (void)rolePolicy;
+      heap::free(skel, selector);
+    }
+    for (auto** run : runs) {
+      heap::free(skel, *run);
+      *run = nullptr;
+    }
+    compiled.destroy();
+  });
   for (auto** run : runs) {
     *run = heap::alloc<struct bpfj_glob_run>(skel);
     if (*run == nullptr) {
@@ -75,30 +115,31 @@ Expected<std::map<std::string, std::uint32_t>> compileIpcPatterns(
           "failed to reserve IPC glob matcher run"));
     }
   }
-  return ids;
-}
-
-inline Expected<> publishIpcPatternIds(
-    const PinConfig& cfg,
-    const std::map<std::string, std::uint32_t>& ids,
-    std::uint32_t bpfj_role_policy::* member) noexcept {
-  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
-  }
-  for (const auto& [role, id] : ids) {
-    auto policy = lookupRolePolicy(*rolePolicies, role);
-    if (!policy) {
-      return makeUnexpected(policy.error());
-    }
-    if (!*policy) {
+  auto* catalog = static_cast<struct bpfj_policy_catalog*>(
+      skel->bss().bpfj_heap_ctrl->var_catalog);
+  for (const auto& range : ranges) {
+    auto* rolePolicy = findIpcRolePolicy(catalog, range.role);
+    if (rolePolicy == nullptr) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
           "IPC glob role is missing from the arena policy catalog: ",
-          role));
+          range.role));
     }
-    const_cast<struct bpfj_role_policy*>(*policy)->*member = id;
+    auto* selector = heap::alloc<struct bpfj_ipc_pattern_set>(skel);
+    if (selector == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::not_enough_memory,
+          "failed to reserve IPC glob pattern selector"));
+    }
+    selector->map = matcher;
+    selector->first_accept = range.first;
+    selector->num_accepts = range.count;
+    selectors.emplace_back(rolePolicy, selector);
   }
+  for (auto [rolePolicy, selector] : selectors) {
+    rolePolicy->*published = selector;
+  }
+  cleanup.dismiss();
   return unit;
 }
 
