@@ -1,0 +1,393 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#pragma once
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "bpfj/err/Error.h"
+#include "bpfj/lib/DynLru.h"
+#include "bpfj/lib/GlobMap.h"
+#include "bpfj/lib/Heap.h"
+#include "bpfj/lib/PerfMap.h"
+#include "bpfj/lib/ScopeGuard.h"
+#include "bpfj/libbpf-cpp/BpfSkel.h"
+#include "bpfj/match/bpf/types_file_match.h"
+#include "bpfj/match/bpf/types_file_match_cached.h"
+
+namespace bpfjailer {
+
+namespace detail {
+
+inline std::string fileMatchGlobEscape(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (const char c : value) {
+    if (c == '\\' || c == '*' || c == '?' || c == '$') {
+      out.push_back('\\');
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
+inline std::size_t fileMatchVarLength(std::string_view component) {
+  std::size_t length = 1;
+  while (length < component.size() &&
+         (std::isalnum(static_cast<unsigned char>(component[length])) != 0 ||
+          component[length] == '_')) {
+    ++length;
+  }
+  return length;
+}
+
+inline std::string fileMatchVarSuffix(std::string_view suffix) {
+  std::string out;
+  out.reserve(suffix.size());
+  for (const char c : suffix) {
+    if (c == '\\' || c == '$') {
+      out.push_back('\\');
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
+inline std::string fileMatchComponentPattern(
+    std::string_view component,
+    bool variablesEnabled) {
+  if (component == "*") {
+    return "*";
+  }
+  if (variablesEnabled && !component.empty() && component.front() == '$') {
+    const auto length = fileMatchVarLength(component);
+    return "${" + std::string(component.substr(0, length)) + "}" +
+        fileMatchVarSuffix(component.substr(length));
+  }
+  if (component == "\\*") {
+    return "\\*";
+  }
+  if (component.starts_with("\\$")) {
+    component.remove_prefix(1);
+  }
+  return fileMatchGlobEscape(component);
+}
+
+inline std::vector<std::string_view> fileMatchComponents(
+    std::string_view path) {
+  if (path == "/") {
+    return {std::string_view{}};
+  }
+
+  std::vector<std::string_view> components;
+  std::size_t begin = 0;
+  while (begin <= path.size()) {
+    const auto end = path.find('/', begin);
+    const auto component = path.substr(
+        begin,
+        end == std::string_view::npos ? path.size() - begin : end - begin);
+    if (!component.empty()) {
+      components.push_back(component);
+    }
+    if (end == std::string_view::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  std::reverse(components.begin(), components.end());
+  return components;
+}
+
+struct FileMatchNodeLess {
+  bool operator()(
+      const struct bpfj_file_match_node& lhs,
+      const struct bpfj_file_match_node& rhs) const {
+    return lhs.path_id < rhs.path_id ||
+        (lhs.path_id == rhs.path_id && lhs.pos < rhs.pos);
+  }
+};
+
+} // namespace detail
+
+// Builds the arena-resident matcher consumed by file_match_cached.h. One
+// instance belongs to one role. Multiple instances may share one Lru, so a
+// rename invalidates all role matches for an inode at once.
+template <typename Skeleton>
+class FileMatchCached {
+ private:
+  using Skel = bpfj::libbpf::BpfSkel<Skeleton>;
+  using NodeSet =
+      std::set<struct bpfj_file_match_node, detail::FileMatchNodeLess>;
+
+ public:
+  using Lru = DynLru<Skel>;
+
+  struct SharedMaps {
+    std::shared_ptr<Lru> match;
+  };
+
+  FileMatchCached() = default;
+  ~FileMatchCached() {
+    destroy();
+  }
+
+  FileMatchCached(const FileMatchCached&) = delete;
+  FileMatchCached& operator=(const FileMatchCached&) = delete;
+  FileMatchCached(FileMatchCached&&) = delete;
+  FileMatchCached& operator=(FileMatchCached&&) = delete;
+
+  template <typename Paths>
+  Expected<> init(
+      std::shared_ptr<Skel> skel,
+      GlobKeyResolver resolveKey,
+      SharedMaps maps,
+      struct bpfj_file_matcher*& matcherSlot,
+      const Paths& paths) {
+    if (matcher_ != nullptr) {
+      return Error(
+          std::errc::operation_in_progress, "matcher already initialized");
+    }
+
+    obj_ = std::move(skel);
+    matcherSlot_ = &matcherSlot;
+    matchLru_ = std::move(maps.match);
+
+    if (auto res = heap::init(obj_); !res) {
+      return res.error();
+    }
+
+    auto cleanup = makeGuard([this] { destroy(); });
+    matcher_ = heap::alloc<struct bpfj_file_matcher>(obj_);
+    if (matcher_ == nullptr) {
+      return Error(std::errc::not_enough_memory, "matcher allocation failed");
+    }
+    std::memset(matcher_, 0, sizeof(*matcher_));
+    *matcherSlot_ = matcher_;
+
+    if (matchLru_ != nullptr && matchLru_->get() == nullptr) {
+      if (auto res = matchLru_->init(
+              BPFJ_FILE_MATCH_CACHED_CACHE_SIZE,
+              sizeof(struct bpfj_file_match_cached_key));
+          !res) {
+        return res.error();
+      }
+    }
+    matcher_->lru = matchLru_ != nullptr ? matchLru_->get() : nullptr;
+    matcher_->max_cache_pods = BPFJ_FILE_MATCH_CACHED_DEFAULT_MAX_CACHE_PODS;
+
+    if (auto res = compile(std::move(resolveKey), paths); !res) {
+      return res.error();
+    }
+
+    cleanup.dismiss();
+    return unit;
+  }
+
+  void destroy() {
+    matchLru_.reset();
+
+    heap::free(obj_, dataVec_);
+    dataVec_ = nullptr;
+
+    if (initMap_) {
+      initMap_->destroy();
+      initMap_.reset();
+    }
+    for (auto& map : nodeMaps_) {
+      map.destroy();
+    }
+    nodeMaps_.clear();
+    innerHeaders_.clear();
+    if (nodesMap_) {
+      nodesMap_->destroy();
+      nodesMap_.reset();
+    }
+    if (globMap_) {
+      globMap_->destroy();
+      globMap_.reset();
+    }
+    for (auto* values : initializerValues_) {
+      heap::free(obj_, values);
+    }
+    initializerValues_.clear();
+
+    if (matcher_ != nullptr) {
+      heap::free(obj_, matcher_);
+      matcher_ = nullptr;
+    }
+    if (matcherSlot_ != nullptr) {
+      *matcherSlot_ = nullptr;
+      matcherSlot_ = nullptr;
+    }
+    obj_.reset();
+  }
+
+ private:
+  template <typename Paths>
+  Expected<> compile(GlobKeyResolver resolveKey, const Paths& paths) {
+    using Value = typename Paths::mapped_type;
+    if (paths.size() >
+        static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+      return Error(std::errc::argument_list_too_long, "too many path patterns");
+    }
+
+    std::map<std::string, struct bpfj_file_match_indexes> patterns;
+    std::map<std::int32_t, NodeSet> matchNodes;
+    std::map<std::int32_t, std::vector<std::int32_t>> initializers;
+    std::map<std::int32_t, Value> values;
+    std::int32_t nextNode = 0;
+    std::int32_t nextInitializer = 0;
+    std::int32_t pathId = 0;
+
+    for (const auto& [path, value] : paths) {
+      auto components = detail::fileMatchComponents(path);
+      for (std::size_t pos = 0; pos < components.size(); ++pos) {
+        if (pos > static_cast<std::size_t>(
+                      std::numeric_limits<std::int32_t>::max())) {
+          return Error(
+              std::errc::argument_list_too_long,
+              "path has too many components");
+        }
+        auto pattern = detail::fileMatchComponentPattern(
+            components[pos], static_cast<bool>(resolveKey));
+        auto [it, inserted] = patterns.emplace(
+            std::move(pattern), bpfj_file_match_indexes{-1, -1});
+        if (inserted) {
+          it->second.nodes_id = nextNode++;
+        }
+
+        if (pos == 0) {
+          if (it->second.initializer_nodes_id < 0) {
+            it->second.initializer_nodes_id = nextInitializer++;
+          }
+          initializers[it->second.initializer_nodes_id].push_back(pathId);
+        } else {
+          matchNodes[it->second.nodes_id].insert(
+              bpfj_file_match_node{
+                  .path_id = pathId,
+                  .pos = static_cast<std::int32_t>(pos),
+              });
+        }
+      }
+      values.emplace(pathId++, value);
+    }
+
+    if (auto res = initGlob(std::move(resolveKey), patterns); !res) {
+      return res.error();
+    }
+    if (auto res = initNodes(matchNodes); !res) {
+      return res.error();
+    }
+    if (auto res = initInitializers(initializers); !res) {
+      return res.error();
+    }
+    return initValues(values);
+  }
+
+  Expected<> initGlob(
+      GlobKeyResolver resolveKey,
+      const std::map<std::string, struct bpfj_file_match_indexes>& patterns) {
+    std::map<std::string, __u64> entries;
+    for (const auto& [pattern, indexes] : patterns) {
+      __u64 packed = 0;
+      std::memcpy(&packed, &indexes, sizeof(indexes));
+      entries.emplace(pattern, packed);
+    }
+    globMap_.emplace(obj_, matcher_->glob_map);
+    return globMap_->init(std::move(resolveKey), std::move(entries));
+  }
+
+  Expected<> initNodes(const std::map<std::int32_t, NodeSet>& matchNodes) {
+    if (matchNodes.empty()) {
+      return unit;
+    }
+
+    std::map<__u64, __u64> outer;
+    for (const auto& [nodeId, nodes] : matchNodes) {
+      std::map<__u64, __u64> inner;
+      for (const auto& node : nodes) {
+        __u64 key = 0;
+        std::memcpy(&key, &node, sizeof(node));
+        inner.emplace(key, 1);
+      }
+      innerHeaders_.push_back(nullptr);
+      PerfMap<Skel> map{obj_, innerHeaders_.back()};
+      if (auto res = map.init(inner); !res) {
+        return res.error();
+      }
+      outer.emplace(static_cast<__u64>(nodeId), map.offset());
+      nodeMaps_.push_back(std::move(map));
+    }
+    nodesMap_.emplace(obj_, matcher_->nodes_perf_map);
+    return nodesMap_->init(outer);
+  }
+
+  Expected<> initInitializers(
+      const std::map<std::int32_t, std::vector<std::int32_t>>& initializers) {
+    if (initializers.empty()) {
+      return unit;
+    }
+
+    std::map<__u64, __u64> entries;
+    for (const auto& [initializerId, paths] : initializers) {
+      auto* values = heap::allocArray<std::int32_t>(obj_, paths.size() + 1);
+      if (values == nullptr) {
+        return Error(
+            std::errc::not_enough_memory, "initializer allocation failed");
+      }
+      initializerValues_.push_back(values);
+      std::copy(paths.begin(), paths.end(), values);
+      values[paths.size()] = -1;
+      entries.emplace(
+          static_cast<__u64>(initializerId),
+          static_cast<__u64>(heap::ptrToOffset(heap::base(obj_), values)));
+    }
+    initMap_.emplace(obj_, matcher_->initializer_perf_map);
+    return initMap_->init(entries);
+  }
+
+  template <typename Value>
+  Expected<> initValues(const std::map<std::int32_t, Value>& values) {
+    if (values.empty()) {
+      return unit;
+    }
+    auto* data = heap::allocArray<Value>(obj_, values.size());
+    if (data == nullptr) {
+      return Error(std::errc::not_enough_memory, "path data allocation failed");
+    }
+    dataVec_ = data;
+    for (const auto& [pathId, value] : values) {
+      std::memcpy(&data[pathId], &value, sizeof(value));
+    }
+    matcher_->data_vec = data;
+    matcher_->data_entry_size = sizeof(Value);
+    matcher_->data_entry_count = values.size();
+    return unit;
+  }
+
+  std::shared_ptr<Skel> obj_;
+  std::shared_ptr<Lru> matchLru_;
+  struct bpfj_file_matcher** matcherSlot_ = nullptr;
+  struct bpfj_file_matcher* matcher_ = nullptr;
+  std::optional<GlobMap<Skel>> globMap_;
+  std::optional<PerfMap<Skel>> nodesMap_;
+  std::deque<struct bpfj_perf_map*> innerHeaders_;
+  std::vector<PerfMap<Skel>> nodeMaps_;
+  std::optional<PerfMap<Skel>> initMap_;
+  std::vector<std::int32_t*> initializerValues_;
+  void* dataVec_ = nullptr;
+};
+
+} // namespace bpfjailer
