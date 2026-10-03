@@ -9,7 +9,10 @@
 
 #include <cerrno>
 #include <fstream>
+#include <functional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "bpfj/enforce/PtraceEnforcer.h"
 
@@ -20,21 +23,26 @@ using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
+using bpfjailer::test::noteDiagnostic;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 
 namespace {
 
-/// @brief Bring up the jailer and the ptrace enforcer over `yaml`.
+constexpr std::string_view kPolicy =
+    "roles:\n"
+    "  unconfigured:\n"
+    "  restricted:\n    ptrace:\n      - worker\n"
+    "  denied:\n    no-ptrace: true\n"
+    "  worker:\n"
+    "  other:\n";
+
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);
   loadJailer(policy);
   ASSERT_OK(PtraceEnforcer::load(testPins(), policy));
 }
 
-/// @brief The errno from attaching to `pid`, or 0 if it was allowed, undoing
-/// a successful attach before returning -- it stops the tracee, and the Child
-/// destructor's waitpid would never return.
 [[nodiscard]] int attachErrno(pid_t pid) {
   errno = 0;
   if (::ptrace(PTRACE_ATTACH, pid, nullptr, nullptr) != 0) {
@@ -47,25 +55,20 @@ void attach(const std::string& yaml) {
   return 0;
 }
 
-/// @brief What a child reports after asking its parent to trace it.
 [[nodiscard]] int tracemeErrno() {
   errno = 0;
   return ::ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) == 0 ? 0 : errno;
 }
 
-} // namespace
-
-TEST(PtraceEnforcer, LoadPinsBothLinksAndItsMaps) {
-  attach("roles:\n  svc:\n");
-
-  // Two hooks, because PTRACE_TRACEME arrives at its own with the roles
-  // reversed.
-  ASSERT(linkPinned("bpfj_ptrace_check"));
-  ASSERT(linkPinned("bpfj_ptrace_traceme"));
-  ASSERT(mapPinned("bpfj_role_policies"));
-  ASSERT(!mapPinned("bpfj_ptrace_roles"));
-  ASSERT(!mapPinned("bpfj_ptrace_access"));
+[[nodiscard]] int runIsolated(
+    std::string_view scenarioName,
+    std::function<int()> body) {
+  noteDiagnostic("      scenario: " + std::string(scenarioName) + "\n");
+  Child scenario(std::move(body));
+  return scenario.run();
 }
+
+} // namespace
 
 TEST(PtraceEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
   attach("roles:\n  svc:\n  worker:\n");
@@ -73,104 +76,121 @@ TEST(PtraceEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
   ASSERT(linkPinned("bpfj_ptrace_check"));
 }
 
-TEST(PtraceEnforcer, AnUnconfiguredRoleMayAttachToAnyone) {
-  attach("roles:\n  svc:\n");
+TEST(PtraceEnforcer, EnforcesPoliciesWithOneAttachment) {
+  attach(std::string(kPolicy));
 
-  Child target;
-  enroll("svc", ::getpid());
+  ASSERT(linkPinned("bpfj_ptrace_check"));
+  ASSERT(linkPinned("bpfj_ptrace_traceme"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_ptrace_roles"));
+  ASSERT(!mapPinned("bpfj_ptrace_access"));
 
-  ASSERT_EQ(attachErrno(target.pid()), 0);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "an unconfigured role may attach",
+          [] {
+            Child target;
+            enroll("unconfigured", ::getpid());
+            return attachErrno(target.pid());
+          }),
+      0);
 
-TEST(PtraceEnforcer, ARestrictedRoleMayAttachInsideItsOwnPod) {
-  attach("roles:\n  svc:\n    ptrace:\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may attach within its pod",
+          [] {
+            enroll("restricted", ::getpid());
+            Child inPod;
+            return attachErrno(inPod.pid());
+          }),
+      0);
 
-  enroll("svc", ::getpid());
-  Child inPod;
+  ASSERT_EQ(
+      runIsolated(
+          "a denied role may not attach within its pod",
+          [] {
+            enroll("denied", ::getpid());
+            Child inPod;
+            return attachErrno(inPod.pid());
+          }),
+      EPERM);
 
-  ASSERT_EQ(attachErrno(inPod.pid()), 0);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may not attach outside its pod",
+          [] {
+            Child outside;
+            enroll("restricted", ::getpid());
+            return attachErrno(outside.pid());
+          }),
+      EPERM);
 
-TEST(PtraceEnforcer, ARoleWithNoPtraceMayNotAttachInsideItsOwnPod) {
-  attach("roles:\n  svc:\n    no-ptrace: true\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may attach to a named role",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("restricted", ::getpid());
+            return attachErrno(target.pid());
+          }),
+      0);
 
-  enroll("svc", ::getpid());
-  Child inPod;
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may not attach to another role",
+          [] {
+            Child target;
+            enroll("other", target.pid());
+            enroll("restricted", ::getpid());
+            return attachErrno(target.pid());
+          }),
+      EPERM);
 
-  ASSERT_EQ(attachErrno(inPod.pid()), EPERM);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "ptrace denial does not block proc maps",
+          [] {
+            Child outside;
+            enroll("restricted", ::getpid());
+            if (attachErrno(outside.pid()) != EPERM) {
+              return EPROTO;
+            }
 
-TEST(PtraceEnforcer, ARestrictedRoleMayNotAttachToAnUnjailedProcess) {
-  attach("roles:\n  svc:\n    ptrace:\n");
+            std::ifstream maps(
+                "/proc/" + std::to_string(outside.pid()) + "/maps");
+            std::string line;
+            return std::getline(maps, line) && !line.empty() ? 0 : EIO;
+          }),
+      0);
 
-  Child outside;
-  enroll("svc", ::getpid());
+  ASSERT_EQ(
+      runIsolated(
+          "traceme is denied when the parent cannot attach",
+          [] {
+            Child child(tracemeErrno);
+            enroll("restricted", ::getpid());
+            return child.run();
+          }),
+      EPERM);
 
-  ASSERT_EQ(attachErrno(outside.pid()), EPERM);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "traceme is allowed within a permitted pod",
+          [] {
+            enroll("restricted", ::getpid());
+            Child inPod(tracemeErrno);
+            return inPod.run();
+          }),
+      0);
 
-TEST(PtraceEnforcer, ARestrictedRoleMayAttachToARoleItNamed) {
-  attach("roles:\n  svc:\n    ptrace:\n      - worker\n  worker:\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(attachErrno(target.pid()), 0);
-}
-
-TEST(PtraceEnforcer, ARestrictedRoleMayNotAttachToARoleItDidNotName) {
-  attach("roles:\n  svc:\n    ptrace:\n      - worker\n  worker:\n  other:\n");
-
-  Child target;
-  enroll("other", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(attachErrno(target.pid()), EPERM);
-}
-
-TEST(PtraceEnforcer, ReadOnlyAccessIsNotGated) {
-  attach("roles:\n  svc:\n    ptrace:\n");
-
-  Child outside;
-  enroll("svc", ::getpid());
-
-  // Opening /proc/<pid>/maps goes through ptrace_access_check in the
-  // read-only mode, which is not gated; the attach to this very process is
-  // denied, which makes this a carve-out rather than an accident.
-  ASSERT_EQ(attachErrno(outside.pid()), EPERM);
-
-  std::ifstream maps("/proc/" + std::to_string(outside.pid()) + "/maps");
-  std::string line;
-  ASSERT(static_cast<bool>(std::getline(maps, line)));
-  ASSERT(!line.empty());
-}
-
-TEST(PtraceEnforcer, TracemeIsRefusedWhenTheParentCouldNotAttach) {
-  attach("roles:\n  svc:\n    ptrace:\n");
-
-  // Forked before the enrollment, so the child is outside the parent's pod.
-  // Consent from the tracee is not the jail's to give.
-  Child child(tracemeErrno);
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(child.run(), EPERM);
-}
-
-TEST(PtraceEnforcer, TracemeIsAllowedInsideTheParentsPod) {
-  attach("roles:\n  svc:\n    ptrace:\n");
-
-  enroll("svc", ::getpid());
-  Child inPod(tracemeErrno);
-
-  ASSERT_EQ(inPod.run(), 0);
-}
-
-TEST(PtraceEnforcer, NoPtraceRefusesTracemeInsideTheParentsPod) {
-  attach("roles:\n  svc:\n    no-ptrace: true\n");
-
-  enroll("svc", ::getpid());
-  Child inPod(tracemeErrno);
-
-  ASSERT_EQ(inPod.run(), EPERM);
+  ASSERT_EQ(
+      runIsolated(
+          "traceme is denied within a denied pod",
+          [] {
+            enroll("denied", ::getpid());
+            Child inPod(tracemeErrno);
+            return inPod.run();
+          }),
+      EPERM);
 }

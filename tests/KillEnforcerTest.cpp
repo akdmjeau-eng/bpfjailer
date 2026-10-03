@@ -7,7 +7,10 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <functional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "bpfj/enforce/KillEnforcer.h"
 
@@ -18,208 +21,212 @@ using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
+using bpfjailer::test::noteDiagnostic;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 
 namespace {
 
-/// @brief Bring up the jailer and the signal enforcer over `yaml`.
+constexpr std::string_view kPolicy =
+    "roles:\n"
+    "  unconfigured:\n"
+    "  restricted:\n    kill:\n      - worker\n"
+    "  denied:\n    no-kill: true\n"
+    "  worker:\n"
+    "  other:\n"
+    "  strict:\n    kill:\n"
+    "  base:\n"
+    "  override-allow:\n"
+    "    override-stacked: true\n"
+    "    kill:\n      - worker\n"
+    "  shield-reader:\n    kill:\n      - shield\n"
+    "  shield:\n    override-stacked: true\n"
+    "  locked-override:\n"
+    "    override-stacked: true\n"
+    "    kill:\n"
+    "  locked:\n    kill:\n";
+
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);
   loadJailer(policy);
   ASSERT_OK(KillEnforcer::load(testPins(), policy));
 }
 
-/// @brief The errno from signalling `pid`, or 0 if it was allowed. Signal 0
-/// runs the permission checks, security_task_kill among them, and delivers
-/// nothing, so the target survives being asked.
 [[nodiscard]] int signalErrno(pid_t pid) {
   errno = 0;
   return ::kill(pid, 0) == 0 ? 0 : errno;
 }
 
-} // namespace
-
-TEST(KillEnforcer, LoadPinsItsLinkAndMaps) {
-  attach("roles:\n  svc:\n");
-
-  ASSERT(linkPinned("bpfj_kill_check"));
-  ASSERT(mapPinned("bpfj_role_policies"));
-  ASSERT(!mapPinned("bpfj_kill_roles"));
-  ASSERT(!mapPinned("bpfj_kill_access"));
+/// Run a policy scenario in a fresh task so its memberships cannot leak into
+/// the next scenario while every scenario shares one attached tree.
+[[nodiscard]] int runIsolated(
+    std::string_view scenarioName,
+    std::function<int()> body) {
+  noteDiagnostic("      scenario: " + std::string(scenarioName) + "\n");
+  Child scenario(std::move(body));
+  return scenario.run();
 }
 
+} // namespace
+
 TEST(KillEnforcer, LoadAgainstAPolicyConfiguringNothingSucceeds) {
-  // The rule goes on one role at a time, so a policy writing no `kill` anywhere
-  // must be a no-op rather than a load failure.
+  // This loader-specific case must use an otherwise unconfigured policy.
   attach("roles:\n  svc:\n  worker:\n");
 
   ASSERT(linkPinned("bpfj_kill_check"));
 }
 
-TEST(KillEnforcer, AnUnconfiguredRoleMaySignalAnyone) {
-  attach("roles:\n  svc:\n");
+TEST(KillEnforcer, EnforcesPoliciesWithOneAttachment) {
+  attach(std::string(kPolicy));
 
-  Child target;
-  enroll("svc", ::getpid());
+  ASSERT(linkPinned("bpfj_kill_check"));
+  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_kill_roles"));
+  ASSERT(!mapPinned("bpfj_kill_access"));
 
-  ASSERT_EQ(signalErrno(target.pid()), 0);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "an unconfigured role is unrestricted",
+          [] {
+            Child target;
+            enroll("unconfigured", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      0);
 
-TEST(KillEnforcer, ARestrictedRoleMaySignalInsideItsOwnPod) {
-  attach("roles:\n  svc:\n    kill:\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may signal its own pod",
+          [] {
+            enroll("restricted", ::getpid());
+            Child inPod;
+            return signalErrno(inPod.pid());
+          }),
+      0);
 
-  enroll("svc", ::getpid());
+  ASSERT_EQ(
+      runIsolated(
+          "a denied role may not signal its own pod",
+          [] {
+            enroll("denied", ::getpid());
+            Child inPod;
+            return signalErrno(inPod.pid());
+          }),
+      EPERM);
 
-  // Forked after the enrollment, so it inherited the pod.
-  Child inPod;
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may not signal an unowned task",
+          [] {
+            Child outside;
+            enroll("restricted", ::getpid());
+            return signalErrno(outside.pid());
+          }),
+      EPERM);
 
-  ASSERT_EQ(signalErrno(inPod.pid()), 0);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may signal a named role",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      0);
 
-TEST(KillEnforcer, ARoleWithNoKillMayNotSignalInsideItsOwnPod) {
-  attach("roles:\n  svc:\n    no-kill: true\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a restricted role may not signal another role",
+          [] {
+            Child target;
+            enroll("other", target.pid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 
-  enroll("svc", ::getpid());
-  Child inPod;
+  ASSERT_EQ(
+      runIsolated(
+          "every target role must be named",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("other", target.pid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 
-  ASSERT_EQ(signalErrno(inPod.pid()), EPERM);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "every actor role must permit the signal",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("strict", ::getpid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 
-TEST(KillEnforcer, ARestrictedRoleMayNotSignalAnUnjailedProcess) {
-  attach("roles:\n  svc:\n    kill:\n");
+  ASSERT_EQ(
+      runIsolated(
+          "an unconfigured actor role does not restrict",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("base", ::getpid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      0);
 
-  // Forked first, so it is in no pod: there is no role to check it against, and
-  // allowing that would hand back everything the empty list took away.
-  Child outside;
-  enroll("svc", ::getpid());
+  ASSERT_EQ(
+      runIsolated(
+          "an override bounds the actor policy walk",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("strict", ::getpid());
+            enroll("override-allow", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      0);
 
-  ASSERT_EQ(signalErrno(outside.pid()), EPERM);
-}
+  ASSERT_EQ(
+      runIsolated(
+          "a target override does not hide target roles",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("shield", target.pid());
+            enroll("shield-reader", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 
-TEST(KillEnforcer, ARestrictedRoleMaySignalARoleItNamed) {
-  attach("roles:\n  svc:\n    kill:\n      - worker\n  worker:\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a denying override blocks the actor",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("restricted", ::getpid());
+            enroll("locked-override", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 
-  Child target;
-  enroll("worker", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), 0);
-}
-
-TEST(KillEnforcer, ARestrictedRoleMayNotSignalARoleItDidNotName) {
-  attach("roles:\n  svc:\n    kill:\n      - worker\n  worker:\n  other:\n");
-
-  Child target;
-  enroll("other", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
-}
-
-TEST(KillEnforcer, ATargetRoleOffTheListDeniesTheWholeTarget) {
-  attach("roles:\n  svc:\n    kill:\n      - worker\n  worker:\n  other:\n");
-
-  // Every role the target holds must be listed, or it would become reachable
-  // by acquiring `worker` alongside the role protecting it.
-  Child target;
-  enroll("worker", target.pid());
-  enroll("other", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
-}
-
-TEST(KillEnforcer, EveryActorRoleHasToPermit) {
-  attach(
-      "roles:\n  svc:\n    kill:\n      - worker\n  strict:\n    kill:\n"
-      "  worker:\n");
-
-  Child target;
-  enroll("worker", target.pid());
-
-  // `svc` would permit, but `strict` may act only in its own pod, and one
-  // configured role denying is enough to deny the task.
-  enroll("strict", ::getpid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
-}
-
-TEST(KillEnforcer, AnUnconfiguredActorRoleAbstains) {
-  attach("roles:\n  svc:\n    kill:\n      - worker\n  base:\n  worker:\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("base", ::getpid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), 0);
-}
-
-TEST(KillEnforcer, AnOverrideRoleThatPermitsAnswersForTheRolesUnderIt) {
-  attach(
-      "roles:\n"
-      "  strict:\n    kill:\n"
-      "  worker:\n"
-      "  svc:\n    override-stacked: true\n    kill:\n      - worker\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("strict", ::getpid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), 0);
-}
-
-TEST(KillEnforcer, AnOverrideRoleOnTheTargetStillHasToBeCovered) {
-  // Override bounds the actor's walk only: `svc` lists `shield` but not
-  // `worker`, and the target holding `shield` on top does not drop `worker`.
-  attach(
-      "roles:\n"
-      "  svc:\n    kill:\n      - shield\n"
-      "  worker:\n"
-      "  shield:\n    override-stacked: true\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("shield", target.pid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
-}
-
-TEST(KillEnforcer, AnOverrideRoleStopsTheWalkBeforeTheRolesUnderIt) {
-  // The same rule as the BPF object gate, the flag belonging to the pod stack
-  // rather than any one enforcer: `locked` is stacked on the `svc` that would
-  // have permitted the signal, and stops the walk before it is consulted.
-  attach(
-      "roles:\n"
-      "  svc:\n    kill:\n      - worker\n"
-      "  worker:\n"
-      "  locked:\n    override-stacked: true\n    kill:\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("svc", ::getpid());
-  enroll("locked", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
-}
-
-TEST(KillEnforcer, WithoutOverrideTheRoleUnderneathStillDenies) {
-  // `svc` on top would permit, but without the flag the walk carries on to
-  // `locked`, which permits nothing outside its own pod.
-  attach(
-      "roles:\n"
-      "  svc:\n    kill:\n      - worker\n"
-      "  worker:\n"
-      "  locked:\n    kill:\n");
-
-  Child target;
-  enroll("worker", target.pid());
-  enroll("locked", ::getpid());
-  enroll("svc", ::getpid());
-
-  ASSERT_EQ(signalErrno(target.pid()), EPERM);
+  ASSERT_EQ(
+      runIsolated(
+          "a stacked denial blocks the actor",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("locked", ::getpid());
+            enroll("restricted", ::getpid());
+            return signalErrno(target.pid());
+          }),
+      EPERM);
 }

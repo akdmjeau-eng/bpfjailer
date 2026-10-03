@@ -7,7 +7,10 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <functional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "bpfj/enforce/LkmEnforcer.h"
 
@@ -18,11 +21,17 @@ using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
+using bpfjailer::test::noteDiagnostic;
 using bpfjailer::test::pinnedMapIsEmpty;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 
 namespace {
+
+constexpr std::string_view kPolicy =
+    "roles:\n"
+    "  unrestricted:\n"
+    "  denied:\n    no-lkm: true\n";
 
 void attach(const std::string& yaml) {
   const Policy policy = policyOf(yaml);
@@ -37,48 +46,59 @@ void attach(const std::string& yaml) {
                                                                      : errno;
 }
 
+[[nodiscard]] int runIsolated(
+    std::string_view scenarioName,
+    std::function<int()> body) {
+  noteDiagnostic("      scenario: " + std::string(scenarioName) + "\n");
+  Child scenario(std::move(body));
+  return scenario.run();
+}
+
 } // namespace
 
-TEST(LkmEnforcer, LoadPinsItsLinksAndMap) {
+TEST(LkmEnforcer, LoadAgainstAnUnconfiguredPolicySucceeds) {
   attach("roles:\n  svc:\n");
+
+  ASSERT(!pinnedMapIsEmpty("bpfj_role_policies"));
+}
+
+TEST(LkmEnforcer, EnforcesPoliciesWithOneAttachment) {
+  attach(std::string(kPolicy));
 
   ASSERT(linkPinned("bpfj_kernel_module_request"));
   ASSERT(linkPinned("bpfj_kernel_load_data"));
   ASSERT(linkPinned("bpfj_kernel_read_file"));
   ASSERT(mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_no_lkm_roles"));
-}
 
-TEST(LkmEnforcer, APolicyConfiguringNothingLeavesTheRoleMapEmpty) {
-  attach("roles:\n  svc:\n");
+  ASSERT_EQ(
+      runIsolated(
+          "a no-lkm role denies module load",
+          [] {
+            Child actor(initModuleErrno);
+            enroll("denied", actor.pid());
+            return actor.run();
+          }),
+      EPERM);
 
-  ASSERT(!pinnedMapIsEmpty("bpfj_role_policies"));
-}
+  ASSERT_EQ(
+      runIsolated(
+          "an unrestricted role reaches the kernel",
+          [] {
+            Child actor(initModuleErrno);
+            enroll("unrestricted", actor.pid());
+            return actor.run();
+          }),
+      ENOEXEC);
 
-TEST(LkmEnforcer, ANoLkmRoleMayNotLoadAKernelModule) {
-  attach("roles:\n  denied:\n    no-lkm: true\n");
-
-  Child actor(initModuleErrno);
-  enroll("denied", actor.pid());
-
-  ASSERT_EQ(actor.run(), EPERM);
-}
-
-TEST(LkmEnforcer, AnUnconfiguredRoleMayReachTheKernelModuleLoader) {
-  attach("roles:\n  unrestricted:\n");
-
-  Child actor(initModuleErrno);
-  enroll("unrestricted", actor.pid());
-
-  ASSERT_EQ(actor.run(), ENOEXEC);
-}
-
-TEST(LkmEnforcer, NoLkmOnOneRoleDeniesAStackedTask) {
-  attach("roles:\n  unrestricted:\n  denied:\n    no-lkm: true\n");
-
-  Child actor(initModuleErrno);
-  enroll("denied", actor.pid());
-  enroll("unrestricted", actor.pid());
-
-  ASSERT_EQ(actor.run(), EPERM);
+  ASSERT_EQ(
+      runIsolated(
+          "a stacked no-lkm role still denies",
+          [] {
+            Child actor(initModuleErrno);
+            enroll("denied", actor.pid());
+            enroll("unrestricted", actor.pid());
+            return actor.run();
+          }),
+      EPERM);
 }
