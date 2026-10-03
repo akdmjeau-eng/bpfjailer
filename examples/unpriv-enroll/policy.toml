@@ -10,10 +10,16 @@
 #            the jail deleting its own entry from the jailer's maps and walking
 #            out. `bpf-pod: true` would safely permit BPF objects from this pod,
 #            but this shell does not need bpf(2) at all.
-#   kill-pod: the role may signal only inside its own pod.
-#   ptrace-pod: the role may attach only inside its own pod.
+#   kill/ptrace/proc pod: process interaction and /proc access stay in the pod.
+#   mq/shm pod: System V and POSIX IPC objects stay in the pod. The named POSIX
+#            patterns also demonstrate narrowly shared names.
 #   fs-any and verity-any: ordinary files and unsigned executables stay usable;
 #            this example confines process interaction rather than the file tree.
+#   exec-paths: executable code is allowed globally, but setuid execution is
+#            deliberately denied. Shared objects remain usable.
+#   unix-bind: pathname binds are denied and only one abstract socket name is
+#            allowed, demonstrating confinement that filesystem permissions
+#            cannot provide.
 #   enroll absent: bpfjsrv may add no further role to a process in this one, not
 #            even another `sandbox` pod, so the jail cannot be widened or its
 #            pod slots used up from inside.
@@ -24,3 +30,18 @@ fs-any = true
 verity-any = true
 kill-pod = true
 ptrace-pod = true
+proc-pod = true
+mq-sysv-pod = true
+mq-posix-pod = true
+mq-posix-pattern = ["/bpfj-example-*"]
+shm-sysv-pod = true
+shm-posix-pod = true
+shm-posix-pattern = ["/bpfj-example-*"]
+
+[roles.sandbox.exec-paths]
+"/" = { allow-exec = true, allow-setuid = false, allow-shared-object = true }
+
+[roles.sandbox.unix-bind]
+"/" = false
+"@*" = false
+"@bpfj-sandbox-demo" = true

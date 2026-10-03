@@ -1,0 +1,23 @@
+# Bootstrap policy for the short interval before the first signed replacement.
+# It deliberately omits the floor path matcher: base-role seeding occurs before
+# attach has finished pinning links, so denying the pin tree at bootstrap would
+# make bpfjctl deny its own remaining setup. The enrolled helper replaces this
+# policy with policy.toml.in, where the pin tree is protected.
+base-role = "floor"
+
+[certs]
+signer = "@CERT@"
+
+[roles.floor]
+any = true
+bpf-pod = true
+untracked-bpf = true
+keyring-own = true
+
+[roles.bpfjailer]
+any = true
+override-stacked = true
+enforce-binary-certs = ["signer"]
+min-seq = @CURRENT_SEQ@
+bpf-any = true
+keyring-own = true

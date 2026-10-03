@@ -19,10 +19,10 @@ can show that a valid signature below the rollback floor is now refused.
 
 ```
 ./build.sh     # mint a key, stage current+retired signed binaries      (root)
-./attach.sh    # bootstrap the jailer from the same policy            (root)
-./upgrade.sh   # run the current signed binary: the actual upgrade    (root)
-./verify.sh    # try the things the policy forbids                    (root)
-./detach.sh    # run the current signed detach binary, then clean up  (root)
+./attach.sh    # attach a short-lived bootstrap policy                (root)
+bash ./upgrade.sh  # run the current signed binary: the actual upgrade    (root)
+bash ./verify.sh   # try the things the policy forbids                    (root)
+bash ./detach.sh   # run the signed detach binary, then clean up          (root)
 ```
 
 Needs `openssl`, `fsverity`, `setfattr`, `mkfs.ext4`, `losetup` and `bpftool`,
@@ -30,6 +30,12 @@ and the static archives a statically linked binary needs — `build.sh` checks
 for those and names the packages if any are missing.
 
 ## The policy
+
+`build.sh` renders two policies with the same roles, signer, and rollback
+floor. `bootstrap-policy.toml` deliberately omits filesystem self-protection,
+because base-role seeding happens before attach finishes creating pins.
+`policy.toml` is compiled into the signed updater and adds the path policy on
+the first replacement, after the helper already holds the override role.
 
 ```toml
 base-role = "floor"
@@ -43,6 +49,17 @@ bpf-pod = true
 untracked-bpf = true
 keyring-own = true
 
+[roles.floor.paths]
+"/" = "RDWR"
+"/bin" = "RDEXEC"
+"/lib" = "RDEXEC"
+"/lib64" = "RDEXEC"
+"/sbin" = "RDEXEC"
+"/usr" = "RDEXEC"
+"<build directory>" = "RDEXEC"
+"<example directory>" = "RDEXEC"
+"/sys/fs/bpf/bpfj-pins" = "NONE"
+
 [roles.bpfjailer]
 any = true
 override-stacked = true
@@ -54,6 +71,15 @@ keyring-own = true
 
 `floor` is the base role, so every process on the host is in it. It names no
 certificate, so ordinary execs are not signature-checked.
+
+In the hardened policy, the path table is the other half of self-protection. The root rule leaves
+ordinary data readable and writable, the system-directory rules keep installed
+programs and shared objects executable, and generated entries admit this
+example plus its freshly built tools. The longest match gives
+`/sys/fs/bpf/bpfj-pins` no access at all. Thus an unsigned root process cannot
+open, inspect, rename, or unlink the jailer's pins. This is a compact
+appliance-style baseline; a production host should enumerate every directory
+from which it intentionally executes code.
 
 `floor` writes `bpf-pod: true`, which restricts every process on the host to
 the objects `floor` itself owns, and `untracked-bpf: true` is what makes that
@@ -114,11 +140,10 @@ fs-verity enabled, and is still refused in `bpfjailer` because its sequence is
 ## Why the teardown needs a signed binary too
 
 Once `upgrade.sh` has run, the jailer's own maps are owned by `bpfjailer`, and
-`bpf-pod` on `floor` means no other role can open them. `detach` is
-not exempt from that: `Jailer::unload()` reads the fs-verity keyring map before
-it removes anything, so a plain `bpfjctl detach` — which claims no role, and is
-therefore in `floor` like everything else — is refused on that first map and
-takes nothing down.
+`bpf-pod` on `floor` means no other role can open them. Independently, the
+filesystem policy denies the floor access to the entire pin tree. `detach` is
+not exempt from either rule: `Jailer::unload()` cannot even inspect the pins
+from a plain `bpfjctl detach`.
 
 ```
 $ sudo bpfjctl detach
@@ -134,10 +159,10 @@ jailer's own maps.
 
 `detach.sh` will not remove the staging filesystem if the detach failed — the
 signed binary lives there, and deleting it while the jailer is up would leave
-the host with nothing able to detach it. `sudo rm -rf /sys/fs/bpf/bpfj-pins`
-is the way out of that: unlinking a pin is `unlink()` rather than `bpf(2)`, so
-it is not gated. It leaves this tree's keyrings linked in the root user keyring
-with nothing naming them.
+the host with nothing able to detach it. The old unlink escape hatch is now
+closed too: filesystem unlink and rename hooks enforce the `NONE` rule on the
+pin tree. Recovery therefore requires a correctly signed detach binary or a
+reboot into an environment where the BPF LSM is not active.
 
 ## Why the ext4 image
 
@@ -166,7 +191,14 @@ seeded into a moment later does not own them either, which is what
 `untracked-bpf` on `floor` says. `floor` cannot open those unowned maps, but the
 signed `bpfjailer` role needs `bpf-any` to perform the first replacement.
 
-The first signed upgrade is what takes ownership: `bpfjcmd` execs under a live
+The bootstrap policy does not yet deny the pin pathname. Base-role seeding
+runs before attach has pinned its final links, so enabling that rule sooner
+would make the bootstrap process deny its own setup. The first signed replace
+is the security boundary: it installs the hardened path policy while running
+under `bpfjailer`, whose override grants access throughout the cutover.
+
+The first signed upgrade is what takes ownership and protects the pins:
+`bpfjcmd` execs under a live
 jailer from that pre-enrolled helper, enters `bpfjailer`, and the objects it
 creates are recorded against that role. `verify.sh` is therefore only
 meaningful after `upgrade.sh` has run.

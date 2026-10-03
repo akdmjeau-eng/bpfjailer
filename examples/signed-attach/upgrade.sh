@@ -34,4 +34,4 @@ echo
 echo "Upgraded. From here the jailer's objects are owned by $ROLE, so nothing"
 echo "outside that role can open them."
 echo
-echo "Next: ./verify.sh"
+echo "Next: bash ./verify.sh"

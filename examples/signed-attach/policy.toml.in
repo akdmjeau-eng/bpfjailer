@@ -1,14 +1,17 @@
-# Template. build.sh replaces the placeholder line below with the minted
-# certificate and writes the result to $WORK/policy.toml. The same file is loaded by the
-# bootstrap attach and compiled into bpfjcmd, so both halves agree by
-# construction.
+# Template. build.sh replaces the placeholders below and writes the result to
+# $WORK/policy.toml. This hardened policy
+# is compiled into bpfjcmd. bootstrap-policy.toml.in carries the same roles and
+# trust settings but omits the path matcher until the first signed replacement.
 #
 # Two roles, and the shape of each is load-bearing.
 #
 # `floor` is the base role, so every process on the host is in it. `any` leaves
-# execs and other unspecified operations open -- a base role with
-# `enforce-binary-certs` would demand a signature from every binary on the
-# host, which is not what this example is about.
+# operations open unless a narrower option is present. The path table is that
+# narrower filesystem option: normal system programs remain executable,
+# ordinary paths remain readable and writable, and the jailer's pin tree is
+# inaccessible. Scripts outside the system directories must be passed to an
+# interpreter after attach (for example, `bash ./verify.sh`) because RDWR does
+# not include execute permission.
 #
 # `bpf-pod` narrows BPF from that open baseline to objects from the caller's
 # own pod.
@@ -46,6 +49,17 @@ any = true
 bpf-pod = true
 untracked-bpf = true
 keyring-own = true
+
+[roles.floor.paths]
+"/" = "RDWR"
+"/bin" = "RDEXEC"
+"/lib" = "RDEXEC"
+"/lib64" = "RDEXEC"
+"/sbin" = "RDEXEC"
+"/usr" = "RDEXEC"
+"@BUILD@" = "RDEXEC"
+"@EXAMPLE@" = "RDEXEC"
+"/sys/fs/bpf/bpfj-pins" = "NONE"
 
 [roles.bpfjailer]
 any = true

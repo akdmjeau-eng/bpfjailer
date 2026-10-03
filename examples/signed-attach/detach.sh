@@ -12,10 +12,9 @@ stuck() {
   echo >&2
   echo "error: the jailer is still attached and nothing here could detach it." >&2
   echo "  $WORK has been left alone, so a fixed binary can be rebuilt into it." >&2
-  echo "  Failing that, unlinking the pins detaches the programs by hand:" >&2
-  echo "    sudo rm -rf $PINS" >&2
-  echo "  That leaves this tree's fs-verity keyrings linked in the root user" >&2
-  echo "  keyring with nothing naming them -- 'sudo keyctl show @u' lists them." >&2
+  echo "  The floor role cannot unlink $PINS: that is part of the self-protection" >&2
+  echo "  this example demonstrates. Recover with another correctly signed detach" >&2
+  echo "  binary, or reboot into an environment where the BPF LSM is not active." >&2
   exit 1
 }
 
@@ -33,9 +32,10 @@ elif [ -x "$BPFJCTL" ]; then
   # object is not gated, so plain bpfjctl can still do it.
   echo "Detaching with $BPFJCTL..."
   sudo "$BPFJCTL" detach || stuck
-elif sudo test -d "$PINS"; then
-  # Under sudo because the bpffs mount is 0700 root, so an unprivileged test
-  # cannot tell a missing pin tree from one it may not look at.
+else
+  # Once the hardened policy is active, an unsigned stat of $PINS is denied
+  # whether the tree exists or not. Never mistake that denial for a detached
+  # jailer and delete the only remaining recovery material.
   stuck
 fi
 

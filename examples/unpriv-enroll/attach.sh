@@ -50,7 +50,7 @@ sudo grep -qs "Listening on" "$LOGFILE" ||
 
 echo
 echo "Attached. The jailer is live for the whole host, so run ./detach.sh when done."
-echo "  role:    $ROLE (unpriv-enroll: true, BPF denied, kill/ptrace own-pod only)"
+echo "  role:    $ROLE (BPF denied; process and IPC access confined to its pod)"
 echo "  socket:  $SOCKET"
 echo "  logs:    sudo cat $LOGFILE"
 echo

@@ -39,6 +39,21 @@ fs-any = true
 verity-any = true
 kill-pod = true
 ptrace-pod = true
+proc-pod = true
+mq-sysv-pod = true
+mq-posix-pod = true
+mq-posix-pattern = ["/bpfj-example-*"]
+shm-sysv-pod = true
+shm-posix-pod = true
+shm-posix-pattern = ["/bpfj-example-*"]
+
+[roles.sandbox.exec-paths]
+"/" = { allow-exec = true, allow-setuid = false, allow-shared-object = true }
+
+[roles.sandbox.unix-bind]
+"/" = false
+"@*" = false
+"@bpfj-sandbox-demo" = true
 ```
 
 `unpriv-enroll: true` is the only reason a non-root caller may take this role.
@@ -49,10 +64,21 @@ BPF is omitted because absence is the load-bearing denial: a jailed process
 holding `CAP_BPF` cannot delete its own entry from the jailer's maps and walk
 out. `bpf-pod: true` would instead permit BPF objects from its own pod.
 
-The two pod options confine signalling and ptrace to the pod. `fs-any` and
+The process options confine signalling, ptrace, and `/proc` access to the pod.
+The four IPC pod options do the same for System V and POSIX message queues and
+shared memory; the POSIX patterns show how a deliberately shared naming
+convention can be admitted without opening every object. `fs-any` and
 `verity-any` keep ordinary file access and unsigned executables open so the
-shell can run; all other unspecified operations remain denied. Enrollment is
-omitted, so a process in the jail cannot ask `bpfjsrv` for any further role.
+shell can run. The executable-path rule allows code and shared objects but
+denies setuid transitions.
+
+Unix pathname binds are denied, as are arbitrary abstract names. The one exact
+abstract name `@bpfj-sandbox-demo` is allowed, demonstrating control over a
+namespace that normal file permissions cannot cover. Module loading, keyring
+writes, and further enrollment remain denied. Mount and unmount policy
+is omitted: this unprivileged example leaves those to normal kernel
+credentials rather than pretending a `CAP_SYS_ADMIN` failure demonstrates the
+jailer.
 
 To watch the jail refuse something, start a process outside it and try to
 signal it from inside:
@@ -67,6 +93,22 @@ The same `kill` from outside the jail succeeds. Same user, same command, so
 it is the `kill-pod:` policy refusing and not file permissions — which is the
 point, since an example that only shows root-only operations being denied to
 a non-root process would demonstrate nothing.
+
+The `/proc` rule is visible without another tool:
+
+```
+cat /proc/self/status  # allowed: this pod
+cat /proc/1/status     # denied: another pod
+```
+
+Abstract Unix sockets are similarly independent of filesystem permissions:
+
+```
+python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.bind("\0outside")'
+python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.bind("\0bpfj-sandbox-demo")'
+```
+
+The first bind is denied and the second is allowed by `unix-bind`.
 
 `bpfjctl` does not work inside the jail either: the role denies `bpf(2)`, so
 the jail will not even be inspected from within. Use `sudo bpfjctl list` from

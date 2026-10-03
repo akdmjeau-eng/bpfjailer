@@ -1,8 +1,9 @@
 #!/bin/bash
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# Mint a signing key, build a bpfjcmd with the policy compiled in, sign it,
-# and stage it somewhere fs-verity works. Needs root for the loop mount.
+# Mint a signing key, render bootstrap and hardened policies, build a bpfjcmd
+# with the hardened policy compiled in, sign it, and stage it somewhere
+# fs-verity works. Needs root for the loop mount.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -59,14 +60,32 @@ sudo openssl req -new -x509 -key "$KEY" -out "$CERT" -outform der -days 365 \
   -subj "/CN=bpfj signed-attach example"
 
 # TOML carries the base64 certificate as one quoted string.
-echo "Writing $POLICY..."
+echo "Writing the bootstrap and hardened policies..."
 cert_b64=$(sudo base64 -w0 "$CERT")
-# Both placeholders occur only in their TOML values.
-sudo awk -v cert="$cert_b64" -v seq="$CURRENT_SEQ" '
-  { sub("@CERT@", cert); sub("@CURRENT_SEQ@", seq); print }
-' \
-  "$TEMPLATE" | sudo tee "$POLICY" >/dev/null
+# The placeholders occur only in TOML quoted strings. BUILD and the example
+# directory must remain executable after attach: attach.sh still invokes the
+# freshly built bpfjctl to enroll the helper, and the later workflow scripts
+# live beside this template.
+render_policy() {
+  sudo awk \
+    -v cert="$cert_b64" \
+    -v seq="$CURRENT_SEQ" \
+    -v build="$BUILD" \
+    -v example="$here" '
+    {
+      sub("@CERT@", cert)
+      sub("@CURRENT_SEQ@", seq)
+      sub("@BUILD@", build)
+      sub("@EXAMPLE@", example)
+      print
+    }
+  ' "$1" | sudo tee "$2" >/dev/null
+}
 
+render_policy "$BOOTSTRAP_TEMPLATE" "$BOOTSTRAP_POLICY"
+render_policy "$TEMPLATE" "$POLICY"
+
+"$BPFJCTL" check "$BOOTSTRAP_POLICY"
 "$BPFJCTL" check "$POLICY"
 
 # SIGNDIR is the ext4 image: `make cmd` refuses a SIGNDIR with no user xattr

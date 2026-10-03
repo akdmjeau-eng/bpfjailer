@@ -1,7 +1,8 @@
 #!/bin/bash
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# Bootstrap the jailer from the same policy that is compiled into bpfjcmd.
+# Bootstrap the jailer long enough for the signed updater to install the
+# hardened policy compiled into bpfjcmd.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -9,15 +10,18 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$here/common.sh"
 
 require_built "$BPFJCTL"
-[ -r "$POLICY" ] || die "$POLICY is missing -- run ./build.sh first"
+[ -r "$BOOTSTRAP_POLICY" ] ||
+  die "$BOOTSTRAP_POLICY is missing -- run ./build.sh first"
 
-echo "Attaching the jailer with $POLICY..."
-sudo "$BPFJCTL" attach "$POLICY"
+echo "Attaching the jailer with $BOOTSTRAP_POLICY..."
+sudo "$BPFJCTL" attach "$BOOTSTRAP_POLICY"
 
 echo "Starting and enrolling a helper in $ROLE..."
 sudo rm -rf "$CONTROL"
 sudo mkdir -p "$CONTROL"
-sudo "$here/role-runner.sh" &
+# Once attach completes, floor may execute only from the system directories.
+# Start bash rather than execing this source-tree script directly.
+sudo /bin/bash "$here/role-runner.sh" &
 for _ in $(seq 1 50); do
   if sudo test -r "$RUNNER_PIDFILE"; then
     break
@@ -39,8 +43,8 @@ echo
 # nothing could have enrolled it in $ROLE yet. The base role it lands in a
 # moment later owns nothing either, by untracked-bpf. Its objects are therefore
 # unowned, and the signed bpfjailer role carries bpf-any for this bootstrap.
-echo "Note: the jailer's own maps are unowned right now. The floor role denies"
-echo "access to them; the signed updater carries bpf-any so it can perform the"
-echo "first replacement before the ownership handoff."
+echo "Note: the jailer's own maps are unowned right now. The bootstrap floor"
+echo "denies BPF access to them but does not yet protect the pin path. The signed"
+echo "updater carries bpf-any and installs the hardened path policy on replace."
 echo
-echo "Next: ./upgrade.sh"
+echo "Next: bash ./upgrade.sh"

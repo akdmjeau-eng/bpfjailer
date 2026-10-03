@@ -11,11 +11,7 @@ source "$here/common.sh"
 require_staged
 [ -x "$ROLLBACK" ] || die "$(basename "$ROLLBACK") is missing -- run ./build.sh first"
 command -v bpftool >/dev/null || die "bpftool is missing"
-
-# Under sudo because the bpffs mount is 0700 root, so an unprivileged test
-# cannot tell a missing pin tree from one it may not look at.
-sudo test -d "$PINS" ||
-  die "no jailer attached -- run ./attach.sh and ./upgrade.sh first"
+require_runner
 
 fail=0
 check() {
@@ -45,25 +41,38 @@ echo "     rc=$RUN_IN_ROLE_RC  ${RUN_IN_ROLE_OUT:-(no output)}"
 check "$((RUN_IN_ROLE_RC != 0))" 1 "refused at exec by the anti-rollback floor"
 
 echo
-echo "3. Opening a map the $ROLE role owns, from a process that is not in it"
+echo "3. Reading the jailer's pin directory from an unsigned process"
+echo "   The base role grants ordinary filesystem access but gives $PINS NONE."
+set +e
+out=$(sudo stat "$PINS" 2>&1)
+rc=$?
+set -e
+echo "   \$ sudo stat $PINS"
+echo "     rc=$rc  $(echo "$out" | head -1)"
+check "$((rc != 0))" 1 "refused by the filesystem path policy"
+
+echo
+echo "4. Opening a map the $ROLE role owns, from a process that is not in it"
 echo "   This shell is in $BASE_ROLE, which reaches only what $BASE_ROLE owns"
-echo "   -- and untracked-bpf means that is nothing."
+echo "   -- and untracked-bpf means that is nothing. The pin path is independently"
+echo "   protected too, so either layer is sufficient to reject this command."
 set +e
 out=$(sudo bpftool map dump pinned "$PINS/maps/bpfj_task_map" 2>&1)
 rc=$?
 set -e
 echo "   \$ sudo bpftool map dump pinned $PINS/maps/bpfj_task_map"
 echo "     rc=$rc  $(echo "$out" | head -1)"
-check "$((rc != 0))" 1 "refused by the BPF object enforcer"
+check "$((rc != 0))" 1 "refused by the layered pin and BPF policy"
 
 echo
-echo "4. The current signed binary still works"
+echo "5. The current signed binary still works"
 run_in_role "$SIGNED"
 check "$RUN_IN_ROLE_RC" 0 "the signed bpfjcmd can still replace the jailer"
 
 echo
-echo "5. The retired signed binary does not become privileged on a direct exec"
+echo "6. The retired signed binary does not become privileged on a direct exec"
 echo "   It carries no role xattr, so outside the enrolled helper it stays in $BASE_ROLE."
+echo "   The floor also permits execution only from system directories."
 set +e
 out=$(sudo "$ROLLBACK" 2>&1)
 rc=$?
@@ -76,4 +85,4 @@ echo
 if [ "$fail" -ne 0 ]; then
   die "something that should have been refused was allowed"
 fi
-echo "All five behaved. Run ./detach.sh to tear this down."
+echo "All six behaved. Run 'bash ./detach.sh' to tear this down."
