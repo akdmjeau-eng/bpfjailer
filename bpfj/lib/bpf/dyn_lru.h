@@ -74,14 +74,19 @@ static __always_inline __u32 bpfj_dyn_lru_key_words(__u32 key_size) {
   return key_size / (__u32)sizeof(__u64);
 }
 
+#define BPFJ_DYN_LRU_HASH_MULT 0x9e3779b97f4a7c15ULL
+
 static __always_inline __u32
 bpfj_dyn_lru_home(const __u64 __arena* key, __u32 key_words, __u32 arr_size) {
-  __u64 hash = 0xcbf29ce484222325ULL;
+  __u64 hash = BPFJ_DYN_LRU_HASH_MULT;
   __u32 i = 0;
   bpf_for(i, 0, key_words) {
-    hash ^= key[i];
-    hash *= 0x100000001b3ULL;
+    hash = (hash ^ key[i]) * BPFJ_DYN_LRU_HASH_MULT;
   }
+  // Fold upper key bits into the masked low bits used for the table index.
+  hash ^= hash >> 30;
+  hash *= BPFJ_DYN_LRU_HASH_MULT;
+  hash ^= hash >> 32;
   return (__u32)hash & (arr_size - 1);
 }
 
