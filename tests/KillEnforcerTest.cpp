@@ -81,7 +81,7 @@ TEST(KillEnforcer, EnforcesPoliciesWithOneAttachment) {
   attach(std::string(kPolicy));
 
   ASSERT(linkPinned("bpfj_kill_check"));
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_kill_roles"));
   ASSERT(!mapPinned("bpfj_kill_access"));
 

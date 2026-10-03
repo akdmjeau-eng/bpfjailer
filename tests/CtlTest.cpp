@@ -255,8 +255,7 @@ TEST(Ctl, ReplaceKeepsEveryEnforcerAttached) {
   }
 
   for (const auto* map :
-       {"bpfj_role_policies",
-        "bpfj_mq_sysv_owners",
+       {"bpfj_mq_sysv_owners",
         "bpfj_mq_posix_owners",
         "bpfj_shm_sysv_owners",
         "bpfj_shm_posix_owners",

@@ -61,6 +61,8 @@ _Static_assert(BPFJ_HEAP_MAX_ARENA_SIZE % BPFJ_HEAP_PAGE_SIZE == 0, "");
 
 // Data Structures (shared between BPF and userspace)
 
+struct bpfj_str_map;
+
 // Block header: 8 bytes, precedes every block's payload.
 struct bpfj_heap_block_hdr {
   __u32 size_and_flags; // bits[2:31] = block size (incl header), bits[0:1] =
@@ -87,9 +89,10 @@ struct bpfj_heap_control {
   __u64 current_used; // stats: bytes in use
   struct bpfj_lock lock; // guards every field above and the free lists
   __u32 grow_gen; // bumped by whichever side grows the arena
-  __u32 metadata_reserved;
+  __u32 runtime_versions;
   void __arena* var_catalog;
   void __arena* mutation_journal;
+  struct bpfj_str_map __arena* role_policies;
 };
 
 struct bpfj_vec {
@@ -513,8 +516,9 @@ static __always_inline void bpfj_heap_init_arena(
 
   ctrl->arena_size = arena_size;
   ctrl->grow_gen = 0;
-  ctrl->metadata_reserved = 0;
+  ctrl->runtime_versions = 0;
   ctrl->var_catalog = NULL;
+  ctrl->role_policies = NULL;
   ctrl->total_alloc = 0;
   ctrl->total_free = 0;
   ctrl->current_used = 0;

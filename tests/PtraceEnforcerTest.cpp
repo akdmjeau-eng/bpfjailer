@@ -81,7 +81,7 @@ TEST(PtraceEnforcer, EnforcesPoliciesWithOneAttachment) {
 
   ASSERT(linkPinned("bpfj_ptrace_check"));
   ASSERT(linkPinned("bpfj_ptrace_traceme"));
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_ptrace_roles"));
   ASSERT(!mapPinned("bpfj_ptrace_access"));
 

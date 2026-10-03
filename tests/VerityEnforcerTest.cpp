@@ -315,8 +315,8 @@ class Fixture {
   ASSERT_OK(id);
   auto arena = bpfjailer::PodArena::open(testPins());
   ASSERT(arena);
-  auto roles = bpfjailer::pins::openPinnedMap(testPins(), "bpfj_role_policies");
-  ASSERT(roles);
+  auto roles = bpfjailer::readRolePolicies(*arena);
+  ASSERT_OK(roles);
   auto policy = bpfjailer::lookupRolePolicy(*roles, *id);
   ASSERT_OK(policy);
   ASSERT(*policy != nullptr);
@@ -386,7 +386,7 @@ TEST(VerityEnforcer, LoadPinsBothLinksAndItsKeyMap) {
 
   ASSERT(linkPinned("bpfj_verity_mmap_file"));
   ASSERT(linkPinned("bpfj_verity_bprm_check"));
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
 }
 
 TEST(VerityEnforcer, LoadAgainstAPolicyNamingNoCertificateSucceeds) {
@@ -624,8 +624,8 @@ TEST(VerityEnforcer, AKeyringSerialThatNoLongerResolvesIsDenied) {
 
   auto arena = bpfjailer::PodArena::open(testPins());
   ASSERT(arena);
-  auto roles = bpfjailer::pins::openPinnedMap(testPins(), "bpfj_role_policies");
-  ASSERT(roles);
+  auto roles = bpfjailer::readRolePolicies(*arena);
+  ASSERT_OK(roles);
   auto policy = bpfjailer::lookupRolePolicy(*roles, *id);
   ASSERT_OK(policy);
   ASSERT(*policy != nullptr);
@@ -702,7 +702,7 @@ TEST(VerityEnforcer, LoadPinsTheKeyringGate) {
 
   ASSERT(linkPinned("bpfj_keyring_check"));
   ASSERT(mapPinned("bpfj_keyring_owner"));
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_keyring_roles"));
   ASSERT(!mapPinned("bpfj_keyring_access"));
 }

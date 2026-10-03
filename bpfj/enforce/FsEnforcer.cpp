@@ -2,7 +2,6 @@
 
 #include "bpfj/enforce/FsEnforcer.h"
 
-#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -11,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/bpf/types.h" // @manual
 #include "bpfj/enforce/bpf/types_fs.h" // @manual
 #include "bpfj/match/bpf/types_mount.h" // @manual
@@ -37,22 +37,6 @@ namespace {
       return 0;
   }
   return 0;
-}
-
-[[nodiscard]] struct bpfj_role_policy* findRolePolicy(
-    struct bpfj_policy_catalog* catalog,
-    std::string_view role) noexcept {
-  if (catalog == nullptr || role.size() >= ROLE_ID_LEN) {
-    return nullptr;
-  }
-  for (__u32 i = 0; i < catalog->count; ++i) {
-    auto& candidate = catalog->policies[i];
-    if (std::memcmp(candidate.role_id.id, role.data(), role.size()) == 0 &&
-        candidate.role_id.id[role.size()] == '\0') {
-      return &candidate;
-    }
-  }
-  return nullptr;
 }
 
 } // namespace
@@ -106,8 +90,8 @@ Expected<> FsEnforcer::load(
     return found->second;
   };
   std::vector<std::unique_ptr<Matcher>> matchers;
-  auto* catalog = static_cast<struct bpfj_policy_catalog*>(
-      skel.bss().bpfj_heap_ctrl->var_catalog);
+  auto* publishedPolicies = static_cast<struct bpfj_str_map*>(
+      skel.bss().bpfj_heap_ctrl->role_policies);
 
   for (const auto& [name, role] : policy.roles) {
     if (role.paths.empty()) {
@@ -118,13 +102,17 @@ Expected<> FsEnforcer::load(
       paths.emplace(path, bpfj_fs_path_entry{.mode = toMode(mode)});
     }
 
-    auto* rolePolicy = findRolePolicy(catalog, name);
-    if (rolePolicy == nullptr) {
+    auto foundPolicy = lookupRolePolicy(publishedPolicies, name);
+    if (!foundPolicy) {
+      return makeUnexpected(foundPolicy.error());
+    }
+    if (*foundPolicy == nullptr) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
-          "filesystem role is missing from the published policy catalog: ",
+          "filesystem role is missing from the published role map: ",
           name));
     }
+    auto* rolePolicy = const_cast<struct bpfj_role_policy*>(*foundPolicy);
     auto matcher = std::make_unique<Matcher>();
     if (auto res = matcher->init(
             obj,

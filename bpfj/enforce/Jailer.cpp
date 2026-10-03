@@ -7,8 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <limits>
 #include <optional>
+#include <string>
 
 // Ahead of the skeleton, in its own block so the formatter keeps it there: the
 // generated rodata struct only forward-declares `struct bpfj_uuid`.
@@ -22,8 +22,8 @@
 #include "bpfj/enforce/bpf/jailer.skel.h"
 #include "bpfj/lib/Heap.h"
 #include "bpfj/lib/ScopeGuard.h"
+#include "bpfj/lib/StrMap.h"
 #include "bpfj/libbpf-cpp/BpfLink.h"
-#include "bpfj/libbpf-cpp/BpfMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 
 namespace bpfjailer {
@@ -61,12 +61,12 @@ namespace fs = std::filesystem;
   auto* pod = static_cast<struct bpfj_pod*>(*blob);
   *pod = {};
   pod->role_id = roleId;
-  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!rolePolicies) {
+  auto policies = readRolePolicies(*arena);
+  if (!policies) {
     (void)arena->free(pod);
-    return makeUnexpected(rolePolicies.error());
+    return makeUnexpected(policies.error());
   }
-  auto rolePolicy = lookupRolePolicy(*rolePolicies, roleId);
+  auto rolePolicy = lookupRolePolicy(*policies, roleId);
   if (!rolePolicy || !*rolePolicy) {
     (void)arena->free(pod);
     if (!rolePolicy) {
@@ -101,16 +101,6 @@ Expected<ScratchMapFds> Jailer::load(
     const PinConfig& cfg,
     const Policy& policy,
     bool replacementFrozen) noexcept {
-  constexpr std::size_t kMaxCatalogRoles =
-      (std::numeric_limits<std::uint32_t>::max() -
-       offsetof(struct bpfj_policy_catalog, policies)) /
-      sizeof(struct bpfj_role_policy);
-  if (policy.roles.size() > kMaxCatalogRoles) {
-    return makeUnexpected(makeError(
-        std::errc::value_too_large,
-        "the role policy catalog exceeds one arena allocation"));
-  }
-
   // Before makeTree rather than inside it: the links going is what detaches
   // whatever was running, so removing only the map pins would leave those
   // programs attached to unreachable maps.
@@ -122,7 +112,8 @@ Expected<ScratchMapFds> Jailer::load(
     return makeUnexpected(res.error());
   }
 
-  auto created = bpfj::libbpf::BpfSkel<jailer_bpf>::create();
+  using Skel = bpfj::libbpf::BpfSkel<jailer_bpf>;
+  auto created = Skel::create();
   if (!created) {
     return makeUnexpected(created.error());
   }
@@ -144,18 +135,6 @@ Expected<ScratchMapFds> Jailer::load(
     skel.rodata().bpfj_base_role_id = *baseRoleId;
   }
 
-  auto rolePolicies = skel.getMap("bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(makeError(
-        std::errc::no_such_file_or_directory,
-        "the role policy index map is missing"));
-  }
-  if (auto res = rolePolicies->setMaxEntries(
-          std::max<std::size_t>(1, policy.roles.size()));
-      !res) {
-    return makeUnexpected(res.error());
-  }
-
   if (auto res = pins::pinSharedMaps(skel, cfg.mapDir()); !res) {
     return makeUnexpected(res.error());
   }
@@ -173,7 +152,18 @@ Expected<ScratchMapFds> Jailer::load(
     return makeUnexpected(res.error());
   }
 
-  if (auto res = publishPolicyCatalog(cfg, policy); !res) {
+  auto policyArena = PodArena::open(cfg);
+  if (!policyArena) {
+    return makeUnexpected(policyArena.error());
+  }
+  auto publishedPolicies = publishPolicyGraph(*policyArena, policy);
+  if (!publishedPolicies) {
+    return makeUnexpected(publishedPolicies.error());
+  }
+
+  StrMap<Skel> roleMap(
+      created.value(), skel.bss().bpfj_heap_ctrl->role_policies, false);
+  if (auto res = roleMap.init(*publishedPolicies); !res) {
     return makeUnexpected(res.error());
   }
 

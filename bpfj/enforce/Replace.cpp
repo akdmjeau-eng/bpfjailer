@@ -282,9 +282,9 @@ template <typename T>
 [[nodiscard]] Expected<struct bpfj_pod*> translatePod(
     const SnapshotPod& src,
     PodArena& newArena,
-    const Fd& rolePolicies,
-    const struct bpfj_policy_catalog* oldCatalog,
-    const struct bpfj_policy_catalog* newCatalog) noexcept {
+    const struct bpfj_var_catalog* oldVars,
+    const struct bpfj_var_catalog* newVars,
+    const struct bpfj_str_map* newPolicies) noexcept {
   const std::size_t count = src.vars.size();
   std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
   blobSize += bpfj_var_align_up(sizeof(struct bpfj_var) * count);
@@ -305,7 +305,7 @@ template <typename T>
   dst->creation_time_ns = src.header.creation_time_ns;
   dst->gc_removal_attempts = src.header.gc_removal_attempts;
   dst->enrollment_source = src.header.enrollment_source;
-  auto rolePolicy = lookupRolePolicy(rolePolicies, src.header.role_id);
+  auto rolePolicy = lookupRolePolicy(newPolicies, src.header.role_id);
   if (!rolePolicy || !*rolePolicy) {
     (void)newArena.free(*blob);
     if (!rolePolicy) {
@@ -331,10 +331,7 @@ template <typename T>
       bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& oldVar = src.vars[i];
-    auto translated = translatedVar(
-        oldVar.header.id,
-        oldCatalog ? oldCatalog->vars : nullptr,
-        newCatalog ? newCatalog->vars : nullptr);
+    auto translated = translatedVar(oldVar.header.id, oldVars, newVars);
     if (!translated) {
       (void)newArena.free(*blob);
       return makeUnexpected(makeError(
@@ -378,12 +375,9 @@ template <typename T>
   if (!oldArena) {
     return makeUnexpected(oldArena.error());
   }
-  auto oldCatalog = readPolicyCatalog(*oldArena);
-  if (!oldCatalog || !*oldCatalog) {
-    return !oldCatalog ? makeUnexpected(oldCatalog.error())
-                       : makeUnexpected(makeError(
-                             std::errc::bad_address,
-                             "the running arena has no policy catalog"));
+  auto oldVars = readVarCatalog(*oldArena);
+  if (!oldVars) {
+    return makeUnexpected(oldVars.error());
   }
   auto newArena = PodArena::open(newCfg);
   if (!newArena) {
@@ -395,25 +389,27 @@ template <typename T>
       (void)newArena->free(pod);
     }
   });
-  auto newCatalog = readPolicyCatalog(*newArena);
-  if (!newCatalog) {
-    return makeUnexpected(newCatalog.error());
+  auto newVars = readVarCatalog(*newArena);
+  if (!newVars) {
+    return makeUnexpected(newVars.error());
   }
-  if (!*newCatalog) {
+  auto newPolicies = readRolePolicies(*newArena);
+  if (!newPolicies || !*newPolicies) {
+    return !newPolicies
+        ? makeUnexpected(newPolicies.error())
+        : makeUnexpected(makeError(
+              std::errc::bad_address, "the new arena has no role policy map"));
+  }
+  if (newArena->ctrl()->runtime_versions == 0) {
     return makeUnexpected(makeError(
-        std::errc::bad_address, "the new arena has no policy catalog"));
+        std::errc::bad_address, "the new arena has no runtime versions"));
   }
-  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
-  }
-
   std::size_t copied = 0;
   for (const auto& pod : snapshots) {
     struct bpfj_pod* newPod = nullptr;
     if (pod.header.enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
       auto translated =
-          translatePod(pod, *newArena, *rolePolicies, *oldCatalog, *newCatalog);
+          translatePod(pod, *newArena, *oldVars, *newVars, *newPolicies);
       if (!translated) {
         return makeUnexpected(translated.error());
       }
@@ -453,7 +449,7 @@ template <typename T>
 [[nodiscard]] Expected<std::size_t> copyOwnerMap(
     int from,
     int to,
-    const Fd& rolePolicies,
+    const struct bpfj_str_map* policies,
     std::uint32_t sourceVersion) noexcept {
   // Same guard as copyPods(), and the free hook deletes from this map, so a
   // restarted walk is not hypothetical here.
@@ -484,7 +480,7 @@ template <typename T>
       found = ::bpf_map_lookup_elem(from, &next, &owner) == 0;
     }
     if (found) {
-      auto policy = lookupRolePolicy(rolePolicies, owner.role);
+      auto policy = lookupRolePolicy(policies, owner.role);
       if (!policy) {
         return makeUnexpected(policy.error());
       }
@@ -521,9 +517,16 @@ template <typename T>
   }
 
   std::size_t copied = 0;
-  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto arena = PodArena::open(newCfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
+    return !policies
+        ? makeUnexpected(policies.error())
+        : makeUnexpected(makeError(
+              std::errc::bad_address, "the new arena has no role policy map"));
   }
   for (const auto& name : {kMapOwners, kProgOwners}) {
     auto from = pins::openPinnedMap(oldCfg, name);
@@ -536,8 +539,7 @@ template <typename T>
       return makeUnexpected(to.error());
     }
 
-    auto one =
-        copyOwnerMap(from->get(), to->get(), *rolePolicies, sourceVersion);
+    auto one = copyOwnerMap(from->get(), to->get(), *policies, sourceVersion);
     if (!one) {
       return makeUnexpected(one.error());
     }
@@ -672,18 +674,27 @@ void disableMutationJournal(MutationJournal& owner) noexcept {
 }
 
 struct MutationReplayMaps {
+  PodArena arena;
+  const struct bpfj_str_map* policies = nullptr;
   std::map<std::uint8_t, Fd> maps;
-  Fd rolePolicies;
 };
 
 [[nodiscard]] Expected<MutationReplayMaps> openMutationReplayMaps(
     const PinConfig& cfg) noexcept {
   MutationReplayMaps out;
-  auto policies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!policies) {
-    return makeUnexpected(policies.error());
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
   }
-  out.rolePolicies = std::move(*policies);
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
+    return !policies ? makeUnexpected(policies.error())
+                     : makeUnexpected(makeError(
+                           std::errc::bad_address,
+                           "the replacement arena has no role policy map"));
+  }
+  out.arena = std::move(*arena);
+  out.policies = *policies;
 
   const std::pair<std::uint8_t, std::string_view> names[] = {
       {BPFJ_MUTATION_BPF_MAP_OWNER, kMapOwners},
@@ -708,7 +719,7 @@ struct MutationReplayMaps {
 [[nodiscard]] Expected<const struct bpfj_role_policy*> replayPolicy(
     const MutationReplayMaps& maps,
     const struct bpfj_mutation_record& record) noexcept {
-  auto policy = lookupRolePolicy(maps.rolePolicies, record.role);
+  auto policy = lookupRolePolicy(maps.policies, record.role);
   if (!policy) {
     return makeUnexpected(policy.error());
   }
@@ -881,16 +892,12 @@ struct MutationReplayMaps {
   if (!arena) {
     return makeUnexpected(arena.error());
   }
-  auto catalog = readPolicyCatalog(*arena);
-  if (!catalog) {
-    return makeUnexpected(catalog.error());
-  }
-  if (!*catalog) {
+  if (arena->ctrl()->runtime_versions == 0) {
     return makeUnexpected(makeError(
         std::errc::bad_address,
-        "the running jailer has no arena policy catalog"));
+        "the running jailer has no arena runtime versions"));
   }
-  return (*catalog)->runtime_versions;
+  return arena->ctrl()->runtime_versions;
 }
 
 /// Refuse task-storage or pod records this build cannot read. Zero denotes the
@@ -987,7 +994,7 @@ struct MutationReplayMaps {
     int from,
     int to,
     std::string_view what,
-    const Fd* rolePolicies = nullptr,
+    const struct bpfj_str_map* policies = nullptr,
     std::size_t policyOffset = 0,
     std::optional<std::size_t> ownedOffset = std::nullopt) noexcept {
   static_assert(offsetof(struct bpfj_mq_owner, role) == 0);
@@ -1015,10 +1022,10 @@ struct MutationReplayMaps {
         ::bpf_map_lookup_elem(from, next.data(), value.data()) == 0) {
       const bool owned = !ownedOffset ||
           (*ownedOffset < value.size() && value[*ownedOffset] != 0);
-      if (rolePolicies != nullptr && owned) {
+      if (policies != nullptr && owned) {
         struct bpfj_role_id role{};
         std::memcpy(&role, value.data(), sizeof(role));
-        auto policy = lookupRolePolicy(*rolePolicies, role);
+        auto policy = lookupRolePolicy(policies, role);
         if (!policy) {
           return makeUnexpected(policy.error());
         }
@@ -1054,9 +1061,16 @@ struct MutationReplayMaps {
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
   std::size_t copied = 0;
-  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto arena = PodArena::open(newCfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
+    return !policies
+        ? makeUnexpected(policies.error())
+        : makeUnexpected(makeError(
+              std::errc::bad_address, "the new arena has no role policy map"));
   }
   for (const auto name : {kMqSysvOwners, kMqPosixOwners}) {
     if (!hasPinnedMap(oldCfg, name)) {
@@ -1074,7 +1088,7 @@ struct MutationReplayMaps {
         from->get(),
         to->get(),
         name,
-        &*rolePolicies,
+        *policies,
         offsetof(struct bpfj_mq_owner, policy));
     if (!one) {
       return makeUnexpected(one.error());
@@ -1088,9 +1102,16 @@ struct MutationReplayMaps {
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
   std::size_t copied = 0;
-  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto arena = PodArena::open(newCfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
+    return !policies
+        ? makeUnexpected(policies.error())
+        : makeUnexpected(makeError(
+              std::errc::bad_address, "the new arena has no role policy map"));
   }
   for (const auto name :
        {kShmSysvOwners, kShmPosixOwners, kShmPosixMounts, kShmPosixDevices}) {
@@ -1110,7 +1131,7 @@ struct MutationReplayMaps {
         from->get(),
         to->get(),
         name,
-        hasOwner ? &*rolePolicies : nullptr,
+        hasOwner ? *policies : nullptr,
         offsetof(struct bpfj_shm_owner, policy));
     if (!one) {
       return makeUnexpected(one.error());
@@ -1123,9 +1144,16 @@ struct MutationReplayMaps {
 [[nodiscard]] Expected<> copyPendingOwnership(
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
-  auto rolePolicies = pins::openPinnedMap(newCfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto arena = PodArena::open(newCfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
+    return !policies
+        ? makeUnexpected(policies.error())
+        : makeUnexpected(makeError(
+              std::errc::bad_address, "the new arena has no role policy map"));
   }
 
   const struct {
@@ -1158,7 +1186,7 @@ struct MutationReplayMaps {
         from->get(),
         to->get(),
         pending.name,
-        &*rolePolicies,
+        *policies,
         pending.policyOffset,
         pending.ownedOffset);
     if (!copied) {

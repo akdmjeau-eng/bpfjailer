@@ -51,11 +51,11 @@ Expected<bool> unprivEnrollAllowed(
   if (!arena) {
     return makeUnexpected(arena.error());
   }
-  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto policies = readRolePolicies(*arena);
+  if (!policies) {
+    return makeUnexpected(policies.error());
   }
-  auto policy = lookupRolePolicy(*rolePolicies, *key);
+  auto policy = lookupRolePolicy(*policies, *key);
   if (!policy) {
     return makeUnexpected(policy.error());
   }

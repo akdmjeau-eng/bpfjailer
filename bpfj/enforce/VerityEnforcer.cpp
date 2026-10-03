@@ -105,9 +105,9 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
   if (!arena) {
     return makeUnexpected(arena.error());
   }
-  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto policies = readRolePolicies(*arena);
+  if (!policies) {
+    return makeUnexpected(policies.error());
   }
 
   // One scope for the load, so a reader can tell which tree a keyring is.
@@ -128,7 +128,7 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
       return makeUnexpected(serial.error());
     }
 
-    auto publishedPolicy = lookupRolePolicy(*rolePolicies, *id);
+    auto publishedPolicy = lookupRolePolicy(*policies, *id);
     if (!publishedPolicy) {
       return makeUnexpected(publishedPolicy.error());
     }
@@ -137,7 +137,7 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
           std::errc::invalid_argument,
           "role ",
           role,
-          " is missing from the arena policy catalog"));
+          " is missing from the arena role map"));
     }
     const struct bpfj_role_policy_ref ref{.policy = *publishedPolicy};
     if (auto res = owners->updateElem(*serial, ref); !res) {
@@ -229,18 +229,20 @@ Expected<std::vector<keyctl::Serial>> VerityEnforcer::disarm(
   if (!arena) {
     return makeUnexpected(arena.error());
   }
-  auto catalog = readPolicyCatalog(*arena);
-  if (!catalog || !*catalog) {
+  auto policies = readRolePolicies(*arena);
+  if (!policies || !*policies) {
     return serials;
   }
-  const std::size_t count = (*catalog)->count;
-  for (std::size_t i = 0; i < count; ++i) {
-    auto& policy =
-        const_cast<struct bpfj_role_policy&>((*catalog)->policies[i]);
-    const auto serial = policy.key_serial;
+  for (__u32 i = 0; i < (*policies)->capacity; ++i) {
+    const auto& entry = (*policies)->vec[i];
+    if (entry.key == nullptr) {
+      continue;
+    }
+    auto* policy = static_cast<struct bpfj_role_policy*>(entry.val);
+    const auto serial = policy->key_serial;
     if (serial != 0) {
       serials.push_back(static_cast<keyctl::Serial>(serial));
-      policy.key_serial = 0;
+      policy->key_serial = 0;
     }
   }
 

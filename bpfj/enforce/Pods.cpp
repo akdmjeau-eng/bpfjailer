@@ -467,11 +467,11 @@ Expected<bpfj_uuid> enrollPod(
     resolved = std::move(*read);
   }
 
-  auto rolePolicies = pins::openPinnedMap(cfg, "bpfj_role_policies");
-  if (!rolePolicies) {
-    return makeUnexpected(rolePolicies.error());
+  auto policies = readRolePolicies(arena);
+  if (!policies) {
+    return makeUnexpected(policies.error());
   }
-  auto rolePolicy = lookupRolePolicy(*rolePolicies, roleId);
+  auto rolePolicy = lookupRolePolicy(*policies, roleId);
   if (!rolePolicy) {
     return makeUnexpected(rolePolicy.error());
   }

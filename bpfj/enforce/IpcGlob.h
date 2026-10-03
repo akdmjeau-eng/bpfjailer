@@ -3,13 +3,13 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/err/Error.h"
 #include "bpfj/lib/GlobMap.h"
@@ -17,22 +17,6 @@
 #include "bpfj/policy/Policy.h"
 
 namespace bpfjailer {
-
-inline struct bpfj_role_policy* findIpcRolePolicy(
-    struct bpfj_policy_catalog* catalog,
-    std::string_view role) noexcept {
-  if (catalog == nullptr || role.size() >= ROLE_ID_LEN) {
-    return nullptr;
-  }
-  for (__u32 i = 0; i < catalog->count; ++i) {
-    auto& candidate = catalog->policies[i];
-    if (std::memcmp(candidate.role_id.id, role.data(), role.size()) == 0 &&
-        candidate.role_id.id[role.size()] == '\0') {
-      return &candidate;
-    }
-  }
-  return nullptr;
-}
 
 template <heap::BpfSkelWithHeap Skel>
 Expected<> compileIpcPatterns(
@@ -115,16 +99,20 @@ Expected<> compileIpcPatterns(
           "failed to reserve IPC glob matcher run"));
     }
   }
-  auto* catalog = static_cast<struct bpfj_policy_catalog*>(
-      skel->bss().bpfj_heap_ctrl->var_catalog);
+  auto* publishedPolicies = static_cast<struct bpfj_str_map*>(
+      skel->bss().bpfj_heap_ctrl->role_policies);
   for (const auto& range : ranges) {
-    auto* rolePolicy = findIpcRolePolicy(catalog, range.role);
-    if (rolePolicy == nullptr) {
+    auto foundPolicy = lookupRolePolicy(publishedPolicies, range.role);
+    if (!foundPolicy) {
+      return makeUnexpected(foundPolicy.error());
+    }
+    if (*foundPolicy == nullptr) {
       return makeUnexpected(makeError(
           std::errc::invalid_argument,
-          "IPC glob role is missing from the arena policy catalog: ",
+          "IPC glob role is missing from the arena role map: ",
           range.role));
     }
+    auto* rolePolicy = const_cast<struct bpfj_role_policy*>(*foundPolicy);
     auto* selector = heap::alloc<struct bpfj_ipc_pattern_set>(skel);
     if (selector == nullptr) {
       return makeUnexpected(makeError(

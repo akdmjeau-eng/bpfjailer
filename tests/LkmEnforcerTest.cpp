@@ -22,7 +22,6 @@ using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
 using bpfjailer::test::noteDiagnostic;
-using bpfjailer::test::pinnedMapIsEmpty;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 
@@ -59,7 +58,7 @@ void attach(const std::string& yaml) {
 TEST(LkmEnforcer, LoadAgainstAnUnconfiguredPolicySucceeds) {
   attach("roles:\n  svc:\n");
 
-  ASSERT(!pinnedMapIsEmpty("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
 }
 
 TEST(LkmEnforcer, EnforcesPoliciesWithOneAttachment) {
@@ -68,7 +67,7 @@ TEST(LkmEnforcer, EnforcesPoliciesWithOneAttachment) {
   ASSERT(linkPinned("bpfj_kernel_module_request"));
   ASSERT(linkPinned("bpfj_kernel_load_data"));
   ASSERT(linkPinned("bpfj_kernel_read_file"));
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_no_lkm_roles"));
 
   ASSERT_EQ(

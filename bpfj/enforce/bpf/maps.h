@@ -4,6 +4,7 @@
 
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/lib/bpf/heap.h"
+#include "bpfj/lib/bpf/str_map.h"
 #include "bpfj/var/bpf/types_var.h"
 
 // The jail membership maps, shared by every BPF object in the open source
@@ -22,16 +23,6 @@ struct {
   __type(key, int);
   __type(value, struct bpfj_pid_data);
 } bpfj_task_map SEC(".maps");
-
-// The single role-name index. Userspace sizes and populates it from policy;
-// values point into the arena graph shared by every enforcer.
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(map_flags, BPF_F_NO_PREALLOC);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_role_id);
-  __type(value, struct bpfj_role_policy_ref);
-} bpfj_role_policies SEC(".maps");
 
 // A userspace-only flag raised while `replace` is copying membership out of
 // this tree, so bpfjctl enroll, wrap and bpfjsrv refuse to add pods the new
@@ -66,9 +57,8 @@ struct {
   __uint(max_entries, 1);
 } bpfj_event_map SEC(".maps");
 
-// bpfj_heap_arena / bpfj_heap_ctrl come from bpfj/lib/bpf/heap.h. The policy
-// catalog is named by bpfj_heap_control::var_catalog; the legacy field name is
-// kept because the heap control layout is shared outside this implementation.
+// bpfj_heap_arena / bpfj_heap_ctrl come from bpfj/lib/bpf/heap.h. Role
+// policies and variable names are immutable arena graphs rooted there.
 
 // A pod is owned by the task-map entries that name it, one reference per pod
 // pointer, so it outlives its enroller for as long as some descendant is still
@@ -106,12 +96,18 @@ static __always_inline int bpfj_pod_ptr_cmp(
 
 static __always_inline const struct bpfj_role_policy __arena*
 bpfj_policy_lookup(const struct bpfj_role_id* role_id) {
-  if (!role_id) {
+  if (!role_id || !bpfj_heap_enabled) {
     return NULL;
   }
-  const struct bpfj_role_policy_ref* ref =
-      bpf_map_lookup_elem(&bpfj_role_policies, role_id);
-  return ref ? ref->policy : NULL;
+  bpfj_heap_use_arena();
+  struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
+  const struct bpfj_str_map __arena* policies = ctrl->role_policies;
+  void __arena* policy = NULL;
+  if (bpfj_str_map_lookup_strlen(policies, role_id->id, ROLE_ID_LEN, &policy) !=
+      0) {
+    return NULL;
+  }
+  return (const struct bpfj_role_policy __arena*)policy;
 }
 
 struct bpfj_role_set_search {

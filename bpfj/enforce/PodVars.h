@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
@@ -12,7 +13,7 @@
 #include "bpfj/enforce/Pins.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/err/Error.h"
-#include "bpfj/lib/Fd.h"
+#include "bpfj/lib/bpf/types_str_map.h"
 #include "bpfj/policy/Policy.h"
 #include "bpfj/var/bpf/types_var.h"
 
@@ -32,20 +33,22 @@ struct ResolvedPolicyVar {
   const struct bpfj_var_name* name = nullptr;
 };
 
-/// @brief Publish every role and variable as one immutable arena policy graph.
-[[nodiscard]] Expected<> publishPolicyCatalog(
-    const PinConfig& cfg,
+using PublishedRolePolicies = std::map<std::string, struct bpfj_role_policy*>;
+
+/// @brief Allocate each role and variable catalog in the arena.
+[[nodiscard]] Expected<PublishedRolePolicies> publishPolicyGraph(
+    PodArena& arena,
     const Policy& policy) noexcept;
 
-[[nodiscard]] Expected<const struct bpfj_policy_catalog*> readPolicyCatalog(
+[[nodiscard]] Expected<const struct bpfj_str_map*> readRolePolicies(
     const PodArena& arena) noexcept;
 
 [[nodiscard]] Expected<const struct bpfj_role_policy*> lookupRolePolicy(
-    const Fd& rolePolicies,
+    const struct bpfj_str_map* policies,
     std::string_view role) noexcept;
 
 [[nodiscard]] Expected<const struct bpfj_role_policy*> lookupRolePolicy(
-    const Fd& rolePolicies,
+    const struct bpfj_str_map* policies,
     const struct bpfj_role_id& role) noexcept;
 
 /// @brief The running jail's shared variable allowlist, or null when the

@@ -42,7 +42,7 @@ extern void bpf_map_fops __ksym;
 // Keyed on the kernel address of the object rather than its id; see struct
 // bpfj_bpf_owner in types.h. A replace carries both maps across, since the
 // seeding walk below only sees objects some task holds an fd to and a pinned
-// map is held by its pin. The arena policy catalog records whether a replace
+// map is held by its pin. Arena runtime metadata records whether a replace
 // can carry the records across.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);

@@ -91,11 +91,13 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
 
   auto arena = bpfjailer::PodArena::open(testPins());
   ASSERT(arena);
-  auto catalog = bpfjailer::readPolicyCatalog(*arena);
-  ASSERT_OK(catalog);
-  ASSERT(*catalog);
-  ASSERT_EQ((*catalog)->count, 1U);
-  ASSERT((*catalog)->policies[0].fs_matcher != nullptr);
+  auto policies = bpfjailer::readRolePolicies(*arena);
+  ASSERT_OK(policies);
+  ASSERT(*policies);
+  auto policy = bpfjailer::lookupRolePolicy(*policies, "svc");
+  ASSERT_OK(policy);
+  ASSERT(*policy);
+  ASSERT((*policy)->fs_matcher != nullptr);
 }
 
 TEST(FsEnforcer, MissingFilesystemPolicyDeniesAccess) {

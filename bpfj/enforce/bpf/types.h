@@ -165,18 +165,6 @@ struct bpfj_role_policy {
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };
 
-// Rooted by bpfj_heap_control::var_catalog. Policies are sorted by role id;
-// the variable catalog and each configured role set are separate allocations.
-struct bpfj_policy_catalog {
-  __u32 count;
-  // Packed persisted runtime-state layout versions. This occupies the
-  // catalog's original reserved word, preserving the policy-array offset;
-  // the policy graph itself is rebuilt rather than persisted.
-  __u32 runtime_versions;
-  const struct bpfj_var_catalog __arena* vars;
-  struct bpfj_role_policy policies[1];
-};
-
 struct bpfj_role_policy_ref {
   const struct bpfj_role_policy __arena* policy;
 };

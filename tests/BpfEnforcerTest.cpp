@@ -26,7 +26,6 @@ using bpfjailer::BpfEnforcer;
 using bpfjailer::enrollPod;
 using bpfjailer::PodArena;
 using bpfjailer::Policy;
-using bpfjailer::readPolicyCatalog;
 using bpfjailer::replaceJailer;
 using bpfjailer::Threads;
 namespace pins = bpfjailer::pins;
@@ -173,7 +172,7 @@ TEST(BpfEnforcer, LoadPinsItsLinksAndMaps) {
   ASSERT(linkPinned("bpfj_bpf_map_free"));
   ASSERT(linkPinned("bpfj_bpf_prog_free"));
 
-  ASSERT(mapPinned("bpfj_role_policies"));
+  ASSERT(!mapPinned("bpfj_role_policies"));
   ASSERT(!mapPinned("bpfj_bpf_syscall_roles"));
   ASSERT(!mapPinned("bpfj_bpf_access"));
   ASSERT(mapPinned("bpfj_bpf_map_owners"));
@@ -773,14 +772,9 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheOwnerLayoutIsUnknown) {
   // this build cannot parse, so the replace refuses rather than guesses.
   auto arena = PodArena::open(testPins());
   ASSERT(arena);
-  auto catalog = readPolicyCatalog(*arena);
-  ASSERT_OK(catalog);
-  ASSERT(*catalog);
-
-  auto* mutableCatalog = const_cast<struct bpfj_policy_catalog*>(*catalog);
-  mutableCatalog->runtime_versions &=
+  arena->ctrl()->runtime_versions &=
       ~(BPFJ_RUNTIME_VERSION_MASK << BPFJ_BPF_OWNER_VERSION_SHIFT);
-  mutableCatalog->runtime_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
+  arena->ctrl()->runtime_versions |= (BPFJ_BPF_OWNER_VERSION + 1)
       << BPFJ_BPF_OWNER_VERSION_SHIFT;
 
   ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
@@ -792,14 +786,9 @@ TEST(BpfEnforcer, AReplaceIsRefusedWhenTheMembershipLayoutIsUnknown) {
 
   auto arena = PodArena::open(testPins());
   ASSERT(arena);
-  auto catalog = readPolicyCatalog(*arena);
-  ASSERT_OK(catalog);
-  ASSERT(*catalog);
-
-  auto* mutableCatalog = const_cast<struct bpfj_policy_catalog*>(*catalog);
-  mutableCatalog->runtime_versions &=
+  arena->ctrl()->runtime_versions &=
       ~(BPFJ_RUNTIME_VERSION_MASK << BPFJ_MEMBERSHIP_VERSION_SHIFT);
-  mutableCatalog->runtime_versions |= (BPFJ_MEMBERSHIP_VERSION + 1)
+  arena->ctrl()->runtime_versions |= (BPFJ_MEMBERSHIP_VERSION + 1)
       << BPFJ_MEMBERSHIP_VERSION_SHIFT;
 
   ASSERT(!replaceJailer(testPins(), policyOf(yaml)));
