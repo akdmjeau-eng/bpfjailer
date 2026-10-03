@@ -44,6 +44,8 @@ std::string eventTypeName(int type) {
       return "unix";
     case BPFJ_EVENT_MOUNT:
       return "mount";
+    case BPFJ_EVENT_PROC:
+      return "proc";
     default:
       return "unknown(" + std::to_string(type) + ")";
   }

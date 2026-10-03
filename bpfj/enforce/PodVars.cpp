@@ -204,6 +204,7 @@ Expected<PublishedPolicyGraph> publishPolicyGraph(
     out->shm_posix_mode = static_cast<__u8>(source.shmPosixMode);
     out->kill_mode = static_cast<__u8>(source.killMode);
     out->ptrace_mode = static_cast<__u8>(source.ptraceMode);
+    out->proc_mode = static_cast<__u8>(source.procMode);
     out->keyring_mode = static_cast<__u8>(source.keyringMode);
     out->enroll_mode = static_cast<__u8>(source.enrollMode);
     publishedPolicies.emplace(name, out);
@@ -219,6 +220,7 @@ Expected<PublishedPolicyGraph> publishPolicyGraph(
         {BPFJ_POLICY_GATE_BPF, source.bpfMode, &source.bpf},
         {BPFJ_POLICY_GATE_KILL, source.killMode, &source.kill},
         {BPFJ_POLICY_GATE_PTRACE, source.ptraceMode, &source.ptrace},
+        {BPFJ_POLICY_GATE_PROC, source.procMode, &source.proc},
         {BPFJ_POLICY_GATE_KEYRING, source.keyringMode, &source.keyring},
         {BPFJ_POLICY_GATE_ENROLL, source.enrollMode, &source.enroll},
         {BPFJ_POLICY_GATE_MQ_SYSV, source.mqSysvMode, &source.mqSysv},

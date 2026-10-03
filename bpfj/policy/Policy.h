@@ -105,6 +105,11 @@ struct RolePolicy {
   std::vector<std::string> ptrace;
   AccessMode ptraceMode = AccessMode::Deny;
 
+  /// @brief Role ids whose processes' proc files this role may open, with the
+  /// same four modes as `kill`.
+  std::vector<std::string> proc;
+  AccessMode procMode = AccessMode::Deny;
+
   /// @brief Role ids whose fs-verity keyrings this role may write.
   std::vector<std::string> keyring;
   AccessMode keyringMode = AccessMode::Deny;
@@ -112,7 +117,7 @@ struct RolePolicy {
   /// @brief Whether this role answers for a task on its own: every enforcer
   /// walks a task's roles newest first and stops at the first one carrying
   /// this, so it can grant what the roles under it deny. Bounds the actor only,
-  /// never the target side of the `kill` and `ptrace` gates.
+  /// never the target side of the `kill`, `ptrace`, and `proc` gates.
   bool overrideStacked = false;
 
   /// @brief Whether a caller that is not root may enroll itself in this role;

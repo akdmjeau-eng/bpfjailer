@@ -154,6 +154,8 @@ roles:
     kill-roles:                # may signal its own pod, plus these roles
       - floor
     ptrace-pod: true           # its own pod only
+    proc-roles:                # may open proc files for these roles
+      - floor
     bpf-pod: true              # only BPF objects from its own pod
     lkm-any: false             # deny module and kexec loading
     paths:                     # cached path glob policy
@@ -192,18 +194,24 @@ vars:                          # the only variable names a pod may carry
 
 Most operation gates are denied when a role has no corresponding option. The
 `*-pod` options allow resources from the same pod, `*-roles` adds the named
-owner roles, and `*-any` opens that operation completely. `keyring-own` is the
-role-scoped counterpart because fs-verity keyrings belong to roles rather than
-pods. `enroll-roles` names the only roles bpfjsrv may add; without it enrollment
-through bpfjsrv is denied. Unix-socket and mount path maps differ: an
+owner roles, and the operation's any option opens it completely. Proc follows
+this with `proc-pod`, `proc-roles`, and `any-proc`; the other role gates use
+`*-any`. `keyring-own` is the role-scoped counterpart because fs-verity
+keyrings belong to roles rather than pods. `enroll-roles` names the only roles
+bpfjsrv may add; without it enrollment through bpfjsrv is denied. Unix-socket and mount path maps differ: an
 unconfigured or unmatched operation is allowed, so use an explicit root deny
 when the map is intended as an allowlist. An absent `umount` abstains.
 
 `any: true` opens every operation that has no more specific option. This is
 useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
-`kill-roles`, `paths`, or `enforce-binary-certs` overrides `any` for that
-operation. `lkm-any`, `fs-any`, and `verity-any` are the operation-specific
-fully-open forms.
+`kill-roles`, `proc-pod`, `paths`, or `enforce-binary-certs` overrides `any`
+for that operation. `any-proc`, `lkm-any`, `fs-any`, and `verity-any` are the
+operation-specific fully-open forms.
+
+Proc policy applies only below numeric `/proc/<pid>` directories. The pid is
+resolved in the pid namespace associated with that proc mount, so the same
+rules hold for container proc mounts rather than accidentally naming a host
+task with the same number.
 
 `paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`. Matches
 are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`

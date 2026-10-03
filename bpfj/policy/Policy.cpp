@@ -50,6 +50,9 @@ constexpr std::string_view kKillAny = "kill-any";
 constexpr std::string_view kPtracePod = "ptrace-pod";
 constexpr std::string_view kPtraceRoles = "ptrace-roles";
 constexpr std::string_view kPtraceAny = "ptrace-any";
+constexpr std::string_view kProcPod = "proc-pod";
+constexpr std::string_view kProcRoles = "proc-roles";
+constexpr std::string_view kAnyProc = "any-proc";
 constexpr std::string_view kKeyringOwn = "keyring-own";
 constexpr std::string_view kKeyringRoles = "keyring-roles";
 constexpr std::string_view kKeyringAny = "keyring-any";
@@ -617,10 +620,11 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
           kShmSysvPod,    kShmSysvRoles, kShmSysvAny,      kShmPosixPod,
           kShmPosixRoles, kShmPosixAny,  kShmPosixPattern, kKillPod,
           kKillRoles,     kKillAny,      kPtracePod,       kPtraceRoles,
-          kPtraceAny,     kKeyringOwn,   kKeyringRoles,    kKeyringAny,
-          kEnrollRoles,   kEnrollAny,    kUnprivEnroll,    kOverrideStacked,
-          kUntrackedBpf,  kMinSeq,       kUnixBind,        kUnixConnect,
-          kUnixDgram,     kMount,        kUmount,
+          kPtraceAny,     kProcPod,      kProcRoles,       kAnyProc,
+          kKeyringOwn,    kKeyringRoles, kKeyringAny,      kEnrollRoles,
+          kEnrollAny,     kUnprivEnroll, kOverrideStacked, kUntrackedBpf,
+          kMinSeq,        kUnixBind,     kUnixConnect,     kUnixDgram,
+          kMount,         kUmount,
       };
       for (auto field = value.Begin(); field != value.End(); field++) {
         const auto& [key, child] = *field;
@@ -827,6 +831,11 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
         return res.error();
       }
       if (auto res = parseScoped(
+              kProcPod, kProcRoles, kAnyProc, policy.proc, policy.procMode);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseScoped(
               kKeyringOwn,
               kKeyringRoles,
               kKeyringAny,
@@ -933,6 +942,10 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
           policy.ptraceMode,
           findChild(value, kPtracePod) || findChild(value, kPtraceRoles) ||
               findChild(value, kPtraceAny));
+      inheritAny(
+          policy.procMode,
+          findChild(value, kProcPod) || findChild(value, kProcRoles) ||
+              findChild(value, kAnyProc));
       inheritAny(
           policy.keyringMode,
           findChild(value, kKeyringOwn) || findChild(value, kKeyringRoles) ||
@@ -1097,6 +1110,12 @@ parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
 
     if (auto res = checkRoleRefs(
             policy.roles, id, rolePolicy.ptrace, "allows ptracing");
+        res.hasError()) {
+      return res.error();
+    }
+
+    if (auto res = checkRoleRefs(
+            policy.roles, id, rolePolicy.proc, "allows proc access to");
         res.hasError()) {
       return res.error();
     }

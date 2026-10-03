@@ -3,18 +3,16 @@
 #pragma once
 
 // May a process in these roles act on a process in those roles? The signal
-// enforcer asks it of `kill` and the ptrace enforcer of `ptrace`, so the rule
-// lives here and each enforcer supplies its own two maps:
-//
-//   roles    one entry per role, carrying its deny, pod, role-list or any mode.
-//   access   one entry per (actor, target) role pair the lists permit.
+// enforcer asks it of `kill`, the ptrace enforcer of `ptrace`, and the proc
+// enforcer of `proc`, with each role's arena policy carrying its mode and
+// optional target-role set.
 //
 // Which gives a role four states:
 //
 //   option absent  may not act at all
 //   *-pod          may act only inside its own pod
 //   *-roles [a,b]  that, and on a process whose roles are all in {a, b}
-//   *-any           unrestricted
+//   *-any           unrestricted (`any-proc` for proc)
 //
 // Acting inside the restricting role's *own* pod is always allowed, a pod
 // being one jail instance -- not any pod the two share, since a base role puts
@@ -43,6 +41,9 @@ static __always_inline __u8 bpfj_gate_mode(
   }
   if (gate == BPFJ_POLICY_GATE_PTRACE) {
     return policy->ptrace_mode;
+  }
+  if (gate == BPFJ_POLICY_GATE_PROC) {
+    return policy->proc_mode;
   }
   if (gate == BPFJ_POLICY_GATE_KEYRING) {
     return policy->keyring_mode;

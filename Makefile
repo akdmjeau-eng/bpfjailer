@@ -184,6 +184,7 @@ BPF_SRCS := \
 	bpfj/enforce/bpf/bpf_enforce.bpf.c \
 	bpfj/enforce/bpf/kill_enforce.bpf.c \
 	bpfj/enforce/bpf/ptrace_enforce.bpf.c \
+	bpfj/enforce/bpf/proc_enforce.bpf.c \
 	bpfj/enforce/bpf/lkm_enforce.bpf.c \
 	bpfj/enforce/bpf/mq_enforce.bpf.c \
 	bpfj/enforce/bpf/shm_enforce.bpf.c \
@@ -225,6 +226,7 @@ COMMON_SRCS := \
 	bpfj/enforce/BpfEnforcer.cpp \
 	bpfj/enforce/KillEnforcer.cpp \
 	bpfj/enforce/PtraceEnforcer.cpp \
+	bpfj/enforce/ProcEnforcer.cpp \
 	bpfj/enforce/LkmEnforcer.cpp \
 	bpfj/enforce/MqEnforcer.cpp \
 	bpfj/enforce/ShmEnforcer.cpp \
@@ -283,6 +285,7 @@ TEST_SRCS := \
 	tests/MountEnforcerTest.cpp \
 	tests/Main.cpp \
 	tests/PtraceEnforcerTest.cpp \
+	tests/ProcEnforcerTest.cpp \
 	tests/PolicyTest.cpp \
 	tests/VerityEnforcerTest.cpp
 

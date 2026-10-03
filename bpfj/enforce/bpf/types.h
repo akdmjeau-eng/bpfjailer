@@ -93,6 +93,7 @@ enum bpfj_event_type {
   BPFJ_EVENT_FS = 8,
   BPFJ_EVENT_UNIX = 9,
   BPFJ_EVENT_MOUNT = 10,
+  BPFJ_EVENT_PROC = 11,
 };
 
 struct bpfj_role_id {
@@ -115,7 +116,8 @@ enum bpfj_policy_gate {
   BPFJ_POLICY_GATE_MQ_POSIX = 6,
   BPFJ_POLICY_GATE_SHM_SYSV = 7,
   BPFJ_POLICY_GATE_SHM_POSIX = 8,
-  BPFJ_POLICY_GATE_COUNT = 9,
+  BPFJ_POLICY_GATE_PROC = 9,
+  BPFJ_POLICY_GATE_COUNT = 10,
 };
 
 enum bpfj_policy_mode {
@@ -168,6 +170,7 @@ struct bpfj_role_policy {
   __u8 shm_posix_mode;
   __u8 kill_mode;
   __u8 ptrace_mode;
+  __u8 proc_mode;
   __u8 keyring_mode;
   __u8 enroll_mode;
   const struct bpfj_ipc_pattern_set __arena* mq_posix_patterns;

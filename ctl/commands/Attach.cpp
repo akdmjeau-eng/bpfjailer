@@ -14,6 +14,7 @@
 #include "bpfj/enforce/MountEnforcer.h"
 #include "bpfj/enforce/MqEnforcer.h"
 #include "bpfj/enforce/PodVars.h"
+#include "bpfj/enforce/ProcEnforcer.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
 #include "bpfj/enforce/ShmEnforcer.h"
 #include "bpfj/enforce/UnixEnforcer.h"
@@ -85,6 +86,11 @@ int attachPolicy(
 
   if (auto res = PtraceEnforcer::load(pin, policy); !res) {
     std::cerr << "ptrace enforcer load failed: " << res.error() << std::endl;
+    return 1;
+  }
+
+  if (auto res = ProcEnforcer::load(pin, policy); !res) {
+    std::cerr << "proc enforcer load failed: " << res.error() << std::endl;
     return 1;
   }
 

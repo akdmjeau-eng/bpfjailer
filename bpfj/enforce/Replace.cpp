@@ -33,6 +33,7 @@
 // For bpfj_pod and bpfj_uuid: Pods.h is where C++ pulls the shared ABI header
 // in, with the pedantic warning silenced around it.
 #include "bpfj/enforce/Pods.h"
+#include "bpfj/enforce/ProcEnforcer.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
 #include "bpfj/enforce/ShmEnforcer.h"
 #include "bpfj/enforce/UnixEnforcer.h"
@@ -1665,6 +1666,10 @@ struct BackfillStats {
   }
 
   if (auto res = PtraceEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = ProcEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 

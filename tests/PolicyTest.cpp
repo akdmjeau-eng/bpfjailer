@@ -173,6 +173,7 @@ TEST(Policy, MissingOperationsDefaultToDeny) {
   ASSERT(role.bpfMode == AccessMode::Deny);
   ASSERT(role.killMode == AccessMode::Deny);
   ASSERT(role.ptraceMode == AccessMode::Deny);
+  ASSERT(role.procMode == AccessMode::Deny);
   ASSERT(role.enrollMode == AccessMode::Deny);
   ASSERT(!role.fsAny);
   ASSERT(!role.verityAny);
@@ -187,6 +188,7 @@ TEST(Policy, AnyOpensUnspecifiedOperations) {
   ASSERT(role.bpfMode == AccessMode::Any);
   ASSERT(role.killMode == AccessMode::Any);
   ASSERT(role.ptraceMode == AccessMode::Any);
+  ASSERT(role.procMode == AccessMode::Any);
   ASSERT(role.enrollMode == AccessMode::Any);
   ASSERT(role.fsAny);
   ASSERT(role.verityAny);
@@ -196,13 +198,36 @@ TEST(Policy, AnyOpensUnspecifiedOperations) {
 TEST(Policy, ScopedOptionOverridesAny) {
   auto policy = Policy::parse(
       "roles:\n  sandbox:\n    any: true\n    bpf-pod: true\n"
-      "    kill-roles:\n      - target\n  target:\n");
+      "    kill-roles:\n      - target\n    proc-pod: true\n  target:\n");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("sandbox");
   ASSERT(role.bpfMode == AccessMode::Pod);
   ASSERT(role.killMode == AccessMode::Roles);
   ASSERT(role.ptraceMode == AccessMode::Any);
+  ASSERT(role.procMode == AccessMode::Pod);
+}
+
+TEST(Policy, ParsesProcRolesAndAnyProc) {
+  auto policy = Policy::parse(
+      "roles:\n  reader:\n    proc-roles:\n      - target\n"
+      "  target:\n  monitor:\n    any-proc: true\n");
+  ASSERT_OK(policy);
+
+  const auto& reader = policy->roles.at("reader");
+  ASSERT(reader.procMode == AccessMode::Roles);
+  ASSERT_EQ(reader.proc.size(), 1);
+  ASSERT_EQ(reader.proc[0], "target");
+  ASSERT(policy->roles.at("monitor").procMode == AccessMode::Any);
+}
+
+TEST(Policy, ProcScopesAreMutuallyExclusive) {
+  auto policy = Policy::parse(
+      "roles:\n  muddled:\n    any-proc: true\n    proc-roles:\n"
+      "      - muddled\n");
+  ASSERT(policy.hasError());
+  ASSERT(
+      policy.error().message().find("mutually exclusive") != std::string::npos);
 }
 
 TEST(Policy, ExplicitFalseOverridesAny) {
