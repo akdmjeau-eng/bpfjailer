@@ -47,6 +47,7 @@ constexpr std::string_view kEnroll = "enroll";
 constexpr std::string_view kOverrideStacked = "override-stacked";
 constexpr std::string_view kUntrackedBpf = "untracked-bpf";
 constexpr std::string_view kMinSeq = "min-seq";
+constexpr std::string_view kPaths = "paths";
 
 constexpr std::string_view kPemBegin = "-----BEGIN CERTIFICATE-----";
 constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
@@ -348,6 +349,60 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   return static_cast<std::uint64_t>(value);
 }
 
+[[nodiscard]] err::Expected<std::map<std::string, FileMode>> parsePaths(
+    const std::string& role,
+    Yaml::Node& node) noexcept {
+  const std::string what = "role '" + role + "': paths";
+  if (isBlank(node)) {
+    return std::map<std::string, FileMode>{};
+  }
+  if (auto res = checkNotFlow(node, what); res.hasError()) {
+    return res.error();
+  }
+  if (!node.IsMap()) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must be a map of path pattern to mode");
+  }
+
+  std::map<std::string, FileMode> paths;
+  for (auto it = node.Begin(); it != node.End(); it++) {
+    const auto& [path, value] = *it;
+    if (path.empty()) {
+      return err::Error(
+          std::errc::invalid_argument, what + " contains an empty path");
+    }
+    if (!value.IsScalar()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " mode for '" + path + "' must be a string");
+    }
+
+    const std::string mode = value.As<std::string>();
+    FileMode parsedMode;
+    if (mode == "NONE") {
+      parsedMode = FileMode::None;
+    } else if (mode == "RDONLY") {
+      parsedMode = FileMode::ReadOnly;
+    } else if (mode == "RDWR") {
+      parsedMode = FileMode::ReadWrite;
+    } else if (mode == "RDEXEC") {
+      parsedMode = FileMode::ReadExec;
+    } else {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " mode for '" + path + "' is '" + mode +
+              "'; expected NONE, RDONLY, RDWR or RDEXEC");
+    }
+    if (!paths.emplace(path, parsedMode).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains duplicate path '" + path + "'");
+    }
+  }
+  return paths;
+}
+
 [[nodiscard]] err::Expected<std::map<std::string, RolePolicy>> parseRoles(
     Yaml::Node& node,
     const std::map<std::string, std::string>& certs) noexcept {
@@ -389,6 +444,14 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           return refs.error();
         }
         policy.enforceBinaryCerts = std::move(*refs);
+      }
+
+      if (Yaml::Node* paths = findChild(value, kPaths)) {
+        auto parsed = parsePaths(id, *paths);
+        if (parsed.hasError()) {
+          return parsed.error();
+        }
+        policy.paths = std::move(*parsed);
       }
 
       // Written at all, not written non-empty: an empty `bpf` confines the role

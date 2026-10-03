@@ -12,8 +12,19 @@
 
 namespace bpfjailer {
 
+enum class FileMode : std::uint8_t {
+  None,
+  ReadOnly,
+  ReadWrite,
+  ReadExec,
+};
+
 /// @brief What one role is subject to.
 struct RolePolicy {
+  /// @brief Path pattern to the access mode granted at that path. Matching is
+  /// performed in PID 1's mount namespace.
+  std::map<std::string, FileMode> paths;
+
   /// @brief Certificate ids whose signatures this role's binaries may carry;
   /// empty means unchecked rather than denied.
   std::vector<std::string> enforceBinaryCerts;

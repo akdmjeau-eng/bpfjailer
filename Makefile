@@ -268,6 +268,7 @@ TEST_SRCS := \
 	tests/ShmEnforcerTest.cpp \
 	tests/Main.cpp \
 	tests/PtraceEnforcerTest.cpp \
+	tests/PolicyTest.cpp \
 	tests/VerityEnforcerTest.cpp
 
 SRCS := $(COMMON_SRCS) $(CTL_SRCS) $(CMD_SRCS) $(SRV_SRCS) $(LOG_SRCS) $(CLIENT_SRCS) \
