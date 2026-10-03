@@ -2,14 +2,15 @@
 
 ## Overview
 
-BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. The policy decides per role which binaries must be fs-verity signed, which roles it may kill, ptrace, open BPF objects of, and write the fs-verity keyring of. See README.md for the user facing overview.
+BpfJailer is an eBPF based Mandatory Access Control system. BPF LSM programs put processes into pods, each bound to a role from a YAML policy, and pods are inherited across fork and exec. Policy covers fs-verity, filesystem paths, BPF objects, kernel loading, signals, ptrace, message queues, shared memory, Unix sockets, mounts, keyrings and enrollment. See README.md for the user-facing overview and POLICY.md for the option reference.
 
 ## Layout
 
-- bpfj/ is the core library. bpfj/enforce/ holds the jailer and the enforcers, with their BPF programs in bpfj/enforce/bpf/. bpfj/policy/ parses the YAML policy, bpfj/fsverity/ handles signatures and keyrings, and bpfj/libbpf-cpp/ has C++ helpers for working with BPF, which you should use and extend as needed.
+- bpfj/ is the core library. bpfj/enforce/ holds the jailer, live replacement and the enforcers, with their BPF programs in bpfj/enforce/bpf/. bpfj/policy/ parses the YAML policy, bpfj/match/ implements cached path and glob matching, bpfj/fsverity/ handles signatures and keyrings, and bpfj/libbpf-cpp/ has C++ helpers for working with BPF, which you should use and extend as needed.
 - ctl/ builds bpfjctl, the general purpose tool: `attach`, `replace`, `check`, `detach`, `enroll`, `wrap`, `show`, `list`. Subcommands live in ctl/commands/ and are routed by ctl/Dispatch.cpp.
 - cmd/ builds bpfjcmd, which is bpfjctl with its args statically baked in (argv is never read) and optionally a baked policy (`make cmd CMD_POLICY=...`), which puts the policy under the signature rather than only the path it would be read from. The `-compiled` commands (`attach-compiled`, `replace-compiled`, `check-compiled`) are the ones that read it; their path-taking twins are unchanged. This lets the binary be fully statically linked and signed, so it is validated in one go when run.
 - srv/ builds bpfjsrv, a socket activated server that performs unprivileged enrollment into roles with `unpriv-enroll: true`, subject to the caller's current roles' `enroll` lists. client/ builds bpfjclient, which must only depend on libc and srv/Client.h.
+- log/ builds bpfjlog. It drains the pinned diagnostic and structured-event ring buffers, sends them to stderr and stdout respectively, and reconnects after replace swaps the maps.
 - tests/ is the bpfjtest suite, and tests/verity/Makefile builds the signed fixtures for the fs-verity tests.
 - examples/ has end to end scripts for a signed bpfjcmd and for unprivileged enrollment.
 - yaml/ is mini-yaml, vendored and kept as close to upstream as possible.
@@ -37,13 +38,27 @@ Tests that need fs-verity use the harness's disposable ext4 image on a loop devi
 
 The bpfj/ libraries with BUCK targets are also compiled into the closed source jailer in fbcode/bpfjailer, which reaches them through `-Ibpfjailer_oss` and substitutes a few headers from fbcode/bpfjailer/oss_shim. When changing them, also run `buck build fbcode//bpfjailer/...`.
 
+## Runtime invariants
+
+Pods, variables and role policies live in the shared BPF arena. Arena pointers are part of the BPF/userspace ABI: keep the layout assertions and bump the corresponding membership or owner version whenever a persisted layout changes.
+
+Replace builds a second pin tree while the old tree stays attached. It snapshots pods with a BPF iterator, translates variables and policy pointers into the new arena, copies ownership maps, journals concurrent ownership mutations, blocks unsafe fork/enrollment windows, exchanges the pin trees, and only then removes the old tree. Do not weaken a failure in this path into a best-effort migration; a partial carry-over changes authorization.
+
+BPF, message-queue and shared-memory ownership maps have independent persisted versions. A replace must reject incompatible versions before copying records. Any new mutable ownership domain needs snapshot/copy coverage and mutation-journal replay.
+
+Filesystem, Unix-socket and mount matchers share the cached file-matching machinery and the global PID 1 mount snapshot. Cache keys must distinguish mount identity and pod variable bindings, and filesystem mutation must invalidate stale paths.
+
 ## Policy semantics
 
-Every operation is denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option.
+Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix and mount path rules are opt-in filters where an unmatched operation is allowed; an absent `umount` abstains.
+
+`paths` is default-deny when absent, uses `NONE`, `RDONLY`, `RDWR`, and `RDEXEC`, and is mutually exclusive with `fs-any`. Unix and mount maps need an explicit root denial when used as allowlists.
 
 Every walk over a task's roles requires each role to permit, so one denial denies. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
 
 Leaving BPF policy absent denies bpf(2) entirely and stops a jailed process with CAP_BPF from editing the jailer's maps.
+
+Leaving `lkm-any` absent denies kernel module and kexec loading. Leaving `verity-any` and `enforce-binary-certs` absent denies exec for that role.
 
 `override-stacked: true` makes the enforcers stop at that role when walking an actor's roles newest first, so it can grant what the roles under it deny. It must never short circuit the walk over a target's roles, the target side of the kill and ptrace gates.
 
@@ -56,6 +71,8 @@ Every source file must start with the header `Copyright (c) Meta Platforms, Inc.
 The project is MIT licensed. BPF programs must declare `char LICENSE[] SEC("license") = "Dual MIT/GPL";`, which the kernel treats as GPL compatible.
 
 Always check changes with make test, and write new tests as needed.
+
+When changing policy syntax or behavior, update README.md, POLICY.md, the relevant example, PolicyTest, and the enforcer test together. Unknown policy keys are deliberately rejected.
 
 Never leave BpfJailer eBPF programs pinned and running after testing.
 

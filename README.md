@@ -8,9 +8,6 @@ not available when the internal BpfJailer was written. Issues are expected and
 are not eligible for bug bounty or considered security findings. Once properly
 evaluated it will replace the internal closed source version.**
 
-**Many features are not implemented yet that are present in the closed source
-version. This includes basic functionality like logging. This will come soon.**
-
 BpfJailer uses eBPF LSM programs to put processes into jails, called pods, each
 bound to a role from a YAML policy. A pod is inherited across `fork` and
 `exec`, so everything a jailed process starts stays in the jail. The policy
@@ -25,6 +22,19 @@ then decides what each role may do:
   editing the jailer's own maps.
 - **`keyring`** — which roles' fs-verity keyrings a role may add certificates
   to, or whether it may write keyrings at all.
+- **Filesystem paths** — read, write and execute access using cached glob
+  matchers evaluated in PID 1's mount namespace.
+- **Kernel loading** — kernel module and kexec loading.
+- **IPC** — ownership-aware System V and POSIX message queues and shared
+  memory, plus variable-expanded name patterns for POSIX objects.
+- **Unix sockets** — pathname and abstract-name policy for bind, connect and
+  datagram destinations.
+- **Mounts** — destination and filesystem-type rules, unmount policy, and the
+  legacy and new mount APIs.
+
+Denials and lifecycle events are written to pinned ring buffers. `bpfjlog`
+prints the human-readable BPF diagnostics and structured events and follows
+the ring buffers across a live policy replacement.
 
 A binary can claim a role through the `user.bpfj.policy.exec` xattr and is
 enrolled in it at exec time. Running processes can also be enrolled directly,
@@ -39,6 +49,7 @@ and an unprivileged process can enroll itself through `bpfjsrv`.
 | `cmd/`    | `bpfjcmd`     | `bpfjctl` with its arguments, and optionally its policy, compiled in. It ignores `argv`, so it can be statically linked and fs-verity signed as a single unit. |
 | `srv/`    | `bpfjsrv`     | Socket activated server that enrolls unprivileged callers into roles that allow it. |
 | `client/` | `bpfjclient`  | Minimal client for `bpfjsrv`. It depends only on libc. |
+| `log/`    | `bpfjlog`     | Consumer for the pinned diagnostic and structured-event ring buffers. |
 | `tests/`  | `bpfjtest`    | Test suite. |
 
 ## Requirements
@@ -74,6 +85,7 @@ command line or exported in the environment.
 make                # build/bpfjctl
 make STATIC=1       # bpfjctl with no shared object dependencies
 make client         # build/bpfjclient, no BPF toolchain needed
+make log            # build/bpfjlog
 make signing-key    # generate a development signing key and certificate
 make signed SIGNING_KEY=... SIGNING_CERT=...   # static, fs-verity signed bpfjctl
 make srv  SIGNING_KEY=... SIGNING_CERT=...     # static, signed bpfjsrv
@@ -115,6 +127,17 @@ runs.
 `bpfjctl wrap` without `--drop-cap` and a non-root `--uid` leaves the command
 able to remove itself from the jail. See `bpfjctl wrap --help`.
 
+Run `sudo build/bpfjlog` while the jailer is attached to observe it. BPF
+diagnostics are written to stderr and structured events to stdout. The logger
+automatically reconnects when `replace` swaps in a new set of pinned maps.
+
+`replace` loads a complete second jailer beside the active one, migrates pod
+membership, variables and tracked resource ownership, then atomically swaps
+the pin trees. Both trees remain attached during the handoff, forks and
+enrollment are coordinated with the migration, and ownership changes are
+journaled and replayed. Replacement fails closed if persisted layout versions
+are incompatible or the state cannot be copied safely.
+
 ## Policy
 
 ```yaml
@@ -132,6 +155,12 @@ roles:
       - floor
     ptrace-pod: true           # its own pod only
     bpf-pod: true              # only BPF objects from its own pod
+    lkm-any: false             # deny module and kexec loading
+    paths:                     # cached path glob policy
+      /usr: RDEXEC
+      /etc: RDONLY
+      /srv/web: RDWR
+      /: NONE
     mq-sysv-pod: true          # only SysV queues from its own pod
     mq-posix-pod: true         # only POSIX queues from its own pod
     mq-posix-pattern:          # names allowed regardless of queue ownership
@@ -161,18 +190,26 @@ vars:                          # the only variable names a pod may carry
   - vm_uuid
 ```
 
-Every operation is denied when its role has no corresponding option. The
+Most operation gates are denied when a role has no corresponding option. The
 `*-pod` options allow resources from the same pod, `*-roles` adds the named
 owner roles, and `*-any` opens that operation completely. `keyring-own` is the
 role-scoped counterpart because fs-verity keyrings belong to roles rather than
 pods. `enroll-roles` names the only roles bpfjsrv may add; without it enrollment
-through bpfjsrv is denied.
+through bpfjsrv is denied. Unix-socket and mount path maps differ: an
+unconfigured or unmatched operation is allowed, so use an explicit root deny
+when the map is intended as an allowlist. An absent `umount` abstains.
 
 `any: true` opens every operation that has no more specific option. This is
 useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 `kill-roles`, `paths`, or `enforce-binary-certs` overrides `any` for that
 operation. `lkm-any`, `fs-any`, and `verity-any` are the operation-specific
 fully-open forms.
+
+`paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`. Matches
+are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
+component expands a variable carried by the pod. Path results are cached by
+mount identity and pod variable bindings and invalidated across filesystem
+mutation. `fs-any` and `paths` are mutually exclusive.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its
@@ -249,6 +286,9 @@ documented in `bpfj/policy/Policy.h`.
 list is refused, and with no `vars` at all no pod carries any. A `replace`
 carries each pod's variables across by name, and fails if the new policy no
 longer lists one a pod is carrying.
+
+See [POLICY.md](POLICY.md) for the complete option matrix, matching semantics
+and replacement behavior.
 
 ## Examples
 

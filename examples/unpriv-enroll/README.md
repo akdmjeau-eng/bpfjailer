@@ -75,8 +75,8 @@ outside.
 
 ## The pieces
 
-`bpfjclient` is the new one, built from `client/Main.cpp`. It is the
-unprivileged counterpart to `bpfjctl wrap`: same `ROLE USER_ID -- COMMAND`
+`bpfjclient`, built from `client/Main.cpp`, is the unprivileged counterpart to
+`bpfjctl wrap`: the same `ROLE USER_ID -- COMMAND`
 shape, except it enrolls over the socket instead of writing the maps, then
 execs. Jail membership survives exec, so the command inherits the pod.
 

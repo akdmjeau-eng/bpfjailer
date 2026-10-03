@@ -1,0 +1,132 @@
+# BpfJailer policy reference
+
+A policy is a YAML map containing `roles` and, optionally, `base-role`,
+`certs`, and `vars`. Collections must use indented block syntax; the vendored
+YAML parser does not support flow syntax such as `[a, b]`.
+
+```yaml
+base-role: floor
+certs:
+  release: |
+    <PEM or base64 DER certificate>
+vars:
+  - service
+roles:
+  floor:
+    any: true
+  worker:
+    paths:
+      /usr: RDEXEC
+      /etc: RDONLY
+      /srv/$service: RDWR
+      /: NONE
+    kill-pod: true
+```
+
+`base-role` is applied to every process that exists when the jailer attaches;
+descendants inherit it. A binary can claim another role at exec through the
+`user.bpfj.policy.exec` xattr, and explicit enrollment can stack more roles on
+a task. `vars` is the allowlist of variable names an enrollment may set.
+
+## General authorization
+
+Most resource families use one of three mutually exclusive scopes:
+
+| Scope | Meaning |
+|---|---|
+| `*-pod: true` | The actor may access resources owned by its own pod. |
+| `*-roles` | Own pod plus resources owned by the listed roles. |
+| `*-any: true` | No ownership restriction for that resource family. |
+
+Leaving a scoped family unconfigured denies it. `any: true` supplies the open
+form for every family not configured more narrowly. `keyring-own` is the
+role-owned equivalent of `*-pod`.
+
+A task holding several roles must be allowed by each role, newest first.
+`override-stacked: true` stops that actor-side walk at the marked role. It
+never short-circuits the target-role checks for `kill` or `ptrace`.
+
+## Options
+
+| Family | Options | Behavior |
+|---|---|---|
+| Files | `paths`, `fs-any` | `paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`; it is mutually exclusive with `fs-any`. Leaving both unset denies access. |
+| Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, open exec, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
+| BPF | `bpf-pod`, `bpf-roles`, `bpf-any`, `untracked-bpf` | Gate `bpf(2)` and opening maps/programs by creator ownership. `untracked-bpf` suppresses ownership for objects created by the role and requires a BPF grant. |
+| Kernel loading | `lkm-any` | Permit module and kexec image loading; absence denies both. |
+| Signals | `kill-pod`, `kill-roles`, `kill-any` | Gate signals by target pod/role. |
+| Ptrace | `ptrace-pod`, `ptrace-roles`, `ptrace-any` | Gate attach and `PTRACE_TRACEME`; read-only inspection used by tools such as `ps` is not gated. |
+| Keyrings | `keyring-own`, `keyring-roles`, `keyring-any` | Gate writes to role fs-verity keyrings. |
+| System V queues | `mq-sysv-pod`, `mq-sysv-roles`, `mq-sysv-any` | Gate lookup, control, send and receive by tracked owner. |
+| POSIX queues | `mq-posix-pod`, `mq-posix-roles`, `mq-posix-any`, `mq-posix-pattern` | Gate open, descriptor receipt and queue operations by owner or name pattern. |
+| System V shared memory | `shm-sysv-pod`, `shm-sysv-roles`, `shm-sysv-any` | Gate lookup, control and attach by tracked owner. |
+| POSIX shared memory | `shm-posix-pod`, `shm-posix-roles`, `shm-posix-any`, `shm-posix-pattern` | Gate open, receipt, mapping, protection, truncation and unlink by owner or name pattern. |
+| Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | Boolean maps for pathname or abstract socket names. Unmatched operations are allowed. |
+| Mounts | `mount`, `umount` | `mount` maps destination patterns to filesystem-type allowlists. Unmatched destinations are allowed; absent `umount` abstains. |
+| Enrollment | `unpriv-enroll`, `enroll-roles`, `enroll-any` | Open a role to a non-root caller and constrain which further roles a caller may request through `bpfjsrv`. |
+
+Role and certificate references are validated when the policy is parsed.
+Unknown role options, duplicate entries and mutually exclusive scopes are
+errors. A task may hold at most eight pods, and each pod may carry at most 16
+variables.
+
+## Paths and patterns
+
+File, pathname Unix-socket and mount matching is evaluated against the global
+snapshot of PID 1's mount namespace. Results are cached by mount identity and
+pod variable bindings and are invalidated by relevant filesystem changes.
+
+`paths` rules apply recursively and the longest matching path wins. They
+support literal components, a `*` component, and `$NAME` components with an
+optional glob suffix. The variable must be declared by top-level `vars` and
+present on the pod for the dependent pattern to match. `NONE` denies access,
+`RDONLY` permits reads, `RDWR` permits reads and writes, and `RDEXEC` permits
+reads and execution.
+
+Unix pathname keys begin with `/` and apply recursively. Abstract names begin
+with `@` and use glob matching. The most specific matching rule wins and an
+equally specific denial wins a tie. An unmatched Unix rule is allowed, so a
+typical allowlist includes `/: false` for pathnames or an abstract catch-all
+denial plus more specific grants. Already-connected, inherited or transferred
+Unix socket descriptors remain capabilities and are not dynamically revoked.
+
+`mount` values are block lists of filesystem type names. An empty list denies
+the destination. Use `'/': []` as the default denial for an allowlist.
+`move_mount` requires mount permission at the destination and unmount
+permission at the source; `pivot_root` applies the same pair. A standalone
+new-mount-API reconfigure has no destination in its LSM hook and is denied
+when the role carries mount rules. Legacy bind/move operations at a typed
+destination are denied because their LSM hook exposes no source type.
+
+POSIX queue and shared-memory patterns match names without their leading `/`.
+They support literals, `?`, `*`, and `${NAME}`. A pattern grants access
+regardless of owner and cannot be combined with the corresponding `*-any`.
+System V IPC is not name-matched.
+
+## Resource ownership and capabilities
+
+BPF maps/programs, message queues and shared-memory objects created by a
+jailed task are associated with its newest pod and role. POSIX IPC uses the
+filesystem device and inode as identity, which distinguishes separate
+mqueuefs instances and `/dev/shm` mounts.
+
+File descriptors held before enrollment or inherited within a pod remain
+capabilities. Descriptor receipt is checked where the LSM exposes it, but an
+accepted descriptor is not revoked later. Existing shared-memory mappings are
+also capabilities because direct loads and stores do not cross an LSM hook.
+`memfd_create` is not POSIX shared memory and is outside `shm-posix`.
+
+## Live replacement
+
+`bpfjctl replace` keeps enforcement attached while it constructs a new pin
+tree. It snapshots task membership and pod state with a BPF iterator, rebuilds
+pods and variable bindings in the new arena, translates role-policy pointers,
+copies BPF and IPC ownership, and replays ownership mutations recorded during
+the copy. It then atomically exchanges the pin trees and retires the old one.
+
+Replacement preserves pod UUIDs, users, enrollment sources, ages, variables,
+task membership, BPF ownership, queue ownership, shared-memory ownership and
+registered `/dev/shm` mounts. It rejects incompatible persisted layout
+versions and policies that remove a variable still carried by a pod. A failed
+replacement leaves the active tree in place rather than silently dropping
+authorization state.
