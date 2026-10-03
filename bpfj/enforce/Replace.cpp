@@ -27,6 +27,7 @@
 #include "bpfj/enforce/Jailer.h"
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/LkmEnforcer.h"
+#include "bpfj/enforce/MountEnforcer.h"
 #include "bpfj/enforce/MqEnforcer.h"
 #include "bpfj/enforce/PodVars.h"
 // For bpfj_pod and bpfj_uuid: Pods.h is where C++ pulls the shared ABI header
@@ -34,6 +35,7 @@
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/PtraceEnforcer.h"
 #include "bpfj/enforce/ShmEnforcer.h"
+#include "bpfj/enforce/UnixEnforcer.h"
 #include "bpfj/enforce/UnprivRoles.h"
 #include "bpfj/enforce/VerityEnforcer.h"
 #include "bpfj/enforce/bpf/replace.skel.h"
@@ -1170,6 +1172,14 @@ struct BackfillStats {
   }
 
   if (auto res = FsEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = UnixEnforcer::load(newCfg, policy); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  if (auto res = MountEnforcer::load(newCfg, policy); !res) {
     return makeUnexpected(res.error());
   }
 

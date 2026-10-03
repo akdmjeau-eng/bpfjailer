@@ -257,6 +257,8 @@ TEST(BpfLog, FormatsStructuredEvents) {
 
 TEST(BpfLog, NamesFilesystemEvents) {
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_FS), "fs");
+  ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_UNIX), "unix");
+  ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_MOUNT), "mount");
 }
 
 TEST(BpfLog, RejectsShortEventRecords) {

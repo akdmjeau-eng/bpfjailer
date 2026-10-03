@@ -140,6 +140,19 @@ roles:
     shm-posix-pod: true        # only POSIX SHM from its own pod
     shm-posix-pattern:         # names allowed regardless of SHM ownership
       - service-${vm_uuid}-*
+    unix-bind:                 # pathname bind rules, longest path wins
+      /run/webserver: true
+      /: false
+    unix-connect:              # stream/seqpacket connection rules
+      '@control-${vm_uuid}': true
+    unix-dgram:                # datagram destination rules
+      /dev/log: true
+    mount:                     # destination -> permitted filesystem types
+      /srv/data:
+        - ext4
+        - xfs
+      '/': []                  # empty list blocks every other destination
+    umount: false              # deny unmount and mount-source removal
     keyring-own: true          # only its own role's keyring
   sandbox:
     unpriv-enroll: true        # every unspecified operation remains denied
@@ -193,6 +206,38 @@ capabilities and cannot be revoked; direct loads and stores after enrollment
 do not pass through an LSM hook. `memfd_create` is not POSIX shared memory and
 is intentionally outside `shm-posix`. BpfJailer registers `/dev/shm` for each
 enrolled mount namespace; a replacement preserves those registrations.
+
+`unix-bind`, `unix-connect`, and `unix-dgram` are maps from Unix-socket names
+to booleans. Pathname rules start with `/`, apply recursively, and use the
+longest matching path; an equally specific denial wins. An unmatched operation
+is allowed, so `/: false` is the usual default-deny rule and a deeper `true`
+entry opens a subtree. `unix-bind` gates creation of pathname sockets,
+`unix-connect` gates stream and seqpacket connection to the server pathname,
+and `unix-dgram` gates datagram sends to the destination pathname.
+
+Abstract socket names use systemd's spelling with a leading `@`. They support
+the same literals, `?`, `*`, and `${NAME}` variables as POSIX IPC patterns.
+The most specific matching pattern wins (then the longer pattern, then denial
+on a tie); if a referenced variable is not present on the pod, that pattern
+does not match. Abstract bind, stream/seqpacket connect, and datagram send are
+covered. A Unix socket descriptor that was connected before enrollment,
+inherited, or passed between processes remains a capability: this version does
+not re-check descriptor transfer between pods or revoke an already-connected
+socket.
+
+`mount` maps destination paths to lists of filesystem type names. Rules apply
+recursively, the longest matching path wins, and unmatched destinations are
+allowed. An empty list denies every mount at that path, so `'/':` is a
+default-deny rule. `umount` is a role-wide boolean; leaving it out abstains,
+`false` denies unmounting, and `true` permits it. `move_mount` requires mount
+permission for the destination and umount permission for the source;
+`pivot_root` applies the same pair to the new and old paths. Legacy remounts
+are checked at their destination and relayed to `sb_remount`. A standalone
+new-mount-API reconfigure has no destination path in its LSM hook and is denied
+for a role carrying mount rules. Legacy bind and move mounts do not expose the
+source filesystem type to the LSM hook, so a matched typed destination denies
+them rather than guessing; use `move_mount` when type-aware movement is
+required.
 
 A process holding several roles is allowed an operation only if every role
 agrees. Roles are consulted newest first, and an `override-stacked` role

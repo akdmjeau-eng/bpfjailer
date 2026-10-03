@@ -60,6 +60,11 @@ constexpr std::string_view kOverrideStacked = "override-stacked";
 constexpr std::string_view kUntrackedBpf = "untracked-bpf";
 constexpr std::string_view kMinSeq = "min-seq";
 constexpr std::string_view kPaths = "paths";
+constexpr std::string_view kUnixBind = "unix-bind";
+constexpr std::string_view kUnixConnect = "unix-connect";
+constexpr std::string_view kUnixDgram = "unix-dgram";
+constexpr std::string_view kMount = "mount";
+constexpr std::string_view kUmount = "umount";
 
 constexpr std::string_view kPemBegin = "-----BEGIN CERTIFICATE-----";
 constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
@@ -415,6 +420,160 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   return paths;
 }
 
+[[nodiscard]] err::Expected<std::map<std::string, bool>> parseUnixRules(
+    const std::string& role,
+    std::string_view key,
+    Yaml::Node& node) noexcept {
+  const std::string what = "role '" + role + "': " + std::string(key);
+  if (isBlank(node)) {
+    return std::map<std::string, bool>{};
+  }
+  if (auto res = checkNotFlow(node, what); res.hasError()) {
+    return res.error();
+  }
+  if (!node.IsMap()) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must be a map of socket name to true or false");
+  }
+
+  std::map<std::string, bool> rules;
+  bool hasRoot = false;
+  bool hasRootGlob = false;
+  for (auto it = node.Begin(); it != node.End(); it++) {
+    const auto& [writtenName, value] = *it;
+    std::string name = writtenName;
+    if (name.size() >= 2 &&
+        ((name.front() == '\'' && name.back() == '\'') ||
+         (name.front() == '"' && name.back() == '"'))) {
+      name = name.substr(1, name.size() - 2);
+    }
+    if (name.empty() || (name.front() != '/' && name.front() != '@')) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " key '" + name + "' must start with '/' or '@'");
+    }
+    if (name == "/") {
+      hasRoot = true;
+    } else if (name == "/*") {
+      hasRootGlob = true;
+    }
+    if (hasRoot && hasRootGlob) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " cannot contain both '/' and '/*'");
+    }
+    if (isBlank(value)) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " value for '" + name + "' must be true or false");
+    }
+    auto allowed = parseRoleFlag(role, key, value);
+    if (allowed.hasError()) {
+      return allowed.error();
+    }
+    if (!rules.emplace(name, *allowed).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains duplicate key '" + name + "'");
+    }
+  }
+  return rules;
+}
+
+[[nodiscard]] err::Expected<std::map<std::string, std::vector<std::string>>>
+parseMountRules(const std::string& role, Yaml::Node& node) noexcept {
+  const std::string what = "role '" + role + "': mount";
+  if (isBlank(node)) {
+    return std::map<std::string, std::vector<std::string>>{};
+  }
+  if (auto res = checkNotFlow(node, what); res.hasError()) {
+    return res.error();
+  }
+  if (!node.IsMap()) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must be a map of destination path to filesystem type list");
+  }
+
+  std::map<std::string, std::vector<std::string>> rules;
+  bool hasRoot = false;
+  bool hasRootGlob = false;
+  for (auto it = node.Begin(); it != node.End(); it++) {
+    const auto& [writtenPath, value] = *it;
+    std::string path = writtenPath;
+    if (path.size() >= 2 &&
+        ((path.front() == '\'' && path.back() == '\'') ||
+         (path.front() == '"' && path.back() == '"'))) {
+      path = path.substr(1, path.size() - 2);
+    }
+    if (path.empty() || path.front() != '/') {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " key '" + path + "' must be an absolute path");
+    }
+    if (path == "/") {
+      hasRoot = true;
+    } else if (path == "/*") {
+      hasRootGlob = true;
+    }
+    if (hasRoot && hasRootGlob) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " cannot contain both '/' and '/*'");
+    }
+
+    std::vector<std::string> types;
+    bool explicitEmpty = false;
+    if (value.IsScalar() && !isBlank(value)) {
+      const std::string text = value.As<std::string>();
+      const auto first = text.find_first_not_of(" \t\n\r\f\v");
+      const auto last = text.find_last_not_of(" \t\n\r\f\v");
+      explicitEmpty = first != std::string::npos &&
+          text.substr(first, last - first + 1) == "[]";
+    }
+    if (!isBlank(value) && !explicitEmpty) {
+      if (auto res = checkNotFlow(value, what + " value for '" + path + "'");
+          res.hasError()) {
+        return res.error();
+      }
+      if (!value.IsSequence()) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " value for '" + path + "' must be a list");
+      }
+      std::set<std::string> seen;
+      for (auto typeIt = value.Begin(); typeIt != value.End(); typeIt++) {
+        auto& typeNode = (*typeIt).second;
+        if (!typeNode.IsScalar() || isBlank(typeNode)) {
+          return err::Error(
+              std::errc::invalid_argument,
+              what + " filesystem types for '" + path +
+                  "' must be non-empty strings");
+        }
+        const std::string type = typeNode.As<std::string>();
+        if (type.size() >= 64) {
+          return err::Error(
+              std::errc::invalid_argument,
+              what + " filesystem type '" + type + "' is too long");
+        }
+        if (!seen.insert(type).second) {
+          return err::Error(
+              std::errc::invalid_argument,
+              what + " lists filesystem type '" + type + "' twice");
+        }
+        types.push_back(type);
+      }
+    }
+    if (!rules.emplace(path, std::move(types)).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains destination '" + path + "' twice");
+    }
+  }
+  return rules;
+}
+
 [[nodiscard]] err::Expected<std::map<std::string, RolePolicy>> parseRoles(
     Yaml::Node& node,
     const std::map<std::string, std::string>& certs) noexcept {
@@ -460,7 +619,8 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
           kKillRoles,     kKillAny,      kPtracePod,       kPtraceRoles,
           kPtraceAny,     kKeyringOwn,   kKeyringRoles,    kKeyringAny,
           kEnrollRoles,   kEnrollAny,    kUnprivEnroll,    kOverrideStacked,
-          kUntrackedBpf,  kMinSeq,
+          kUntrackedBpf,  kMinSeq,       kUnixBind,        kUnixConnect,
+          kUnixDgram,     kMount,        kUmount,
       };
       for (auto field = value.Begin(); field != value.End(); field++) {
         const auto& [key, child] = *field;
@@ -560,6 +720,45 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
         policy.paths = std::move(*parsed);
         policy.hasPaths = true;
       }
+      const auto parseUnix =
+          [&](std::string_view key,
+              std::map<std::string, bool>& rules) -> err::Expected<err::Unit> {
+        if (Yaml::Node* rulesNode = findChild(value, key)) {
+          auto parsed = parseUnixRules(id, key, *rulesNode);
+          if (parsed.hasError()) {
+            return parsed.error();
+          }
+          rules = std::move(*parsed);
+        }
+        return err::unit;
+      };
+      if (auto res = parseUnix(kUnixBind, policy.unixBind); res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseUnix(kUnixConnect, policy.unixConnect);
+          res.hasError()) {
+        return res.error();
+      }
+      if (auto res = parseUnix(kUnixDgram, policy.unixDgram); res.hasError()) {
+        return res.error();
+      }
+
+      if (Yaml::Node* mount = findChild(value, kMount)) {
+        auto parsed = parseMountRules(id, *mount);
+        if (parsed.hasError()) {
+          return parsed.error();
+        }
+        policy.mount = std::move(*parsed);
+      }
+      if (Yaml::Node* umount = findChild(value, kUmount)) {
+        auto allowed = parseRoleFlag(id, kUmount, *umount);
+        if (allowed.hasError()) {
+          return allowed.error();
+        }
+        policy.umount = *allowed;
+        policy.hasUmount = true;
+      }
+
       if (auto res = parseFlag(kFsAny, policy.fsAny); res.hasError()) {
         return res.error();
       }

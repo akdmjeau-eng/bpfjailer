@@ -3,6 +3,7 @@
 #include "tests/Harness.h"
 
 #include <string>
+#include <vector>
 
 #include "bpfj/policy/Policy.h"
 
@@ -52,6 +53,115 @@ TEST(Policy, RejectsDuplicatePaths) {
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("contains duplicate path '/etc/**'") !=
+      std::string::npos);
+}
+
+TEST(Policy, ParsesUnixSocketRules) {
+  auto policy = Policy::parse(
+      "roles:\n"
+      "  svc:\n"
+      "    unix-bind:\n"
+      "      /run/svc: false\n"
+      "      '@svc-*': true\n"
+      "    unix-connect:\n"
+      "      /run/peer: true\n"
+      "    unix-dgram:\n"
+      "      '@log-${UUID}': false\n");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("svc");
+  ASSERT_EQ(role.unixBind.at("/run/svc"), false);
+  ASSERT_EQ(role.unixBind.at("@svc-*"), true);
+  ASSERT_EQ(role.unixConnect.at("/run/peer"), true);
+  ASSERT_EQ(role.unixDgram.at("@log-${UUID}"), false);
+}
+
+TEST(Policy, RejectsUnixSocketRuleWithoutNameKind) {
+  auto policy =
+      Policy::parse("roles:\n  svc:\n    unix-bind:\n      relative: false\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must start with '/' or '@'") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsNonBooleanUnixSocketRule) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    unix-connect:\n      /run/svc: sometimes\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("neither true nor false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsBlankUnixSocketRule) {
+  auto policy =
+      Policy::parse("roles:\n  svc:\n    unix-dgram:\n      /dev/log:\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must be true or false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsCollidingUnixRootRules) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    unix-bind:\n      '/': false\n      '/*': true\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("cannot contain both '/' and '/*'") !=
+      std::string::npos);
+}
+
+TEST(Policy, ParsesMountAndUmountRules) {
+  auto policy = Policy::parse(
+      "roles:\n"
+      "  svc:\n"
+      "    mount:\n"
+      "      /srv/data:\n"
+      "        - ext4\n"
+      "        - xfs\n"
+      "      /blocked: []\n"
+      "    umount: false\n");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("svc");
+  const std::vector<std::string> expected{"ext4", "xfs"};
+  ASSERT(role.mount.at("/srv/data") == expected);
+  ASSERT(role.mount.at("/blocked").empty());
+  ASSERT(role.hasUmount);
+  ASSERT(!role.umount);
+}
+
+TEST(Policy, RejectsRelativeMountDestination) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    mount:\n      relative:\n        - tmpfs\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must be an absolute path") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsScalarMountFilesystemType) {
+  auto policy =
+      Policy::parse("roles:\n  svc:\n    mount:\n      /run: tmpfs\n");
+  ASSERT(!policy);
+  ASSERT(policy.error().message().find("must be a list") != std::string::npos);
+}
+
+TEST(Policy, RejectsNonBooleanUmount) {
+  auto policy = Policy::parse("roles:\n  svc:\n    umount: sometimes\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("neither true nor false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsCollidingMountRootRules) {
+  auto policy = Policy::parse(
+      "roles:\n  svc:\n    mount:\n      '/': []\n      '/*': []\n");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("cannot contain both '/' and '/*'") !=
       std::string::npos);
 }
 

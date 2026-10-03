@@ -37,6 +37,23 @@ struct RolePolicy {
   bool hasPaths = false;
   bool fsAny = false;
 
+  /// @brief Unix-socket pathname or abstract-name rules. Pathname matches are
+  /// recursive with the longest path winning; abstract names (spelled with a
+  /// leading '@') are globs. An unmatched operation is allowed.
+  std::map<std::string, bool> unixBind;
+  std::map<std::string, bool> unixConnect;
+  std::map<std::string, bool> unixDgram;
+
+  /// @brief Mount destination path to the filesystem types permitted there.
+  /// Matching is recursive and the longest path wins. An empty type list
+  /// denies mounting at that path.
+  std::map<std::string, std::vector<std::string>> mount;
+
+  /// @brief Whether unmounting is allowed. An absent `umount` abstains; a
+  /// written true or false participates in stacked-role enforcement.
+  bool umount = false;
+  bool hasUmount = false;
+
   /// @brief Certificate ids whose signatures this role's binaries may carry.
   std::vector<std::string> enforceBinaryCerts;
   bool verityAny = false;

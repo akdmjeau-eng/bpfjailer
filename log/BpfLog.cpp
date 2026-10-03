@@ -40,6 +40,10 @@ std::string eventTypeName(int type) {
       return "lkm";
     case BPFJ_EVENT_FS:
       return "fs";
+    case BPFJ_EVENT_UNIX:
+      return "unix";
+    case BPFJ_EVENT_MOUNT:
+      return "mount";
     default:
       return "unknown(" + std::to_string(type) + ")";
   }

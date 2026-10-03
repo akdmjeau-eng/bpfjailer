@@ -85,6 +85,8 @@ enum bpfj_event_type {
   BPFJ_EVENT_BPF = 6,
   BPFJ_EVENT_LKM = 7,
   BPFJ_EVENT_FS = 8,
+  BPFJ_EVENT_UNIX = 9,
+  BPFJ_EVENT_MOUNT = 10,
 };
 
 struct bpfj_role_id {
