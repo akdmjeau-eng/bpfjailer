@@ -250,6 +250,32 @@ struct bpfj_pid_data {
   struct bpfj_pod __arena* pods[BPFJ_MAX_POD_PER_PID];
 };
 
+// Binary records emitted by the replace discovery iterator. The fixed header
+// is followed by one bpfj_user_id and then var_count pairs of
+// bpfj_replace_var_snapshot plus that variable's payload bytes.
+#define BPFJ_REPLACE_SNAPSHOT_MAGIC 0x42504a52U
+#define BPFJ_REPLACE_SNAPSHOT_VERSION 1U
+
+struct bpfj_replace_pod_snapshot {
+  __u32 magic;
+  __u16 version;
+  __u8 var_count;
+  __u8 enrollment_source;
+  __u64 old_pod;
+  struct bpfj_role_id role_id;
+  struct bpfj_uuid uuid;
+  __s64 creation_time_ns;
+  __u16 gc_removal_attempts;
+  __u8 reserved[6];
+};
+
+struct bpfj_replace_var_snapshot {
+  __u32 id;
+  __u8 type;
+  __u8 size;
+  __u16 reserved;
+};
+
 // Pinned so widening a member is a compile error rather than a silent change
 // to the task-storage records shared by every BPF object in the jail.
 #ifdef __cplusplus
@@ -263,6 +289,8 @@ BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var) == 24);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_var_array) == 16);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pod) == 336);
 BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_pid_data) == 80);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_replace_pod_snapshot) == 64);
+BPFJ_POD_STATIC_ASSERT(sizeof(struct bpfj_replace_var_snapshot) == 8);
 
 // Same reasoning for the records a replace copies between two trees; a change
 // this catches is one BPFJ_BPF_OWNER_VERSION has to be bumped for.

@@ -32,6 +32,8 @@ namespace {
 constexpr std::string_view kTaskMap = "bpfj_task_map";
 constexpr std::string_view kReplaceFrozenMap = "bpfj_replace_frozen";
 constexpr std::string_view kActiveEnrollsMap = "bpfj_active_enrolls";
+// PIDFD_THREAD is the O_EXCL bit, without including conflicting kernel fcntl.
+constexpr unsigned int kPidFdThread = O_EXCL;
 
 using pins::openPinnedMap;
 
@@ -46,10 +48,12 @@ struct ResolvedPodVar {
   std::string_view value;
 };
 
-// Task storage is keyed by pidfd at the syscall boundary, and pidfd_open() only
-// accepts a thread group leader -- the granularity the jailer enrolls at.
-[[nodiscard]] Expected<Fd> openPidFd(pid_t pid) noexcept {
-  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+// Task storage is keyed by pidfd at the syscall boundary; PIDFD_THREAD is
+// required when the target is not a thread group leader.
+[[nodiscard]] Expected<Fd> openPidFd(
+    pid_t pid,
+    unsigned int flags = 0) noexcept {
+  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, flags));
   if (fd < 0) {
     return makeUnexpected(
         makeErrnoError("failed to open pidfd for pid ", std::to_string(pid)));
@@ -140,11 +144,11 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   return unit;
 }
 
-/// @brief Add `uuid` to `pid`, either on its leader alone or on every thread,
-/// through a task iterator loaded, run and thrown away. The process, pod,
-/// thread mode and caller are compiled into that object rather than passed
-/// through a map, so two enrollments can run at once and the BPF side can drop
-/// the caller's in-flight marker before a self-enrollment loses bpf(2).
+/// @brief Add `uuid` to the selected task or tasks through a task iterator
+/// loaded, run and thrown away. The target, pod, thread mode and caller are
+/// compiled into that object rather than passed through a map, so two
+/// enrollments can run at once and the BPF side can drop the caller's in-flight
+/// marker before a self-enrollment loses bpf(2).
 [[nodiscard]] Expected<std::uint32_t> enrollTasks(
     const PinConfig& cfg,
     pid_t pid,
@@ -159,6 +163,7 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
 
   // Before load(), which is when rodata is frozen.
   skel.rodata().bpfj_enroll_tgid = pid;
+  skel.rodata().bpfj_enroll_tid = threads == Threads::SingleThread ? pid : 0;
   skel.rodata().bpfj_enroll_caller_pid = static_cast<pid_t>(callerPid);
   skel.rodata().bpfj_enroll_all_threads = threads == Threads::All ? 1 : 0;
   skel.bss().bpfj_enroll_pod = pod;
@@ -177,8 +182,8 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
     return makeUnexpected(res.error());
   }
 
-  // By hand rather than skel.attach(), so the link can carry a link_info with
-  // task.pid set and the kernel walks only that process's threads.
+  // By hand rather than skel.attach(), so link_info can narrow the walk to one
+  // process or one thread.
   auto prog = skel.getProg("bpfj_enroll_threads");
   if (!prog) {
     return makeUnexpected(makeError(
@@ -186,7 +191,11 @@ setId(char (&dst)[N], std::string_view src, std::string_view what) noexcept {
   }
 
   union bpf_iter_link_info linfo{};
-  linfo.task.pid = static_cast<__u32>(pid);
+  if (threads == Threads::SingleThread) {
+    linfo.task.tid = static_cast<__u32>(pid);
+  } else {
+    linfo.task.pid = static_cast<__u32>(pid);
+  }
 
   LIBBPF_OPTS(bpf_iter_attach_opts, opts);
   opts.link_info = &linfo;
@@ -415,7 +424,8 @@ Expected<bpfj_uuid> enrollPod(
     return makeUnexpected(taskMap.error());
   }
 
-  auto pidFd = openPidFd(pid);
+  auto pidFd =
+      openPidFd(pid, threads == Threads::SingleThread ? kPidFdThread : 0);
   if (!pidFd) {
     return makeUnexpected(pidFd.error());
   }

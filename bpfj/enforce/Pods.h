@@ -30,6 +30,10 @@ enum class Threads {
   /// about to destroy the other threads.
   LeaderOnly,
 
+  /// @brief One thread named by its tid, using PIDFD_THREAD and a task
+  /// iterator narrowed to that tid.
+  SingleThread,
+
   /// @brief Every thread of the process, through the jailer's enroll
   /// iterator, for a process already running: each thread is checked against
   /// its own task entry, and pidfd_open() only accepts a leader.

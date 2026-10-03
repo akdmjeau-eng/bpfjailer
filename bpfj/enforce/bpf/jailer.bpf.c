@@ -150,6 +150,14 @@ int BPF_PROG(
     return 0;
   }
 
+  // A replace snapshots every old-arena pod before backfilling task storage.
+  // Refuse an exec that would allocate a new pod between those two operations;
+  // allowing the binary through without its xattr role would be a bypass.
+  if (bpfj_replacement_is_frozen()) {
+    BPFJ_LOG_ERR(EBUSY, "Exec enrollment blocked while replacing the jailer");
+    return -EBUSY;
+  }
+
   const struct bpfj_role_policy __arena* policy = bpfj_policy_lookup(role_id);
   if (!policy) {
     BPFJ_LOG_ERR(EINVAL, "Role id %s from xattr is not in policy", role_id->id);

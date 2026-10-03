@@ -27,7 +27,8 @@ class Jailer {
   /// afterwards still adopts these maps.
   [[nodiscard]] static Expected<ScratchMapFds> load(
       const PinConfig& cfg,
-      const Policy& policy) noexcept;
+      const Policy& policy,
+      bool replacementFrozen = false) noexcept;
 
   /// @brief Remove the pin tree, detaching the jailer and every enforcer
   /// under `cfg`, the tree being what holds them attached. Succeeds when

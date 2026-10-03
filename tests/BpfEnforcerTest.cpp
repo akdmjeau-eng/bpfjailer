@@ -635,25 +635,34 @@ TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
 }
 
 TEST(BpfEnforcer, AReplaceKeepsANonLeaderThreadJailed) {
-  const std::string yaml = "roles:\n  denied:\n";
+  const std::string yaml =
+      "roles:\n"
+      "  owner:\n    bpf-roles:\n      - owner\n"
+      "  denied:\n";
   attach(yaml);
   Child replacer([yaml] { return replaceErrno(yaml); });
+  Child creator(createOwnedMap);
+  enroll("owner", creator.pid());
+  const int ownedMap = creator.run();
+  ASSERT(ownedMap > 0);
 
   std::mutex mutex;
   std::condition_variable cv;
   bool ready = false;
   bool go = false;
+  pid_t workerTid = -1;
   int workerErrno = -1;
 
   std::thread worker([&] {
     {
       std::unique_lock<std::mutex> lock(mutex);
+      workerTid = ::gettid();
       ready = true;
       cv.notify_one();
       cv.wait(lock, [&] { return go; });
     }
 
-    workerErrno = mapCreateErrno();
+    workerErrno = openMapErrno(ownedMap);
   });
 
   {
@@ -662,7 +671,13 @@ TEST(BpfEnforcer, AReplaceKeepsANonLeaderThreadJailed) {
   }
 
   ASSERT_OK(enrollPod(
-      testPins(), "denied", "threaded@meta", {}, ::getpid(), Threads::All));
+      testPins(),
+      "denied",
+      "threaded@meta",
+      {},
+      workerTid,
+      Threads::SingleThread));
+
   ASSERT_EQ(replacer.run(), 0);
 
   {

@@ -36,7 +36,8 @@ struct bpfj_replace_pod_key {
 
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 4096);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __uint(max_entries, 1048576);
   __type(key, struct bpfj_replace_pod_key);
   __type(value, struct bpfj_replace_pod);
 } bpfj_replace_pods SEC(".maps");
@@ -80,6 +81,160 @@ static __always_inline void bpfj_replace_count(void* counter) {
   if (n) {
     __sync_fetch_and_add(n, 1);
   }
+}
+
+static __always_inline bool bpfj_replace_var_valid(
+    const struct bpfj_var __arena* var) {
+  if (!var || !var->val || var->id == 0) {
+    return false;
+  }
+  if (var->type == BPFJ_VAR_TYPE_STR) {
+    if (var->size >= BPFJ_OSS_VAR_VAL_LEN) {
+      return false;
+    }
+    const char __arena* value = var->val;
+    return value[var->size] == '\0';
+  }
+  return var->type == BPFJ_VAR_TYPE_VSOCK_ADDR &&
+      var->size == sizeof(struct vsock_address);
+}
+
+static __always_inline bool
+bpfj_replace_seq_write(struct seq_file* seq, const void* data, __u32 size) {
+  if (bpf_seq_write(seq, data, size) == 0) {
+    return true;
+  }
+  bpfj_replace_count(&bpfj_replace_failed);
+  return false;
+}
+
+struct bpfj_replace_snapshot_scratch {
+  struct bpfj_user_id user_id;
+  unsigned char value[BPFJ_OSS_VAR_VAL_LEN];
+};
+
+// This object and its iterator are private to one replace invocation, so one
+// ordinary map value is enough to bridge arena bytes into bpf_seq_write().
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, struct bpfj_replace_snapshot_scratch);
+} bpfj_replace_snapshot_scratch SEC(".maps");
+
+// Snapshot every task-storage pod while the iterator holds the task alive.
+// Userspace deduplicates records by old_pod and never dereferences an arena
+// pointer after this callback returns.
+SEC("iter.s/task")
+int bpfj_replace_snapshot(struct bpf_iter__task* ctx) {
+  struct task_struct* task = ctx->task;
+  if (!task) {
+    return 0;
+  }
+
+  struct bpfj_pid_data* old = bpfj_get_pid_data_from(&bpfj_task_map, task);
+  if (!old) {
+    return 0;
+  }
+  if (old->version != BPFJ_PID_DATA_VERSION ||
+      old->num_pods > BPFJ_MAX_POD_PER_PID) {
+    bpfj_replace_count(&bpfj_replace_incompatible);
+    return 0;
+  }
+
+  bpfj_heap_use_arena();
+  const __u32 zero = 0;
+  struct bpfj_replace_snapshot_scratch* snapshot_scratch =
+      bpf_map_lookup_elem(&bpfj_replace_snapshot_scratch, &zero);
+  if (!snapshot_scratch) {
+    bpfj_replace_count(&bpfj_replace_failed);
+    return 0;
+  }
+
+  __u32 num_pods = old->num_pods;
+  barrier_var(num_pods);
+  int i;
+  bpf_for(i, 0, BPFJ_MAX_POD_PER_PID) {
+    if (i >= num_pods) {
+      break;
+    }
+    struct bpfj_pod __arena* pod = old->pods[i];
+    if (!pod || pod->var_array.count > BPFJ_OSS_VAR_MAX ||
+        (pod->var_array.count != 0 && !pod->var_array.vars)) {
+      bpfj_replace_count(&bpfj_replace_incompatible);
+      continue;
+    }
+
+    bool valid = true;
+    __u32 var_count = pod->var_array.count;
+    barrier_var(var_count);
+    int at;
+    bpf_for(at, 0, BPFJ_OSS_VAR_MAX) {
+      if (at >= var_count) {
+        break;
+      }
+      const struct bpfj_var __arena* var = pod->var_array.vars + at;
+      if (!bpfj_replace_var_valid(var)) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      bpfj_replace_count(&bpfj_replace_incompatible);
+      continue;
+    }
+
+    struct bpfj_replace_pod_snapshot snapshot = {
+        .magic = BPFJ_REPLACE_SNAPSHOT_MAGIC,
+        .version = BPFJ_REPLACE_SNAPSHOT_VERSION,
+        .var_count = pod->var_array.count,
+        .enrollment_source = pod->enrollment_source,
+        .old_pod = (__u64)(unsigned long)pod,
+        .creation_time_ns = pod->creation_time_ns,
+        .gc_removal_attempts = pod->gc_removal_attempts,
+    };
+    __builtin_memcpy(
+        &snapshot.role_id, &pod->role_id, sizeof(snapshot.role_id));
+    __builtin_memcpy(&snapshot.uuid, &pod->uuid, sizeof(snapshot.uuid));
+    __builtin_memcpy(
+        &snapshot_scratch->user_id, &pod->user_id, sizeof(pod->user_id));
+
+    struct seq_file* seq = ctx->meta->seq;
+    if (!bpfj_replace_seq_write(seq, &snapshot, sizeof(snapshot)) ||
+        !bpfj_replace_seq_write(
+            seq, &snapshot_scratch->user_id, sizeof(pod->user_id))) {
+      return 0;
+    }
+
+    bpf_for(at, 0, BPFJ_OSS_VAR_MAX) {
+      if (at >= var_count) {
+        break;
+      }
+      const struct bpfj_var __arena* var = pod->var_array.vars + at;
+      struct bpfj_replace_var_snapshot var_snapshot = {
+          .id = var->id,
+          .type = var->type,
+          .size = var->size,
+          .reserved = var->reserved,
+      };
+      const __u32 payload_size = var->type == BPFJ_VAR_TYPE_STR
+          ? (__u32)var->size + 1
+          : sizeof(struct vsock_address);
+      const unsigned char __arena* value = var->val;
+      int n;
+      bpf_for(n, 0, BPFJ_OSS_VAR_VAL_LEN) {
+        if (n >= payload_size) {
+          break;
+        }
+        snapshot_scratch->value[n] = value[n];
+      }
+      if (!bpfj_replace_seq_write(seq, &var_snapshot, sizeof(var_snapshot)) ||
+          !bpfj_replace_seq_write(seq, snapshot_scratch->value, payload_size)) {
+        return 0;
+      }
+    }
+  }
+  return 0;
 }
 
 /// Whether `pid_data` already names `pod`.
@@ -156,13 +311,17 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
     return 0;
   }
 
-  __u32 num_pods = old->num_pods;
-  if (num_pods > BPFJ_MAX_POD_PER_PID) {
-    num_pods = BPFJ_MAX_POD_PER_PID;
+  if (old->num_pods > BPFJ_MAX_POD_PER_PID ||
+      new_data->num_pods > BPFJ_MAX_POD_PER_PID) {
+    bpfj_replace_count(&bpfj_replace_incompatible);
+    bpfj_replace_count(&bpfj_replace_failed);
+    return 0;
   }
+  __u32 num_pods = old->num_pods;
   barrier_var(num_pods);
 
   bool lost = false;
+  __u32 needed = 0;
   for (int i = 0; i < BPFJ_MAX_POD_PER_PID; ++i) {
     if (i >= num_pods) {
       break;
@@ -170,7 +329,19 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
 
     struct bpfj_pod __arena* old_pod = old->pods[i];
     if (!old_pod) {
+      bpfj_replace_count(&bpfj_replace_incompatible);
+      lost = true;
       continue;
+    }
+
+    for (int before = 0; before < BPFJ_MAX_POD_PER_PID; ++before) {
+      if (before >= i) {
+        break;
+      }
+      if (bpfj_pod_ptr_cmp(old->pods[before], old_pod) == 0) {
+        bpfj_replace_count(&bpfj_replace_incompatible);
+        lost = true;
+      }
     }
 
     struct bpfj_replace_pod_key key = {.old_pod = old_pod};
@@ -190,18 +361,37 @@ int bpfj_replace_backfill(struct bpf_iter__task* ctx) {
     if (bpfj_replace_holds(new_data, translated->pod)) {
       continue;
     }
+    ++needed;
+  }
 
+  if (needed > BPFJ_MAX_POD_PER_PID - new_data->num_pods) {
+    lost = true;
+  }
+  if (lost) {
+    bpfj_replace_count(&bpfj_replace_failed);
+    return 0;
+  }
+
+  // A second pass makes migration transactional per task: no partial
+  // membership is published when validation above found an unmapped pod.
+  for (int i = 0; i < BPFJ_MAX_POD_PER_PID; ++i) {
+    if (i >= num_pods) {
+      break;
+    }
+    struct bpfj_replace_pod_key key = {.old_pod = old->pods[i]};
+    struct bpfj_replace_pod* translated =
+        bpf_map_lookup_elem(&bpfj_replace_pods, &key);
+    if (!translated || !translated->pod ||
+        bpfj_replace_holds(new_data, translated->pod)) {
+      continue;
+    }
     if (!bpfj_replace_add(new_data, translated->pod)) {
-      lost = true;
+      bpfj_replace_count(&bpfj_replace_failed);
+      return 0;
     }
   }
 
-  // Not a ternary: each map is its own anonymous struct type.
-  if (lost) {
-    bpfj_replace_count(&bpfj_replace_failed);
-  } else {
-    bpfj_replace_count(&bpfj_replace_migrated);
-  }
+  bpfj_replace_count(&bpfj_replace_migrated);
   return 0;
 }
 

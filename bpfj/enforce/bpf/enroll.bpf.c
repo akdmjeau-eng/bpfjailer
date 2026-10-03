@@ -25,6 +25,7 @@
 
 // The process to enroll, and the pod to put it in. Set before load.
 volatile const pid_t bpfj_enroll_tgid = 0;
+volatile const pid_t bpfj_enroll_tid = 0;
 volatile const pid_t bpfj_enroll_caller_pid = 0;
 volatile const __u8 bpfj_enroll_all_threads = 0;
 struct bpfj_pod __arena* volatile bpfj_enroll_pod = 0;
@@ -49,12 +50,19 @@ int bpfj_enroll_threads(struct bpf_iter__task* ctx) {
     return 0;
   }
 
-  // The link already scoped this to one thread group; see the note above.
-  if (bpfj_enroll_tgid == 0 || task->tgid != bpfj_enroll_tgid) {
-    return 0;
+  // The link already scopes this to one thread or thread group.
+  if (bpfj_enroll_tid != 0) {
+    if (task->pid != bpfj_enroll_tid) {
+      return 0;
+    }
+  } else {
+    if (bpfj_enroll_tgid == 0 || task->tgid != bpfj_enroll_tgid) {
+      return 0;
+    }
   }
 
-  if (!bpfj_enroll_all_threads && task->pid != task->tgid) {
+  if (bpfj_enroll_tid == 0 && !bpfj_enroll_all_threads &&
+      task->pid != task->tgid) {
     return 0;
   }
 

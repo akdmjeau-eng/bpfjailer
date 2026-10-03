@@ -44,6 +44,12 @@ struct {
   __type(value, __u8);
 } bpfj_replace_frozen SEC(".maps");
 
+static __always_inline bool bpfj_replacement_is_frozen(void) {
+  const __u32 zero = 0;
+  const __u8* frozen = bpf_map_lookup_elem(&bpfj_replace_frozen, &zero);
+  return frozen && *frozen != 0;
+}
+
 // Userspace enrollments currently in flight, keyed by their process id. A
 // replace raises bpfj_replace_frozen and then waits for this map to empty, so
 // an enrollment already past the flag check still finishes before the copy.

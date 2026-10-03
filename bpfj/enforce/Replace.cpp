@@ -3,7 +3,6 @@
 #include "bpfj/enforce/Replace.h"
 
 #include <bpf/bpf.h>
-#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
@@ -15,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -79,6 +79,25 @@ static_assert(sizeof(BpfOwnerV2) == 32);
 // The tree the replacement is built in, beside the one being replaced.
 constexpr std::string_view kNewSuffix = "-new";
 
+[[nodiscard]] Expected<> exchangePinTrees(
+    const PinConfig& active,
+    const PinConfig& replacement) noexcept {
+  if (::syscall(
+          SYS_renameat2,
+          AT_FDCWD,
+          active.root().c_str(),
+          AT_FDCWD,
+          replacement.root().c_str(),
+          RENAME_EXCHANGE) != 0) {
+    return makeUnexpected(makeErrnoError(
+        "failed to atomically exchange ",
+        active.root(),
+        " and ",
+        replacement.root()));
+  }
+  return unit;
+}
+
 [[nodiscard]] Expected<Fd> acquireReplaceLease(const PinConfig& cfg) noexcept {
   Fd fd(::open(cfg.bpffsPath.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (!fd.hasFd()) {
@@ -107,16 +126,140 @@ struct ReplacePodKey {
   struct bpfj_pod* oldPod = nullptr;
 };
 
-[[nodiscard]] Expected<ResolvedPolicyVar> translatedVar(
-    const struct bpfj_var* var,
-    const struct bpfj_var_catalog* catalog) noexcept {
-  if (var == nullptr || bpfj_var_name_ptr(var) == nullptr) {
-    return makeUnexpected(makeError(
-        std::errc::invalid_argument, "pod variable has no published name"));
+struct SnapshotVar {
+  struct bpfj_replace_var_snapshot header{};
+  std::vector<unsigned char> value;
+};
+
+struct SnapshotPod {
+  struct bpfj_replace_pod_snapshot header{};
+  struct bpfj_user_id user{};
+  std::vector<SnapshotVar> vars;
+};
+
+[[nodiscard]] bool sameSnapshot(
+    const SnapshotPod& lhs,
+    const SnapshotPod& rhs) noexcept {
+  if (std::memcmp(&lhs.header, &rhs.header, sizeof(lhs.header)) != 0 ||
+      std::memcmp(&lhs.user, &rhs.user, sizeof(lhs.user)) != 0 ||
+      lhs.vars.size() != rhs.vars.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.vars.size(); ++i) {
+    if (std::memcmp(
+            &lhs.vars[i].header,
+            &rhs.vars[i].header,
+            sizeof(lhs.vars[i].header)) != 0 ||
+        lhs.vars[i].value != rhs.vars[i].value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename T>
+[[nodiscard]] bool readSnapshotField(
+    const std::vector<char>& bytes,
+    std::size_t& at,
+    T& out) noexcept {
+  if (at > bytes.size() || bytes.size() - at < sizeof(T)) {
+    return false;
+  }
+  std::memcpy(&out, bytes.data() + at, sizeof(T));
+  at += sizeof(T);
+  return true;
+}
+
+[[nodiscard]] Expected<std::vector<SnapshotPod>> parseSnapshots(
+    const std::vector<char>& bytes) noexcept {
+  std::map<std::uint64_t, SnapshotPod> unique;
+  std::size_t at = 0;
+  while (at < bytes.size()) {
+    SnapshotPod pod;
+    if (!readSnapshotField(bytes, at, pod.header) ||
+        pod.header.magic != BPFJ_REPLACE_SNAPSHOT_MAGIC ||
+        pod.header.version != BPFJ_REPLACE_SNAPSHOT_VERSION ||
+        pod.header.old_pod == 0 || pod.header.var_count > BPFJ_OSS_VAR_MAX ||
+        !readSnapshotField(bytes, at, pod.user)) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "replace iterator emitted an invalid pod snapshot"));
+    }
+    if (std::memchr(
+            pod.header.role_id.id, '\0', sizeof(pod.header.role_id.id)) ==
+            nullptr ||
+        std::memchr(pod.user.id, '\0', sizeof(pod.user.id)) == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "replace iterator emitted an unterminated pod identity"));
+    }
+
+    pod.vars.reserve(pod.header.var_count);
+    for (std::uint8_t i = 0; i < pod.header.var_count; ++i) {
+      SnapshotVar var;
+      if (!readSnapshotField(bytes, at, var.header) || var.header.id == 0 ||
+          var.header.reserved != 0) {
+        return makeUnexpected(makeError(
+            std::errc::state_not_recoverable,
+            "replace iterator emitted an invalid variable snapshot"));
+      }
+      const std::uint32_t payloadSize = var.header.type == BPFJ_VAR_TYPE_STR
+          ? static_cast<std::uint32_t>(var.header.size) + 1
+          : var.header.type == BPFJ_VAR_TYPE_VSOCK_ADDR
+          ? static_cast<std::uint32_t>(sizeof(struct vsock_address))
+          : static_cast<std::uint32_t>(BPFJ_OSS_VAR_VAL_LEN + 1);
+      if (payloadSize > BPFJ_OSS_VAR_VAL_LEN || at > bytes.size() ||
+          bytes.size() - at < payloadSize) {
+        return makeUnexpected(makeError(
+            std::errc::state_not_recoverable,
+            "replace iterator emitted an invalid variable payload"));
+      }
+      var.value.assign(bytes.begin() + at, bytes.begin() + at + payloadSize);
+      at += payloadSize;
+      pod.vars.push_back(std::move(var));
+    }
+
+    auto [stored, inserted] = unique.emplace(pod.header.old_pod, pod);
+    if (!inserted && !sameSnapshot(stored->second, pod)) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "one old arena address identified two different pods"));
+    }
   }
 
-  const std::string_view name(bpfj_var_name_ptr(var), bpfj_var_name_len(var));
-  auto translated = lookupVar(catalog, name);
+  std::vector<SnapshotPod> snapshots;
+  snapshots.reserve(unique.size());
+  for (auto& [pointer, pod] : unique) {
+    (void)pointer;
+    snapshots.push_back(std::move(pod));
+  }
+  return snapshots;
+}
+
+[[nodiscard]] Expected<ResolvedPolicyVar> translatedVar(
+    std::uint32_t oldId,
+    const struct bpfj_var_catalog* oldCatalog,
+    const struct bpfj_var_catalog* newCatalog) noexcept {
+  const struct bpfj_var_name* oldName = nullptr;
+  if (oldCatalog != nullptr) {
+    const auto* names = bpfj_var_catalog_names(oldCatalog);
+    for (std::uint32_t i = 0; i < oldCatalog->count; ++i) {
+      if (names[i] != nullptr && names[i]->id == oldId) {
+        oldName = names[i];
+        break;
+      }
+    }
+  }
+  if (oldName == nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::invalid_argument,
+        "pod variable id ",
+        std::to_string(oldId),
+        " has no published name"));
+  }
+
+  const std::string_view name(oldName->str, oldName->len);
+  auto translated = lookupVar(newCatalog, name);
   if (!translated) {
     return makeUnexpected(makeError(
         translated.error().code(),
@@ -128,74 +271,20 @@ struct ReplacePodKey {
   return translated;
 }
 
-[[nodiscard]] Expected<Fd> openPidFd(pid_t pid) noexcept {
-  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
-  if (fd < 0) {
-    return makeUnexpected(
-        makeErrnoError("failed to open pidfd for pid ", std::to_string(pid)));
-  }
-
-  return Fd(fd);
-}
-
-[[nodiscard]] Expected<bpfj_pid_data>
-readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
-  bpfj_pid_data pidData{};
-  const int key = pidFd.get();
-  if (::bpf_map_lookup_elem(taskMap.get(), &key, &pidData) == 0) {
-    return pidData;
-  }
-
-  if (errno != ENOENT) {
-    return makeUnexpected(makeErrnoError(
-        "failed to read jail membership of pid ", std::to_string(pid)));
-  }
-
-  return bpfj_pid_data{.version = BPFJ_PID_DATA_VERSION};
-}
-
-[[nodiscard]] Expected<std::vector<pid_t>> runningPids() noexcept {
-  DIR* dir = ::opendir("/proc");
-  if (dir == nullptr) {
-    return makeUnexpected(makeErrnoError("failed to open /proc"));
-  }
-
-  std::vector<pid_t> pids;
-  while (const struct dirent* entry = ::readdir(dir)) {
-    char* end = nullptr;
-    const long value = std::strtol(entry->d_name, &end, 10);
-    if (end == entry->d_name || *end != '\0' || value <= 0) {
-      continue;
-    }
-    pids.push_back(static_cast<pid_t>(value));
-  }
-
-  ::closedir(dir);
-  return pids;
-}
-
 /// @brief Copy `src`'s arena-backed vars into a freshly allocated flat pod,
 /// translating ids by name so a new policy can renumber the allowlist without
 /// changing what a running pod means.
 [[nodiscard]] Expected<struct bpfj_pod*> translatePod(
-    const bpfj_pod& src,
+    const SnapshotPod& src,
     PodArena& newArena,
     const Fd& rolePolicies,
-    const struct bpfj_policy_catalog* catalog) noexcept {
-  const auto count =
-      std::min<std::size_t>(src.var_array.count, BPFJ_OSS_VAR_MAX);
+    const struct bpfj_policy_catalog* oldCatalog,
+    const struct bpfj_policy_catalog* newCatalog) noexcept {
+  const std::size_t count = src.vars.size();
   std::uint32_t blobSize = bpfj_var_align_up(sizeof(struct bpfj_pod));
   blobSize += bpfj_var_align_up(sizeof(struct bpfj_var) * count);
-  for (std::size_t i = 0; i < count; ++i) {
-    const auto* var = bpfj_var_array_at(&src.var_array, i);
-    if (var == nullptr) {
-      return makeUnexpected(makeError(
-          std::errc::bad_address,
-          "pod ",
-          uuidToString(src.uuid),
-          " has an unreadable variable blob"));
-    }
-    blobSize += bpfj_var_align_up(bpfj_var_payload_size(var));
+  for (const auto& var : src.vars) {
+    blobSize += bpfj_var_align_up(static_cast<std::uint32_t>(var.value.size()));
   }
 
   auto blob = newArena.alloc(blobSize);
@@ -205,13 +294,13 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 
   auto* dst = static_cast<struct bpfj_pod*>(*blob);
   *dst = {};
-  dst->role_id = src.role_id;
-  dst->user_id = src.user_id;
-  dst->uuid = src.uuid;
-  dst->creation_time_ns = src.creation_time_ns;
-  dst->gc_removal_attempts = src.gc_removal_attempts;
-  dst->enrollment_source = src.enrollment_source;
-  auto rolePolicy = lookupRolePolicy(rolePolicies, src.role_id);
+  dst->role_id = src.header.role_id;
+  dst->user_id = src.user;
+  dst->uuid = src.header.uuid;
+  dst->creation_time_ns = src.header.creation_time_ns;
+  dst->gc_removal_attempts = src.header.gc_removal_attempts;
+  dst->enrollment_source = src.header.enrollment_source;
+  auto rolePolicy = lookupRolePolicy(rolePolicies, src.header.role_id);
   if (!rolePolicy || !*rolePolicy) {
     (void)newArena.free(*blob);
     if (!rolePolicy) {
@@ -220,7 +309,7 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
     return makeUnexpected(makeError(
         std::errc::invalid_argument,
         "pod ",
-        uuidToString(src.uuid),
+        uuidToString(src.header.uuid),
         " has role missing from the new policy"));
   }
   dst->policy = *rolePolicy;
@@ -236,28 +325,32 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   std::uint32_t valueOff = bpfj_var_align_up(sizeof(struct bpfj_pod)) +
       bpfj_var_align_up(sizeof(struct bpfj_var) * count);
   for (std::size_t i = 0; i < count; ++i) {
-    const auto* oldVar = bpfj_var_array_at(&src.var_array, i);
-    auto translated = translatedVar(oldVar, catalog ? catalog->vars : nullptr);
+    const auto& oldVar = src.vars[i];
+    auto translated = translatedVar(
+        oldVar.header.id,
+        oldCatalog ? oldCatalog->vars : nullptr,
+        newCatalog ? newCatalog->vars : nullptr);
     if (!translated) {
       (void)newArena.free(*blob);
       return makeUnexpected(makeError(
           translated.error().code(),
           "pod ",
-          uuidToString(src.uuid),
+          uuidToString(src.header.uuid),
           ": ",
           translated.error().message()));
     }
 
-    const std::uint32_t payloadSize = bpfj_var_payload_size(oldVar);
+    const std::uint32_t payloadSize =
+        static_cast<std::uint32_t>(oldVar.value.size());
     outVars[i] = {
         .id = translated->id,
-        .type = oldVar->type,
-        .size = oldVar->size,
-        .reserved = oldVar->reserved,
+        .type = oldVar.header.type,
+        .size = oldVar.header.size,
+        .reserved = oldVar.header.reserved,
         .name = translated->name,
         .val = static_cast<unsigned char*>(*blob) + valueOff,
     };
-    std::memcpy(outVars[i].val, bpfj_var_value_ptr(oldVar), payloadSize);
+    std::memcpy(outVars[i].val, oldVar.value.data(), payloadSize);
     valueOff += bpfj_var_align_up(payloadSize);
   }
 
@@ -274,17 +367,19 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
 [[nodiscard]] Expected<std::size_t> copyPods(
     const PinConfig& oldCfg,
     const PinConfig& newCfg,
+    const std::vector<SnapshotPod>& snapshots,
     int replacePodsMapFd) noexcept {
-  auto oldTaskMap = pins::openPinnedMap(oldCfg, kTaskMap);
-  if (!oldTaskMap) {
-    return makeUnexpected(oldTaskMap.error());
-  }
-
   auto oldArena = PodArena::open(oldCfg);
   if (!oldArena) {
     return makeUnexpected(oldArena.error());
   }
-  (void)oldArena;
+  auto oldCatalog = readPolicyCatalog(*oldArena);
+  if (!oldCatalog || !*oldCatalog) {
+    return !oldCatalog ? makeUnexpected(oldCatalog.error())
+                       : makeUnexpected(makeError(
+                             std::errc::bad_address,
+                             "the running arena has no policy catalog"));
+  }
   auto newArena = PodArena::open(newCfg);
   if (!newArena) {
     return makeUnexpected(newArena.error());
@@ -308,53 +403,28 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
     return makeUnexpected(rolePolicies.error());
   }
 
-  std::set<std::uintptr_t> seen;
-  auto pids = runningPids();
-  if (!pids) {
-    return makeUnexpected(pids.error());
-  }
-
   std::size_t copied = 0;
-  for (const pid_t pid : *pids) {
-    auto pidFd = openPidFd(pid);
-    if (!pidFd) {
-      continue;
+  for (const auto& pod : snapshots) {
+    struct bpfj_pod* newPod = nullptr;
+    if (pod.header.enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
+      auto translated =
+          translatePod(pod, *newArena, *rolePolicies, *oldCatalog, *newCatalog);
+      if (!translated) {
+        return makeUnexpected(translated.error());
+      }
+      newPod = *translated;
+      newPods.push_back(newPod);
     }
 
-    auto pidData = readPidData(*oldTaskMap, *pidFd, pid);
-    if (!pidData) {
-      continue;
+    const ReplacePodKey key{
+        .oldPod = reinterpret_cast<struct bpfj_pod*>(pod.header.old_pod)};
+    const ReplacePodValue entry{.pod = newPod};
+    if (::bpf_map_update_elem(replacePodsMapFd, &key, &entry, BPF_ANY) != 0) {
+      return makeUnexpected(
+          makeErrnoError("failed to record a carried pod for backfill"));
     }
-
-    const std::uint8_t count =
-        std::min<std::uint8_t>(pidData->num_pods, BPFJ_MAX_POD_PER_PID);
-    for (std::uint8_t i = 0; i < count; ++i) {
-      const auto* pod = pidData->pods[i];
-      if (pod == nullptr ||
-          !seen.insert(reinterpret_cast<std::uintptr_t>(pod)).second) {
-        continue;
-      }
-
-      struct bpfj_pod* newPod = nullptr;
-      if (pod->enrollment_source != BPFJ_ENROLL_BASE_ROLE) {
-        auto translated =
-            translatePod(*pod, *newArena, *rolePolicies, *newCatalog);
-        if (!translated) {
-          return makeUnexpected(translated.error());
-        }
-        newPod = *translated;
-        newPods.push_back(newPod);
-      }
-
-      const ReplacePodKey key{.oldPod = const_cast<struct bpfj_pod*>(pod)};
-      const ReplacePodValue entry{.pod = newPod};
-      if (::bpf_map_update_elem(replacePodsMapFd, &key, &entry, BPF_ANY) != 0) {
-        return makeUnexpected(
-            makeErrnoError("failed to record a carried pod for backfill"));
-      }
-      if (newPod != nullptr) {
-        ++copied;
-      }
+    if (newPod != nullptr) {
+      ++copied;
     }
   }
 
@@ -749,6 +819,68 @@ readPidData(const Fd& taskMap, const Fd& pidFd, pid_t pid) noexcept {
   return static_cast<std::size_t>(value);
 }
 
+/// Snapshot every pod named by every task, threads included. This skeleton is
+/// deliberately bound to the old arena: the iterator copies each pod while
+/// its task-storage reference is live, so userspace never follows an old arena
+/// pointer after the task can release it.
+[[nodiscard]] Expected<std::vector<SnapshotPod>> snapshotPods(
+    const PinConfig& oldCfg) noexcept {
+  auto created = bpfj::libbpf::BpfSkel<replace_bpf>::create();
+  if (!created) {
+    return makeUnexpected(created.error());
+  }
+  auto& skel = *created.value();
+
+  if (auto res = pins::pinSharedMaps(skel, oldCfg.mapDir()); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res =
+          pins::pinMapAt(skel, kOldTaskMap, oldCfg.mapPath(kTaskMap), {});
+      !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res = skel.load(); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res = heap::init(created.value()); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res = skel.attach(); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  bpfj::libbpf::BpfLink link(skel.links().bpfj_replace_snapshot);
+  auto bytes = link.iter();
+  if (!bytes) {
+    return makeUnexpected(bytes.error());
+  }
+
+  auto incompatible =
+      readCounter(skel.maps().bpfj_replace_incompatible, "snapshot layout");
+  if (!incompatible) {
+    return makeUnexpected(incompatible.error());
+  }
+  if (*incompatible != 0) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "snapshot found ",
+        std::to_string(*incompatible),
+        " invalid task-storage or pod record(s)"));
+  }
+  auto failed = readCounter(skel.maps().bpfj_replace_failed, "snapshot write");
+  if (!failed) {
+    return makeUnexpected(failed.error());
+  }
+  if (*failed != 0) {
+    return makeUnexpected(makeError(
+        std::errc::io_error,
+        "snapshot could not emit ",
+        std::to_string(*failed),
+        " pod record(s)"));
+  }
+  return parseSnapshots(*bytes);
+}
+
 [[nodiscard]] Expected<> setReplaceFrozen(
     const PinConfig& cfg,
     bool frozen) noexcept {
@@ -823,6 +955,11 @@ struct BackfillStats {
 [[nodiscard]] Expected<BackfillStats> backfillTasks(
     const PinConfig& oldCfg,
     const PinConfig& newCfg) noexcept {
+  auto snapshots = snapshotPods(oldCfg);
+  if (!snapshots) {
+    return makeUnexpected(snapshots.error());
+  }
+
   auto created = bpfj::libbpf::BpfSkel<replace_bpf>::create();
   if (!created) {
     return makeUnexpected(created.error());
@@ -850,8 +987,8 @@ struct BackfillStats {
     return makeUnexpected(res.error());
   }
 
-  auto pods =
-      copyPods(oldCfg, newCfg, ::bpf_map__fd(skel.maps().bpfj_replace_pods));
+  auto pods = copyPods(
+      oldCfg, newCfg, *snapshots, ::bpf_map__fd(skel.maps().bpfj_replace_pods));
   if (!pods) {
     return makeUnexpected(pods.error());
   }
@@ -1003,7 +1140,7 @@ struct BackfillStats {
   // Destructive, which clears a tree left by a run that died before its swap,
   // and seeds the new base role onto every task before the backfill merges the
   // old membership on top.
-  auto scratchMaps = Jailer::load(newCfg, policy);
+  auto scratchMaps = Jailer::load(newCfg, policy, hasOld);
   if (!scratchMaps) {
     return makeUnexpected(scratchMaps.error());
   }
@@ -1083,23 +1220,32 @@ struct BackfillStats {
     }
     stats.owners += *shmState;
 
-    // Detaches the old programs, with the new ones held by newCfg's pins until
-    // the rename below so no window has no jailer attached. Through unload()
-    // rather than remove_all() for the old tree's keyrings, which the pins do
-    // not own and which it disarms before releasing.
-    if (auto res = Jailer::unload(cfg); !res) {
+    // Exchange the complete trees before touching the old one. A failed
+    // exchange leaves the original path and enforcement intact; after a
+    // successful exchange cfg names the new tree and newCfg names the old.
+    if (auto res = exchangePinTrees(cfg, newCfg); !res) {
+      return makeUnexpected(res.error());
+    }
+    thaw.dismiss();
+
+    if (auto res = setReplaceFrozen(cfg, false); !res) {
+      // The new policy is attached at the active path but remains frozen. Do
+      // not exchange it back after ownership has been copied; leave a
+      // fail-closed tree for a retry to repair.
       return makeUnexpected(res.error());
     }
 
-    thaw.dismiss();
-  }
-
-  // bpffs renames a directory with live pins under it and the objects keep
-  // working, a pin being a name for a reference rather than the reference.
-  fs::rename(newCfg.root(), cfg.root(), ec);
-  if (ec) {
-    return makeUnexpected(
-        makeError(ec, "failed to move ", newCfg.root(), " to ", cfg.root()));
+    // Through unload(), rather than remove_all(), for the old tree's keyrings.
+    if (auto res = Jailer::unload(newCfg); !res) {
+      return makeUnexpected(res.error());
+    }
+  } else {
+    // With no prior tree there is nothing to exchange or preserve.
+    fs::rename(newCfg.root(), cfg.root(), ec);
+    if (ec) {
+      return makeUnexpected(
+          makeError(ec, "failed to move ", newCfg.root(), " to ", cfg.root()));
+    }
   }
 
   return stats;

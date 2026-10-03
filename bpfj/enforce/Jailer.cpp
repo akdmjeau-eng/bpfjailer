@@ -2,6 +2,7 @@
 
 #include "bpfj/enforce/Jailer.h"
 
+#include <bpf/bpf.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -98,7 +99,8 @@ namespace fs = std::filesystem;
 
 Expected<ScratchMapFds> Jailer::load(
     const PinConfig& cfg,
-    const Policy& policy) noexcept {
+    const Policy& policy,
+    bool replacementFrozen) noexcept {
   constexpr std::size_t kMaxCatalogRoles =
       (std::numeric_limits<std::uint32_t>::max() -
        offsetof(struct bpfj_policy_catalog, policies)) /
@@ -173,6 +175,19 @@ Expected<ScratchMapFds> Jailer::load(
 
   if (auto res = publishPolicyCatalog(cfg, policy); !res) {
     return makeUnexpected(res.error());
+  }
+
+  if (replacementFrozen) {
+    const std::uint32_t zero = 0;
+    const std::uint8_t frozen = 1;
+    if (::bpf_map_update_elem(
+            ::bpf_map__fd(skel.maps().bpfj_replace_frozen),
+            &zero,
+            &frozen,
+            BPF_ANY) != 0) {
+      return makeUnexpected(
+          makeErrnoError("failed to freeze the replacement jailer"));
+    }
   }
 
   std::optional<PodArena> baseRoleArena;
