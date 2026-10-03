@@ -138,6 +138,10 @@ int BPF_PROG(
     return lsm_ret;
   }
 
+  if (!bpfj_generation_is_active()) {
+    return 0;
+  }
+
   if (!bpfj_enroll_from_xattr) {
     return 0;
   }

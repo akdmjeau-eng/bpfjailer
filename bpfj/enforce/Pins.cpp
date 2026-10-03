@@ -21,8 +21,9 @@ namespace fs = std::filesystem;
 // The jail membership every BPF object declares: the per-task membership, the
 // arena their pod payloads and policy graph live in, and the shared
 // event/log ring buffers.
-constexpr std::array<std::string_view, 6> kSharedMapNames = {
+constexpr std::array<std::string_view, 7> kSharedMapNames = {
     "bpfj_task_map",
+    "bpfj_generation_control",
     "bpfj_heap_arena",
     "bpfj_replace_frozen",
     "bpfj_active_enrolls",

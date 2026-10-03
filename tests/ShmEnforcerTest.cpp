@@ -502,7 +502,7 @@ TEST(ShmEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   const std::string keptPosix = uniquePosixName();
   const std::string removedPosix = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n"
+      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
       "    shm-sysv-roles:\n      - owner\n"
       "    shm-posix-roles:\n      - owner\n";
   attach(yaml);

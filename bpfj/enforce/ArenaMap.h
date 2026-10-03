@@ -28,6 +28,10 @@ inline constexpr std::uint64_t kWindowSize = kSlotSize * kSlotCount;
 /// Read and validate the fixed mmap address recorded in a pinned arena map.
 [[nodiscard]] Expected<std::uint64_t> pinnedMapExtra(const Fd& fd) noexcept;
 
+/// Return the non-zero generation assigned to one reserved arena slot.
+[[nodiscard]] Expected<std::uint32_t> generationForMapExtra(
+    std::uint64_t extra) noexcept;
+
 /// Set bpfj_heap_arena's map_extra to the existing pin's slot, or pick a new
 /// free slot inside the reserved window if this load is creating the map.
 [[nodiscard]] Expected<> prepareMap(

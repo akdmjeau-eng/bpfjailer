@@ -45,6 +45,10 @@
 // Layout of both shared-memory ownership maps and the POSIX mount classifier.
 #define BPFJ_SHM_OWNER_VERSION 2
 
+// The one control map intentionally shared by the two trees during replace.
+// Mutable enforcement state remains generation-local and is copied instead.
+#define BPFJ_GENERATION_CONTROL_VERSION 1
+
 #if BPFJ_BPF_OWNER_VERSION > 255 || BPFJ_MQ_OWNER_VERSION > 255 || \
     BPFJ_SHM_OWNER_VERSION > 255 || BPFJ_MEMBERSHIP_VERSION > 255
 #error "arena runtime versions are packed into 8-bit fields"
@@ -94,6 +98,11 @@ enum bpfj_event_type {
 struct bpfj_role_id {
   // null terminated. String role id.
   char id[ROLE_ID_LEN];
+};
+
+struct bpfj_generation_control {
+  __u32 version;
+  __u32 active_generation;
 };
 
 enum bpfj_policy_gate {
@@ -304,15 +313,21 @@ struct bpfj_mutation_record {
   struct bpfj_uuid pod;
 };
 
-// An append-only MPSC log during replacement. The vec is fully reserved
-// before RECORDING is published; BPF writers never grow or free its buffer.
+// A bounded MPSC ring during replacement. The vec is fully reserved before
+// RECORDING is published; BPF writers never grow or free its buffer.
 struct bpfj_mutation_journal {
   struct bpfj_lock lock;
   __u32 state;
-  __u32 next;
   __u32 failure;
-  __u32 reserved;
+  __u64 next;
+  __u64 consumed;
   struct bpfj_vec entries;
+};
+
+struct bpfj_replace_cutover_command {
+  __u64 replayed;
+  __u32 generation;
+  __s32 result;
 };
 
 struct bpfj_pid_data {

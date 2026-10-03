@@ -84,13 +84,24 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
   }
 
   if (owned) {
+    BPFJ_MUTATION_TRANSACTION(transaction);
+    const int active = bpfj_mutation_begin(&transaction);
+    if (active <= 0) {
+      return active;
+    }
     const __u64 key = (__u64)msq;
     if (bpf_map_update_elem(&bpfj_mq_sysv_owners, &key, &owner, BPF_NOEXIST) !=
         0) {
       return -ENOMEM;
     }
     bpfj_mutation_mq_owner(
-        BPFJ_MUTATION_MQ_SYSV_OWNER, BPFJ_MUTATION_UPSERT, key, 0, &owner, 1);
+        &transaction,
+        BPFJ_MUTATION_MQ_SYSV_OWNER,
+        BPFJ_MUTATION_UPSERT,
+        key,
+        0,
+        &owner,
+        1);
   }
   return 0;
 }
@@ -98,10 +109,20 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
 SEC("lsm/msg_queue_free_security")
 int BPF_PROG(bpfj_mq_sysv_free, struct kern_ipc_perm* msq) {
   if (msq) {
+    BPFJ_MUTATION_TRANSACTION(transaction);
+    if (bpfj_mutation_begin(&transaction) <= 0) {
+      return 0;
+    }
     const __u64 key = (__u64)msq;
     bpf_map_delete_elem(&bpfj_mq_sysv_owners, &key);
     bpfj_mutation_mq_owner(
-        BPFJ_MUTATION_MQ_SYSV_OWNER, BPFJ_MUTATION_DELETE, key, 0, NULL, 0);
+        &transaction,
+        BPFJ_MUTATION_MQ_SYSV_OWNER,
+        BPFJ_MUTATION_DELETE,
+        key,
+        0,
+        NULL,
+        0);
   }
   return 0;
 }
@@ -182,11 +203,17 @@ int BPF_PROG(bpfj_mq_posix_alloc, struct inode* inode, int lsm_ret) {
   }
 
   const __u64 key = (__u64)inode;
+  BPFJ_MUTATION_TRANSACTION(transaction);
+  const int active = bpfj_mutation_begin(&transaction);
+  if (active <= 0) {
+    return active;
+  }
   if (bpf_map_update_elem(&bpfj_mq_posix_pending, &key, &pending, BPF_ANY) !=
       0) {
     return -ENOMEM;
   }
   bpfj_mutation_mq_owner(
+      &transaction,
       BPFJ_MUTATION_MQ_POSIX_PENDING,
       BPFJ_MUTATION_UPSERT,
       key,
@@ -244,12 +271,19 @@ int BPF_PROG(bpfj_mq_posix_open, struct file* file, int lsm_ret) {
     return bpfj_mq_deny("POSIX");
   }
 
+  BPFJ_MUTATION_TRANSACTION(transaction);
+  const int active = bpfj_mutation_begin(&transaction);
+  if (active <= 0) {
+    return active;
+  }
+
   if (pending->owned &&
       bpf_map_update_elem(
           &bpfj_mq_posix_owners, &key, &pending->owner, BPF_ANY) != 0) {
     return -ENOMEM;
   }
   bpfj_mutation_mq_owner(
+      &transaction,
       BPFJ_MUTATION_MQ_POSIX_OWNER,
       BPFJ_MUTATION_UPSERT,
       key.dev,
@@ -258,6 +292,7 @@ int BPF_PROG(bpfj_mq_posix_open, struct file* file, int lsm_ret) {
       pending->owned);
   bpf_map_delete_elem(&bpfj_mq_posix_pending, &pending_key);
   bpfj_mutation_mq_owner(
+      &transaction,
       BPFJ_MUTATION_MQ_POSIX_PENDING,
       BPFJ_MUTATION_DELETE,
       pending_key,
@@ -275,17 +310,31 @@ int BPF_PROG(bpfj_mq_posix_receive_fd, struct file* file, int lsm_ret) {
 SEC("lsm/inode_free_security")
 int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
   const __u64 pending_key = (__u64)inode;
-  bpf_map_delete_elem(&bpfj_mq_posix_pending, &pending_key);
-  bpfj_mutation_mq_owner(
-      BPFJ_MUTATION_MQ_POSIX_PENDING,
-      BPFJ_MUTATION_DELETE,
-      pending_key,
-      0,
-      NULL,
-      0);
+  const bool pending =
+      bpf_map_lookup_elem(&bpfj_mq_posix_pending, &pending_key) != NULL;
+  const bool mqueue = bpfj_is_mqueue_inode(inode);
+  if (!pending && !mqueue) {
+    return 0;
+  }
+
+  BPFJ_MUTATION_TRANSACTION(transaction);
+  if (bpfj_mutation_begin(&transaction) <= 0) {
+    return 0;
+  }
+  if (pending) {
+    bpf_map_delete_elem(&bpfj_mq_posix_pending, &pending_key);
+    bpfj_mutation_mq_owner(
+        &transaction,
+        BPFJ_MUTATION_MQ_POSIX_PENDING,
+        BPFJ_MUTATION_DELETE,
+        pending_key,
+        0,
+        NULL,
+        0);
+  }
 
   struct super_block* sb = inode ? BPF_CORE_READ(inode, i_sb) : NULL;
-  if (sb && BPF_CORE_READ(sb, s_magic) == BPFJ_MQUEUE_MAGIC) {
+  if (mqueue && sb) {
     struct bpfj_posix_mq_key key = {
         .dev = BPF_CORE_READ(sb, s_dev),
         .ino = BPF_CORE_READ(inode, i_ino),
@@ -293,6 +342,7 @@ int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
     if (key.ino != 0) {
       bpf_map_delete_elem(&bpfj_mq_posix_owners, &key);
       bpfj_mutation_mq_owner(
+          &transaction,
           BPFJ_MUTATION_MQ_POSIX_OWNER,
           BPFJ_MUTATION_DELETE,
           key.dev,

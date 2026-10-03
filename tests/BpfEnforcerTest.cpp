@@ -34,6 +34,7 @@ using bpfjailer::test::enroll;
 using bpfjailer::test::linkPinned;
 using bpfjailer::test::loadJailer;
 using bpfjailer::test::mapPinned;
+using bpfjailer::test::pinnedMapIsEmpty;
 using bpfjailer::test::policyOf;
 using bpfjailer::test::testPins;
 using bpfjailer::test::waitForMutationJournal;
@@ -235,6 +236,30 @@ TEST(BpfEnforcer, ADefaultRoleMayNotCallBpf) {
   enroll("svc", actor.pid());
 
   ASSERT_EQ(actor.run(), EPERM);
+}
+
+TEST(BpfEnforcer, APassiveGenerationDoesNotEnforceOrClaimObjects) {
+  attach("roles:\n  denied:\n");
+
+  Child actor(mapCreateErrno);
+  enroll("denied", actor.pid());
+
+  auto control = pins::openPinnedMap(testPins(), "bpfj_generation_control");
+  ASSERT(control);
+  const std::uint32_t slot = 0;
+  struct bpfj_generation_control generation{};
+  ASSERT_EQ(::bpf_map_lookup_elem(control->get(), &slot, &generation), 0);
+  const std::uint32_t active = generation.active_generation;
+  generation.active_generation = active == 1 ? 2 : 1;
+  ASSERT_EQ(
+      ::bpf_map_update_elem(control->get(), &slot, &generation, BPF_EXIST), 0);
+
+  ASSERT_EQ(actor.run(), 0);
+
+  generation.active_generation = active;
+  ASSERT_EQ(
+      ::bpf_map_update_elem(control->get(), &slot, &generation, BPF_EXIST), 0);
+  ASSERT(pinnedMapIsEmpty("bpfj_bpf_map_owners"));
 }
 
 TEST(BpfEnforcer, ABpfPodRoleMayCallBpf) {
@@ -695,12 +720,12 @@ TEST(BpfEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   }
   replacing.join();
 
+  ASSERT_EQ(replaceStatus, 0);
   ASSERT(recording);
   ASSERT(keptFd >= 0);
   ASSERT(removedFd >= 0);
   ASSERT(keptId > 0);
   ASSERT(removedId > 0);
-  ASSERT_EQ(replaceStatus, 0);
   ASSERT_EQ(ownerOf(keptId), std::string("owner"));
   ASSERT_EQ(ownerOf(removedId), std::string());
   ::close(keptFd);

@@ -207,6 +207,14 @@ Expected<std::uint64_t> pinnedMapExtra(const Fd& fd) noexcept {
   return validateMapExtra(info.map_extra);
 }
 
+Expected<std::uint32_t> generationForMapExtra(std::uint64_t extra) noexcept {
+  auto valid = validateMapExtra(extra);
+  if (!valid) {
+    return makeUnexpected(valid.error());
+  }
+  return static_cast<std::uint32_t>(slotIndex(*valid) + 1);
+}
+
 Expected<> prepareMap(
     bpfj::libbpf::BpfSkelBase& skel,
     const fs::path& mapDir) noexcept {

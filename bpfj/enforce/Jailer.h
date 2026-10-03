@@ -28,7 +28,8 @@ class Jailer {
   [[nodiscard]] static Expected<ScratchMapFds> load(
       const PinConfig& cfg,
       const Policy& policy,
-      bool replacementFrozen = false) noexcept;
+      bool replacementFrozen = false,
+      const Fd* generationControl = nullptr) noexcept;
 
   /// @brief Remove the pin tree, detaching the jailer and every enforcer
   /// under `cfg`, the tree being what holds them attached. Succeeds when

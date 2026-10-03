@@ -399,7 +399,7 @@ TEST(MqEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   const std::string keptPosix = uniquePosixName();
   const std::string removedPosix = uniquePosixName();
   const std::string yaml =
-      "roles:\n  owner:\n    any: true\n  client:\n"
+      "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
       "    mq-sysv-roles:\n      - owner\n"
       "    mq-posix-roles:\n      - owner\n";
   attach(yaml);

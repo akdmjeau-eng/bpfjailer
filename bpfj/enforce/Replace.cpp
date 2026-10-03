@@ -54,6 +54,7 @@ namespace fs = std::filesystem;
 
 constexpr std::string_view kTaskMap = "bpfj_task_map";
 constexpr std::string_view kOldTaskMap = "bpfj_old_task_map";
+constexpr std::string_view kGenerationControl = "bpfj_generation_control";
 constexpr std::string_view kReplaceFrozenMap = "bpfj_replace_frozen";
 constexpr std::string_view kActiveEnrollsMap = "bpfj_active_enrolls";
 constexpr std::string_view kMapOwners = "bpfj_bpf_map_owners";
@@ -121,6 +122,39 @@ constexpr std::string_view kNewSuffix = "-new";
   }
   return makeUnexpected(
       makeErrnoError("failed to lock bpffs for jailer replacement"));
+}
+
+[[nodiscard]] Expected<std::uint32_t> treeGeneration(
+    const PinConfig& cfg) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  const std::uint32_t generation = arena->ctrl()->generation;
+  if (generation == 0) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer predates generation-controlled replacement; "
+        "detach and attach to upgrade"));
+  }
+  return generation;
+}
+
+[[nodiscard]] Expected<struct bpfj_generation_control> readGenerationControl(
+    const Fd& fd) noexcept {
+  const std::uint32_t zero = 0;
+  struct bpfj_generation_control control{};
+  if (::bpf_map_lookup_elem(fd.get(), &zero, &control) != 0) {
+    return makeUnexpected(
+        makeErrnoError("failed to read the active jailer generation"));
+  }
+  if (control.version != BPFJ_GENERATION_CONTROL_VERSION ||
+      control.active_generation == 0) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer has an incompatible generation control"));
+  }
+  return control;
 }
 
 struct ReplacePodValue {
@@ -571,7 +605,7 @@ template <typename T>
 struct MutationJournal {
   PodArena arena;
   struct bpfj_mutation_journal* journal = nullptr;
-  std::uint32_t replayed = 0;
+  std::uint64_t replayed = 0;
 };
 
 [[nodiscard]] Expected<> lockJournal(
@@ -596,56 +630,27 @@ struct MutationJournal {
   auto* ctrl = arena->ctrl();
   auto* journal =
       static_cast<struct bpfj_mutation_journal*>(ctrl->mutation_journal);
-  if (journal != nullptr) {
-    std::optional<lock::Guard> guard;
-    if (auto res = lockJournal(*journal, guard); !res) {
-      return makeUnexpected(res.error());
-    }
-    journal->state = BPFJ_MUTATION_JOURNAL_CLOSING;
-    if (journal->entries.capacity != BPFJ_MUTATION_JOURNAL_CAPACITY ||
-        journal->entries.elem_size != sizeof(struct bpfj_mutation_record) ||
-        journal->entries.buf == nullptr) {
-      return makeUnexpected(makeError(
-          std::errc::not_supported,
-          "the running arena has an incompatible ownership journal"));
-    }
-  } else {
-    auto journalMem = arena->alloc(sizeof(struct bpfj_mutation_journal));
-    if (!journalMem) {
-      return makeUnexpected(journalMem.error());
-    }
-    journal = static_cast<struct bpfj_mutation_journal*>(*journalMem);
-
-    constexpr std::uint32_t kRecordsSize =
-        BPFJ_MUTATION_JOURNAL_CAPACITY * sizeof(struct bpfj_mutation_record);
-    auto records = arena->alloc(kRecordsSize);
-    if (!records) {
-      (void)arena->free(journal);
-      return makeUnexpected(records.error());
-    }
-    lock::init(journal->lock);
-    journal->state = BPFJ_MUTATION_JOURNAL_OFF;
-    journal->next = 0;
-    journal->failure = BPFJ_MUTATION_JOURNAL_OK;
-    journal->reserved = 0;
-    journal->entries.buf = *records;
-    journal->entries.elem_size = sizeof(struct bpfj_mutation_record);
-    journal->entries.size = 0;
-    journal->entries.capacity = BPFJ_MUTATION_JOURNAL_CAPACITY;
-    journal->entries._pad = 0;
-    ctrl->mutation_journal = journal;
+  if (journal == nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running jailer lacks a persistent ownership journal; detach and "
+        "attach to upgrade"));
   }
 
   std::optional<lock::Guard> guard;
   if (auto res = lockJournal(*journal, guard); !res) {
     return makeUnexpected(res.error());
   }
-  std::memset(
-      journal->entries.buf,
-      0,
-      journal->entries.capacity * sizeof(struct bpfj_mutation_record));
+  if (journal->entries.capacity != BPFJ_MUTATION_JOURNAL_CAPACITY ||
+      journal->entries.elem_size != sizeof(struct bpfj_mutation_record) ||
+      journal->entries.buf == nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::not_supported,
+        "the running arena has an incompatible ownership journal"));
+  }
   journal->entries.size = 0;
   journal->next = 0;
+  journal->consumed = 0;
   journal->failure = BPFJ_MUTATION_JOURNAL_OK;
   journal->state = BPFJ_MUTATION_JOURNAL_RECORDING;
   return MutationJournal{.arena = std::move(*arena), .journal = journal};
@@ -660,15 +665,6 @@ void disableMutationJournal(MutationJournal& owner) noexcept {
   if (guard.owns()) {
     owner.journal->state = BPFJ_MUTATION_JOURNAL_OFF;
   }
-}
-
-[[nodiscard]] Expected<> closeMutationJournal(MutationJournal& owner) noexcept {
-  std::optional<lock::Guard> guard;
-  if (auto res = lockJournal(*owner.journal, guard); !res) {
-    return res;
-  }
-  owner.journal->state = BPFJ_MUTATION_JOURNAL_CLOSING;
-  return unit;
 }
 
 struct MutationReplayMaps {
@@ -829,31 +825,32 @@ struct MutationReplayMaps {
   return unit;
 }
 
-[[nodiscard]] Expected<std::uint32_t> journalEnd(
-    MutationJournal& owner) noexcept {
-  std::optional<lock::Guard> guard;
-  if (auto res = lockJournal(*owner.journal, guard); !res) {
-    return makeUnexpected(res.error());
-  }
-  if (owner.journal->failure == BPFJ_MUTATION_JOURNAL_FULL) {
+[[nodiscard]] Expected<std::uint64_t> journalEndLocked(
+    const MutationJournal& owner) noexcept {
+  const auto failure =
+      __atomic_load_n(&owner.journal->failure, __ATOMIC_ACQUIRE);
+  if (failure == BPFJ_MUTATION_JOURNAL_FULL) {
     return makeUnexpected(makeError(
         std::errc::no_buffer_space,
         "ownership mutation journal exhausted its capacity during "
         "replacement"));
   }
-  if (owner.journal->failure == BPFJ_MUTATION_JOURNAL_CONTENDED) {
+  if (failure == BPFJ_MUTATION_JOURNAL_CONTENDED) {
     return makeUnexpected(makeError(
         std::errc::device_or_resource_busy,
         "an ownership mutation could not acquire the replacement journal "
         "lock"));
   }
-  if (owner.journal->failure != BPFJ_MUTATION_JOURNAL_OK) {
+  if (failure != BPFJ_MUTATION_JOURNAL_OK) {
     return makeUnexpected(makeError(
         std::errc::state_not_recoverable,
         "ownership mutation journal has an unknown failure state"));
   }
-  const std::uint32_t end = owner.journal->next;
-  if (end > owner.journal->entries.capacity) {
+  const std::uint64_t end =
+      __atomic_load_n(&owner.journal->next, __ATOMIC_ACQUIRE);
+  const std::uint64_t consumed =
+      __atomic_load_n(&owner.journal->consumed, __ATOMIC_ACQUIRE);
+  if (end - consumed > owner.journal->entries.capacity) {
     return makeUnexpected(makeError(
         std::errc::no_buffer_space,
         "ownership mutation journal exceeded its capacity"));
@@ -861,15 +858,25 @@ struct MutationReplayMaps {
   return end;
 }
 
+[[nodiscard]] Expected<std::uint64_t> journalEnd(
+    MutationJournal& owner) noexcept {
+  return journalEndLocked(owner);
+}
+
+[[nodiscard]] Expected<> publishJournalReplay(MutationJournal& owner) noexcept {
+  __atomic_store_n(&owner.journal->consumed, owner.replayed, __ATOMIC_RELEASE);
+  return unit;
+}
+
 [[nodiscard]] Expected<std::size_t> replayMutationJournal(
     MutationJournal& owner,
     const MutationReplayMaps& maps,
-    std::uint32_t end) noexcept {
+    std::uint64_t end) noexcept {
   auto* records =
       static_cast<struct bpfj_mutation_record*>(owner.journal->entries.buf);
   std::size_t applied = 0;
   while (owner.replayed < end) {
-    auto& record = records[owner.replayed];
+    auto& record = records[owner.replayed % owner.journal->entries.capacity];
     if (record.committed == 0) {
       return makeUnexpected(makeError(
           std::errc::state_not_recoverable,
@@ -880,6 +887,14 @@ struct MutationReplayMaps {
     }
     ++owner.replayed;
     ++applied;
+    if ((applied & 0xffU) == 0) {
+      if (auto res = publishJournalReplay(owner); !res) {
+        return makeUnexpected(res.error());
+      }
+    }
+  }
+  if (auto res = publishJournalReplay(owner); !res) {
+    return makeUnexpected(res.error());
   }
   return applied;
 }
@@ -1291,6 +1306,77 @@ struct MutationReplayMaps {
   return unit;
 }
 
+[[nodiscard]] Expected<> clearMutationJournal(const PinConfig& cfg) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+  auto* journal = static_cast<struct bpfj_mutation_journal*>(
+      arena->ctrl()->mutation_journal);
+  if (journal) {
+    std::optional<lock::Guard> guard;
+    if (auto res = lockJournal(*journal, guard); !res) {
+      return makeUnexpected(res.error());
+    }
+    journal->state = BPFJ_MUTATION_JOURNAL_OFF;
+  }
+  return unit;
+}
+
+[[nodiscard]] Expected<> recoverInterruptedCutover(
+    const PinConfig& cfg,
+    const PinConfig& newCfg) noexcept {
+  std::error_code ec;
+  if (!fs::exists(fs::path(cfg.root()), ec) ||
+      !fs::exists(fs::path(newCfg.root()), ec)) {
+    return unit;
+  }
+
+  auto control = pins::openPinnedMap(cfg, kGenerationControl);
+  if (!control) {
+    // A pre-generation tree cannot have reached this implementation's atomic
+    // exchange. Leave normal compatibility handling to buildAndSwap().
+    return unit;
+  }
+  auto active = readGenerationControl(*control);
+  if (!active) {
+    return makeUnexpected(active.error());
+  }
+  auto canonicalGeneration = treeGeneration(cfg);
+  if (!canonicalGeneration) {
+    return makeUnexpected(canonicalGeneration.error());
+  }
+
+  if (active->active_generation != *canonicalGeneration) {
+    auto peerGeneration = treeGeneration(newCfg);
+    if (!peerGeneration) {
+      return makeUnexpected(peerGeneration.error());
+    }
+    if (active->active_generation != *peerGeneration) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "neither replacement pin tree contains the enforcing generation"));
+    }
+    if (auto res = exchangePinTrees(cfg, newCfg); !res) {
+      return makeUnexpected(res.error());
+    }
+  }
+
+  // The enforcing tree is canonical again. A pre-activation crash can leave
+  // its enrollment gate frozen and journal recording; neither state is useful
+  // once the passive peer is discarded.
+  if (auto res = clearMutationJournal(cfg); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res = setReplaceFrozen(cfg, false); !res) {
+    return makeUnexpected(res.error());
+  }
+  if (auto res = Jailer::unload(newCfg); !res) {
+    return makeUnexpected(res.error());
+  }
+  return unit;
+}
+
 [[nodiscard]] bool pidIsAlive(std::uint32_t pid) noexcept {
   return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH;
 }
@@ -1449,9 +1535,34 @@ struct BackfillStats {
   std::error_code ec;
   const bool hasOld = fs::exists(fs::path(cfg.root()), ec);
   std::uint32_t bpfOwnerVersion = BPFJ_BPF_OWNER_VERSION;
+  std::optional<Fd> generationControl;
+  std::uint32_t oldGeneration = 0;
 
   // Before anything is built, so the only cost of refusing is the parse.
   if (hasOld && hasVersionedOwnerState(cfg)) {
+    auto control = pins::openPinnedMap(cfg, kGenerationControl);
+    if (!control) {
+      return makeUnexpected(makeError(
+          std::errc::not_supported,
+          "the running jailer predates generation-controlled replacement; "
+          "detach and attach to upgrade"));
+    }
+    generationControl.emplace(std::move(*control));
+    auto generation = treeGeneration(cfg);
+    if (!generation) {
+      return makeUnexpected(generation.error());
+    }
+    oldGeneration = *generation;
+    auto active = readGenerationControl(*generationControl);
+    if (!active) {
+      return makeUnexpected(active.error());
+    }
+    if (active->active_generation != oldGeneration) {
+      return makeUnexpected(makeError(
+          std::errc::state_not_recoverable,
+          "the active pin tree is not the enforcing jailer generation"));
+    }
+
     auto versions = readRuntimeVersions(cfg);
     if (!versions) {
       return makeUnexpected(versions.error());
@@ -1527,13 +1638,6 @@ struct BackfillStats {
   }
 
   std::optional<MutationJournal> mutationJournal;
-  if (hasOld) {
-    auto started = startMutationJournal(cfg);
-    if (!started) {
-      return makeUnexpected(started.error());
-    }
-    mutationJournal.emplace(std::move(*started));
-  }
   auto stopJournal = makeGuard([&] {
     if (mutationJournal) {
       disableMutationJournal(*mutationJournal);
@@ -1543,7 +1647,11 @@ struct BackfillStats {
   // Destructive, which clears a tree left by a run that died before its swap,
   // and seeds the new base role onto every task before the backfill merges the
   // old membership on top.
-  auto scratchMaps = Jailer::load(newCfg, policy, hasOld);
+  auto scratchMaps = Jailer::load(
+      newCfg,
+      policy,
+      hasOld,
+      generationControl ? &*generationControl : nullptr);
   if (!scratchMaps) {
     return makeUnexpected(scratchMaps.error());
   }
@@ -1593,6 +1701,15 @@ struct BackfillStats {
   ReplaceStats stats;
 
   if (hasOld) {
+    // Earlier mutations are already represented by the source maps. Record
+    // only the membership backfill and ownership snapshot leading to cutover,
+    // rather than filling the bounded ring while new programs are loaded.
+    auto started = startMutationJournal(cfg);
+    if (!started) {
+      return makeUnexpected(started.error());
+    }
+    mutationJournal.emplace(std::move(*started));
+
     // Fork and exec enrollment are mirrored by both attached trees; what can
     // still diverge here is a userspace enrollment through the old pins.
     if (auto res = setReplaceFrozen(cfg, true); !res) {
@@ -1648,25 +1765,99 @@ struct BackfillStats {
         !replayed) {
       return makeUnexpected(replayed.error());
     }
-    if (auto res = closeMutationJournal(*mutationJournal); !res) {
-      return makeUnexpected(res.error());
-    }
-    auto finalEnd = journalEnd(*mutationJournal);
-    if (!finalEnd) {
-      return makeUnexpected(finalEnd.error());
-    }
-    if (auto replayed =
-            replayMutationJournal(*mutationJournal, *replayMaps, *finalEnd);
-        !replayed) {
-      return makeUnexpected(replayed.error());
+
+    auto newGeneration = treeGeneration(newCfg);
+    if (!newGeneration) {
+      return makeUnexpected(newGeneration.error());
     }
 
-    // Exchange the complete trees before touching the old one. A failed
-    // exchange leaves the original path and enforcement intact; after a
-    // successful exchange cfg names the new tree and newCfg names the old.
+    auto cutoverCreated = bpfj::libbpf::BpfSkel<replace_bpf>::create();
+    if (!cutoverCreated) {
+      return makeUnexpected(cutoverCreated.error());
+    }
+    auto& cutoverSkel = *cutoverCreated.value();
+    if (auto res = pins::pinSharedMaps(cutoverSkel, cfg.mapDir()); !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res =
+            pins::pinMapAt(cutoverSkel, kOldTaskMap, cfg.mapPath(kTaskMap), {});
+        !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = cutoverSkel.load(); !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = heap::init(cutoverCreated.value()); !res) {
+      return makeUnexpected(res.error());
+    }
+    if (auto res = cutoverSkel.attach(); !res) {
+      return makeUnexpected(res.error());
+    }
+    bpfj::libbpf::BpfLink cutoverLink(cutoverSkel.links().bpfj_replace_cutover);
+    const int cutoverCommandFd =
+        ::bpf_map__fd(cutoverSkel.maps().bpfj_replace_cutover_command);
+
+    // Keep the old generation authoritative across the exchange. Both trees
+    // are frozen, and every FD used for replay remains valid after its pin
+    // moves, so this only changes which complete tree clients will find.
     if (auto res = exchangePinTrees(cfg, newCfg); !res) {
       return makeUnexpected(res.error());
     }
+    bool exchanged = true;
+    auto restorePins = makeGuard([&] {
+      if (exchanged) {
+        (void)exchangePinTrees(cfg, newCfg);
+      }
+    });
+
+    // Replay without holding the lock, then ask the transient iterator to
+    // commit only if the tail is still empty. It takes the journal lock and
+    // switches the generation entirely in BPF context, so no userspace holder
+    // can be descheduled while ownership mutations wait behind it.
+    while (true) {
+      auto finalEnd = journalEnd(*mutationJournal);
+      if (!finalEnd) {
+        return makeUnexpected(finalEnd.error());
+      }
+      if (auto replayed =
+              replayMutationJournal(*mutationJournal, *replayMaps, *finalEnd);
+          !replayed) {
+        return makeUnexpected(replayed.error());
+      }
+
+      const std::uint32_t zero = 0;
+      struct bpfj_replace_cutover_command command = {
+          .replayed = mutationJournal->replayed,
+          .generation = *newGeneration,
+          .result = -EINPROGRESS,
+      };
+      if (::bpf_map_update_elem(cutoverCommandFd, &zero, &command, BPF_ANY) !=
+          0) {
+        return makeUnexpected(
+            makeErrnoError("failed to prepare the replacement cutover"));
+      }
+      if (auto res = cutoverLink.iter(); !res) {
+        return makeUnexpected(res.error());
+      }
+      if (::bpf_map_lookup_elem(cutoverCommandFd, &zero, &command) != 0) {
+        return makeUnexpected(
+            makeErrnoError("failed to read the replacement cutover result"));
+      }
+      if (command.result == 1) {
+        break;
+      }
+      if (command.result == -EBUSY) {
+        continue;
+      }
+      if (command.result < 0) {
+        return makeUnexpected(makeError(
+            std::error_code(-command.result, std::generic_category()),
+            "the replacement cutover iterator failed"));
+      }
+    }
+
+    exchanged = false;
+    restorePins.dismiss();
     disableMutationJournal(*mutationJournal);
     stopJournal.dismiss();
     thaw.dismiss();
@@ -1706,6 +1897,10 @@ Expected<ReplaceStats> replaceJailer(
 
   PinConfig newCfg = cfg;
   newCfg.pinDir = cfg.pinDir + std::string(kNewSuffix);
+
+  if (auto recovered = recoverInterruptedCutover(cfg, newCfg); !recovered) {
+    return makeUnexpected(recovered.error());
+  }
 
   auto res = buildAndSwap(cfg, newCfg, policy);
   if (!res) {

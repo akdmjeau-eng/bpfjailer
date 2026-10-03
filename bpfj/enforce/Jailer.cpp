@@ -12,6 +12,7 @@
 
 // Ahead of the skeleton, in its own block so the formatter keeps it there: the
 // generated rodata struct only forward-declares `struct bpfj_uuid`.
+#include "bpfj/enforce/ArenaMap.h"
 #include "bpfj/enforce/Pods.h"
 #include "bpfj/enforce/RoleId.h"
 
@@ -32,6 +33,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
+constexpr std::string_view kGenerationControl = "bpfj_generation_control";
+
 /// @brief The encoded base role id, validated in userspace before load so BPF
 /// can copy it straight into a prebuilt or fallback-allocated base-role pod.
 [[nodiscard]] Expected<struct bpfj_role_id> makeBaseRoleId(
@@ -42,6 +45,48 @@ namespace fs = std::filesystem;
         roleId.error().code(), "base-role: ", roleId.error().message()));
   }
   return *roleId;
+}
+
+[[nodiscard]] Expected<> initializeMutationJournal(
+    const PinConfig& cfg) noexcept {
+  auto arena = PodArena::open(cfg);
+  if (!arena) {
+    return makeUnexpected(arena.error());
+  }
+
+  auto* ctrl = arena->ctrl();
+  if (ctrl->mutation_journal != nullptr) {
+    return makeUnexpected(makeError(
+        std::errc::file_exists,
+        "the arena ownership journal is already initialized"));
+  }
+
+  auto journalMem = arena->alloc(sizeof(struct bpfj_mutation_journal));
+  if (!journalMem) {
+    return makeUnexpected(journalMem.error());
+  }
+  auto* journal = static_cast<struct bpfj_mutation_journal*>(*journalMem);
+
+  constexpr std::uint32_t kRecordsSize =
+      BPFJ_MUTATION_JOURNAL_CAPACITY * sizeof(struct bpfj_mutation_record);
+  auto records = arena->alloc(kRecordsSize);
+  if (!records) {
+    (void)arena->free(journal);
+    return makeUnexpected(records.error());
+  }
+
+  lock::init(journal->lock);
+  journal->state = BPFJ_MUTATION_JOURNAL_OFF;
+  journal->failure = BPFJ_MUTATION_JOURNAL_OK;
+  journal->next = 0;
+  journal->consumed = 0;
+  journal->entries.buf = *records;
+  journal->entries.elem_size = sizeof(struct bpfj_mutation_record);
+  journal->entries.size = 0;
+  journal->entries.capacity = BPFJ_MUTATION_JOURNAL_CAPACITY;
+  journal->entries._pad = 0;
+  ctrl->mutation_journal = journal;
+  return unit;
 }
 
 /// @brief Build the one pod the base-role seeding walk names on every task.
@@ -100,7 +145,8 @@ namespace fs = std::filesystem;
 Expected<ScratchMapFds> Jailer::load(
     const PinConfig& cfg,
     const Policy& policy,
-    bool replacementFrozen) noexcept {
+    bool replacementFrozen,
+    const Fd* generationControl) noexcept {
   // Before makeTree rather than inside it: the links going is what detaches
   // whatever was running, so removing only the map pins would leave those
   // programs attached to unreachable maps.
@@ -110,6 +156,16 @@ Expected<ScratchMapFds> Jailer::load(
 
   if (auto res = pins::makeTree(cfg); !res) {
     return makeUnexpected(res.error());
+  }
+
+  // The selector is the only map shared across replacement generations. All
+  // policy, membership and ownership state remains in the generation's tree.
+  if (generationControl != nullptr &&
+      ::bpf_obj_pin(
+          generationControl->get(), cfg.mapPath(kGenerationControl).c_str()) !=
+          0) {
+    return makeUnexpected(
+        makeErrnoError("failed to pin the replacement generation control"));
   }
 
   using Skel = bpfj::libbpf::BpfSkel<jailer_bpf>;
@@ -150,6 +206,44 @@ Expected<ScratchMapFds> Jailer::load(
 
   if (auto res = heap::init(created.value()); !res) {
     return makeUnexpected(res.error());
+  }
+
+  auto generation = arena::generationForMapExtra(
+      reinterpret_cast<std::uintptr_t>(skel.bss().bpfj_heap_ctrl));
+  if (!generation) {
+    return makeUnexpected(generation.error());
+  }
+  skel.bss().bpfj_heap_ctrl->generation = *generation;
+
+  if (auto res = initializeMutationJournal(cfg); !res) {
+    return makeUnexpected(res.error());
+  }
+
+  const std::uint32_t generationSlot = 0;
+  struct bpfj_generation_control control{};
+  const int generationFd = ::bpf_map__fd(skel.maps().bpfj_generation_control);
+  if (generationControl != nullptr) {
+    if (::bpf_map_lookup_elem(generationFd, &generationSlot, &control) != 0) {
+      return makeUnexpected(
+          makeErrnoError("failed to read the active jailer generation"));
+    }
+    if (control.version != BPFJ_GENERATION_CONTROL_VERSION ||
+        control.active_generation == 0 ||
+        control.active_generation == *generation) {
+      return makeUnexpected(makeError(
+          std::errc::not_supported,
+          "the running jailer has an incompatible generation control"));
+    }
+  } else {
+    control = {
+        .version = BPFJ_GENERATION_CONTROL_VERSION,
+        .active_generation = *generation,
+    };
+    if (::bpf_map_update_elem(
+            generationFd, &generationSlot, &control, BPF_ANY) != 0) {
+      return makeUnexpected(
+          makeErrnoError("failed to activate the initial jailer generation"));
+    }
   }
 
   auto policyArena = PodArena::open(cfg);

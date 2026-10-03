@@ -24,6 +24,33 @@ struct {
   __type(value, struct bpfj_pid_data);
 } bpfj_task_map SEC(".maps");
 
+// A replace gives both trees this one control map. Their task, policy and
+// ownership maps remain separate; the active generation is only the atomic
+// authority switch after those maps have been populated.
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, struct bpfj_generation_control);
+} bpfj_generation_control SEC(".maps");
+
+static __always_inline bool bpfj_generation_is_active(void) {
+  if (!bpfj_heap_enabled) {
+    return false;
+  }
+  bpfj_heap_use_arena();
+  struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
+  if (!ctrl || ctrl->generation == 0) {
+    return false;
+  }
+
+  const __u32 zero = 0;
+  const struct bpfj_generation_control* control =
+      bpf_map_lookup_elem(&bpfj_generation_control, &zero);
+  return control && control->version == BPFJ_GENERATION_CONTROL_VERSION &&
+      control->active_generation == ctrl->generation;
+}
+
 // A userspace-only flag raised while `replace` is copying membership out of
 // this tree, so bpfjctl enroll, wrap and bpfjsrv refuse to add pods the new
 // tree would miss. A one-slot array rather than rodata because the tree being
@@ -171,7 +198,7 @@ static __always_inline bool bpfj_is_override(
 /// a trusted pointer, the current task or a hook argument.
 static __always_inline struct bpfj_pid_data* bpfj_get_task_pid_data(
     struct task_struct* task) {
-  if (!task) {
+  if (!task || !bpfj_generation_is_active()) {
     return NULL;
   }
 

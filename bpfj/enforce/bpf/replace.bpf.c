@@ -14,6 +14,7 @@
 
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/types.h"
+#include "bpfj/lib/bpf/lock.h"
 #include "bpfj/lib/bpf/types_heap.h"
 
 // The task map of the jailer being replaced, a second definition of maps.h's
@@ -121,6 +122,73 @@ struct {
   __type(key, __u32);
   __type(value, struct bpfj_replace_snapshot_scratch);
 } bpfj_replace_snapshot_scratch SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, struct bpfj_replace_cutover_command);
+} bpfj_replace_cutover_command SEC(".maps");
+
+// Invoked once at EOF. The old journal lock makes an empty tail and the
+// generation switch one kernel-side linearization point, without exposing a
+// userspace lock holder to BPF's bounded acquisition path.
+SEC("iter.s/task")
+int bpfj_replace_cutover(struct bpf_iter__task* ctx) {
+  if (ctx->task) {
+    return 0;
+  }
+
+  const __u32 zero = 0;
+  struct bpfj_replace_cutover_command* command =
+      bpf_map_lookup_elem(&bpfj_replace_cutover_command, &zero);
+  if (!command) {
+    return 0;
+  }
+  command->result = -EINVAL;
+
+  bpfj_heap_use_arena();
+  struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
+  struct bpfj_mutation_journal __arena* journal =
+      ctrl ? ctrl->mutation_journal : NULL;
+  if (!journal) {
+    return 0;
+  }
+
+  unsigned long flags;
+  if (bpfj_lock_acquire(&journal->lock, &flags)) {
+    command->result = -EBUSY;
+    return 0;
+  }
+
+  if (journal->state != BPFJ_MUTATION_JOURNAL_RECORDING) {
+    command->result = -EINVAL;
+  } else if (journal->failure == BPFJ_MUTATION_JOURNAL_FULL) {
+    command->result = -ENOBUFS;
+  } else if (journal->failure == BPFJ_MUTATION_JOURNAL_CONTENDED) {
+    command->result = -EDEADLK;
+  } else if (journal->failure != BPFJ_MUTATION_JOURNAL_OK) {
+    command->result = -EIO;
+  } else if (journal->next != command->replayed) {
+    command->result = 0;
+  } else {
+    struct bpfj_generation_control* generation =
+        bpf_map_lookup_elem(&bpfj_generation_control, &zero);
+    if (!generation || generation->version != BPFJ_GENERATION_CONTROL_VERSION ||
+        command->generation == 0) {
+      command->result = -EINVAL;
+    } else {
+      // Publish the new authority first. An old writer that already observed
+      // RECORDING is blocked on this lock and rechecks the generation after
+      // acquiring it; a writer observing the new generation is passive.
+      generation->active_generation = command->generation;
+      journal->state = BPFJ_MUTATION_JOURNAL_CLOSING;
+      command->result = 1;
+    }
+  }
+  bpfj_lock_release(&journal->lock, &flags);
+  return 0;
+}
 
 // Snapshot every task-storage pod while the iterator holds the task alive.
 // Userspace deduplicates records by old_pod and never dereferences an arena

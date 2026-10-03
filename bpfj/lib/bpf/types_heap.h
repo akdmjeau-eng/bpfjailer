@@ -90,6 +90,7 @@ struct bpfj_heap_control {
   struct bpfj_lock lock; // guards every field above and the free lists
   __u32 grow_gen; // bumped by whichever side grows the arena
   __u32 runtime_versions;
+  __u32 generation; // stable identity of this arena slot while attached
   void __arena* var_catalog;
   void __arena* mutation_journal;
   struct bpfj_str_map __arena* role_policies;
