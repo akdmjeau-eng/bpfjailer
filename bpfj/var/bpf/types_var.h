@@ -12,6 +12,8 @@
 
 #include "bpfj/lib/bpf/types_heap.h"
 
+struct bpfj_str_map;
+
 #ifdef __cplusplus
 #define BPFJ_VAR_INLINE inline
 #define BPFJ_VAR_NULL nullptr
@@ -50,9 +52,11 @@ struct bpfj_var_name {
   char str[1];
 };
 
-// The running jail's variable allowlist. Additional name pointers and every
-// variable-sized bpfj_var_name record live in the same arena allocation.
+// The running jail's variable allowlist. The ID-indexed name pointers and
+// variable-sized bpfj_var_name records live in the same allocation; by_name
+// points to the arena string map used for name lookup.
 struct bpfj_var_catalog {
+  struct bpfj_str_map __arena* by_name;
   __u32 count;
   __u32 reserved;
   const struct bpfj_var_name __arena* names[1];
@@ -63,8 +67,8 @@ BPFJ_VAR_INLINE const struct bpfj_var_name __arena** bpfj_var_catalog_names_mut(
   return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
 }
 
-BPFJ_VAR_INLINE const struct bpfj_var_name __arena* const* bpfj_var_catalog_names(
-    const struct bpfj_var_catalog* catalog) {
+BPFJ_VAR_INLINE const struct bpfj_var_name __arena* const*
+bpfj_var_catalog_names(const struct bpfj_var_catalog* catalog) {
   return catalog == BPFJ_VAR_NULL ? BPFJ_VAR_NULL : catalog->names;
 }
 

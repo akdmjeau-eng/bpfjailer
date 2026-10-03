@@ -31,14 +31,12 @@
 
 #define BPFJ_GLOB_MAP_MAX_TOKENS \
   63 // per pattern; a pattern needs m+1 <= 64 bits
-#define BPFJ_GLOB_MAP_MAX_STR_LEN 256
-// State words, bounded by the 512-byte BPF stack the state lives on during a
-// lookup; each word packs multiple patterns, so this holds hundreds of globs.
-#define BPFJ_GLOB_MAP_MAX_WORDS 32
-#define BPFJ_GLOB_MAP_MAX_RESULTS \
-  64 // output vector capacity the matcher bounds
+#define BPFJ_GLOB_MAP_MAX_STR_LEN 1024
+// State words live in a per-run arena vec, so the limit bounds work rather
+// than preallocated memory. Each word packs multiple patterns.
+#define BPFJ_GLOB_MAP_MAX_WORDS 512
 #define BPFJ_GLOB_MAP_MAX_ACCEPTS \
-  1024 // total patterns (<= words * patterns/word)
+  4096 // total patterns (<= words * patterns/word)
 // Gadget width in bits, and so the longest value a binding can match in full.
 // It trades against gadgets per pattern -- two at this width need 78 bits, past
 // the 63 BPFJ_GLOB_MAP_MAX_TOKENS allows -- and one is all FileMatchCached
@@ -49,7 +47,7 @@
 // Distinct ${NAME} keys one map may reference, and so the bindings a lookup
 // carries.
 #define BPFJ_GLOB_MAP_MAX_BINDINGS 16
-#define BPFJ_GLOB_MAP_MAX_GADGETS 256
+#define BPFJ_GLOB_MAP_MAX_GADGETS 512
 // Epsilon-closure passes needed to reach a fixpoint. Collapsing consecutive
 // '*' and closing adjacent gadgets in one ascending sweep leaves only
 // '*'<->gadget alternation, bounded by the gadgets that fit in one word + 1.
@@ -90,15 +88,60 @@ struct bpfj_glob_bindings {
   struct bpfj_glob_binding b[BPFJ_GLOB_MAP_MAX_BINDINGS];
 };
 
+struct bpfj_glob_gadget_run {
+  __u32 len;
+  char val[BPFJ_GLOB_MAP_MAX_VAR_LEN];
+};
+
 struct bpfj_glob_run {
   __arena const struct bpfj_glob_map* map;
+  __arena const char* str;
   __u32 len;
-  __u32 num_matches;
+  __u32 _pad;
   struct bpfj_glob_bindings bindings;
-  __u64 state[BPFJ_GLOB_MAP_MAX_WORDS];
-  __u64 var_advance[BPFJ_GLOB_MAP_MAX_WORDS];
-  char str[BPFJ_GLOB_MAP_MAX_STR_LEN];
-  __u64 results[BPFJ_GLOB_MAP_MAX_RESULTS];
-  __u32 gadget_len[BPFJ_GLOB_MAP_MAX_GADGETS];
-  char gadget_val[BPFJ_GLOB_MAP_MAX_GADGETS][BPFJ_GLOB_MAP_MAX_VAR_LEN];
+  struct bpfj_vec state;
+  struct bpfj_vec var_advance;
+  struct bpfj_vec gadgets;
+  struct bpfj_vec results;
+  struct bpfj_vec owned_str;
 };
+
+// Initialize only the vec headers; their buffers grow on the first lookup.
+static inline void bpfj_glob_run_init(struct bpfj_glob_run __arena* run) {
+  run->map = NULL;
+  run->str = NULL;
+  run->len = 0;
+  run->_pad = 0;
+  run->bindings.count = 0;
+  run->bindings._pad = 0;
+
+  run->state.buf = NULL;
+  run->state.elem_size = sizeof(__u64);
+  run->state.size = 0;
+  run->state.capacity = 0;
+  run->state._pad = 0;
+
+  run->var_advance.buf = NULL;
+  run->var_advance.elem_size = sizeof(__u64);
+  run->var_advance.size = 0;
+  run->var_advance.capacity = 0;
+  run->var_advance._pad = 0;
+
+  run->gadgets.buf = NULL;
+  run->gadgets.elem_size = sizeof(struct bpfj_glob_gadget_run);
+  run->gadgets.size = 0;
+  run->gadgets.capacity = 0;
+  run->gadgets._pad = 0;
+
+  run->results.buf = NULL;
+  run->results.elem_size = sizeof(__u64);
+  run->results.size = 0;
+  run->results.capacity = 0;
+  run->results._pad = 0;
+
+  run->owned_str.buf = NULL;
+  run->owned_str.elem_size = sizeof(char);
+  run->owned_str.size = 0;
+  run->owned_str.capacity = 0;
+  run->owned_str._pad = 0;
+}

@@ -2,13 +2,10 @@
 
 #include "bpfj/enforce/MountEnforcer.h"
 
-#include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
 #include <algorithm>
 #include <cstdint>
-#include <cstring>
-#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
@@ -18,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/bpf/types.h"
 #include "bpfj/enforce/bpf/types_mount_enforce.h" // @manual
 #include "bpfj/match/bpf/types_mount.h" // @manual
@@ -59,13 +57,6 @@ namespace {
     begin = end + 1;
   }
   return specificity;
-}
-
-[[nodiscard]] struct bpfj_role_id roleId(std::string_view name) noexcept {
-  struct bpfj_role_id role{};
-  const auto size = std::min(name.size(), sizeof(role.id) - 1);
-  std::memcpy(role.id, name.data(), size);
-  return role;
 }
 
 } // namespace
@@ -123,74 +114,62 @@ Expected<> MountEnforcer::load(
 
   auto matchLru =
       std::make_shared<Matcher::Lru>(obj, skel.bss().bpfj_mount_match_lru);
-  std::deque<struct bpfj_file_matcher*> slots;
   std::vector<std::unique_ptr<Matcher>> matchers;
-  std::map<std::string, void*> roleMatchers;
-  std::uint32_t nextRule = 1;
-  const int typesFd = bpf_map__fd(skel.maps().bpfj_mount_types);
-  const int umountFd = bpf_map__fd(skel.maps().bpfj_umount_roles);
+  auto* publishedPolicies = static_cast<struct bpfj_str_map*>(
+      skel.bss().bpfj_heap_ctrl->role_policies);
 
   for (const auto& [name, role] : policy.roles) {
-    if (role.hasUmount) {
-      const auto id = roleId(name);
-      const std::uint8_t allowed = role.umount ? 1 : 0;
-      if (::bpf_map_update_elem(umountFd, &id, &allowed, BPF_NOEXIST) != 0) {
-        return makeUnexpected(
-            makeErrnoError("failed to publish umount policy for role ", name));
-      }
-    }
     if (role.mount.empty()) {
       continue;
     }
 
+    auto foundPolicy = lookupRolePolicy(publishedPolicies, name);
+    if (!foundPolicy) {
+      return makeUnexpected(foundPolicy.error());
+    }
+    if (*foundPolicy == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::invalid_argument,
+          "mount role is missing from the published role map: ",
+          name));
+    }
+    auto* rolePolicy = const_cast<struct bpfj_role_policy*>(*foundPolicy);
+
     std::map<std::string, struct bpfj_mount_path_entry> paths;
     for (const auto& [path, types] : role.mount) {
-      if (nextRule == 0) {
-        return makeUnexpected(
-            makeError(std::errc::value_too_large, "too many mount path rules"));
+      struct bpfj_str_map* typeSet = nullptr;
+      if (!types.empty()) {
+        std::map<std::string, void*> allowedTypes;
+        for (const auto& type : types) {
+          allowedTypes.emplace(type, rolePolicy);
+        }
+        StrMap<Skel> publishedTypes{obj, typeSet, false};
+        if (auto res = publishedTypes.init(allowedTypes); !res) {
+          return res.error();
+        }
       }
-      const std::uint32_t rule = nextRule++;
       const std::string compiledPath = path == "/" ? "/*" : path;
       paths.emplace(
           compiledPath,
           bpfj_mount_path_entry{
-              .rule_id = rule,
+              .types = typeSet,
               .specificity = pathSpecificity(path),
-              .has_types = types.empty() ? std::uint8_t{0} : std::uint8_t{1},
           });
-      for (const auto& type : types) {
-        struct bpfj_mount_type_key key{.rule_id = rule};
-        std::memcpy(key.type, type.data(), type.size());
-        const std::uint8_t allowed = 1;
-        if (::bpf_map_update_elem(typesFd, &key, &allowed, BPF_NOEXIST) != 0) {
-          return makeUnexpected(makeErrnoError(
-              "failed to publish filesystem type '",
-              type,
-              "' for mount destination ",
-              path));
-        }
-      }
     }
 
-    auto& slot = slots.emplace_back(nullptr);
     auto matcher = std::make_unique<Matcher>();
     if (auto res = matcher->init(
             obj,
             resolveVariable,
             Matcher::SharedMaps{.match = matchLru},
-            slot,
+            rolePolicy->mount_matcher,
             paths);
         !res) {
       return res.error();
     }
-    roleMatchers.emplace(name, slot);
     matchers.push_back(std::move(matcher));
   }
 
-  StrMap<Skel> matcherMap{obj, skel.bss().bpfj_mount_matchers, false};
-  if (auto res = matcherMap.init(roleMatchers); !res) {
-    return res.error();
-  }
   if (auto res = skel.attach(); !res) {
     return res;
   }

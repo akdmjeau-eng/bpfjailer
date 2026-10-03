@@ -98,6 +98,7 @@ Expected<> compileIpcPatterns(
           std::errc::not_enough_memory,
           "failed to reserve IPC glob matcher run"));
     }
+    bpfj_glob_run_init(*run);
   }
   auto* publishedPolicies = static_cast<struct bpfj_str_map*>(
       skel->bss().bpfj_heap_ctrl->role_policies);

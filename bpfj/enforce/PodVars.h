@@ -34,9 +34,15 @@ struct ResolvedPolicyVar {
 };
 
 using PublishedRolePolicies = std::map<std::string, struct bpfj_role_policy*>;
+using PublishedVarNames = std::map<std::string, struct bpfj_var_name*>;
+
+struct PublishedPolicyGraph {
+  PublishedRolePolicies rolePolicies;
+  PublishedVarNames varNames;
+};
 
 /// @brief Allocate each role and variable catalog in the arena.
-[[nodiscard]] Expected<PublishedRolePolicies> publishPolicyGraph(
+[[nodiscard]] Expected<PublishedPolicyGraph> publishPolicyGraph(
     PodArena& arena,
     const Policy& policy) noexcept;
 

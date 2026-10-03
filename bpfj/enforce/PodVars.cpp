@@ -38,6 +38,39 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
       (extra - arena::kWindowBase) / arena::kSlotSize);
 }
 
+[[nodiscard]] Expected<const void*> lookupStringMap(
+    const struct bpfj_str_map* index,
+    std::string_view key,
+    std::string_view description) noexcept {
+  if (index == nullptr || index->capacity == 0) {
+    return nullptr;
+  }
+
+  __u32 off = bpfj_str_map_hash(
+      key.data(),
+      static_cast<__u32>(key.size()),
+      index->capacity,
+      BPFJ_STR_MAP_MAX_STR_LEN);
+  for (std::size_t attempt = 0; attempt < BPFJ_STR_MAP_MAX_ATTEMPTS;
+       ++attempt) {
+    const auto& entry = index->vec[off];
+    if (entry.key == nullptr) {
+      return nullptr;
+    }
+    if (entry.key_len == key.size() &&
+        std::memcmp(entry.key, key.data(), key.size()) == 0) {
+      return entry.val;
+    }
+    if (++off == index->capacity) {
+      off = 0;
+    }
+  }
+  return makeUnexpected(makeError(
+      std::errc::no_space_on_device,
+      description,
+      " index exceeded its probe limit"));
+}
+
 } // namespace
 
 [[nodiscard]] std::uint32_t varCatalogAllocSize(
@@ -61,39 +94,47 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
       : static_cast<const struct bpfj_str_map*>(ctrl->role_policies);
 }
 
-[[nodiscard]] Expected<struct bpfj_var_catalog*> publishVarNames(
+struct PublishedVarCatalog {
+  struct bpfj_var_catalog* catalog = nullptr;
+  PublishedVarNames names;
+};
+
+[[nodiscard]] Expected<PublishedVarCatalog> publishVarNames(
     PodArena& arena,
     std::span<const std::string> names) noexcept {
-  if (!names.empty()) {
-    auto blob = arena.alloc(varCatalogAllocSize(names));
-    if (!blob) {
-      return makeUnexpected(blob.error());
-    }
-
-    auto* catalog = static_cast<struct bpfj_var_catalog*>(*blob);
-    *catalog = {};
-    catalog->count = static_cast<__u32>(names.size());
-    auto* publishedNames = bpfj_var_catalog_names_mut(catalog);
-
-    std::uint32_t nameOff = bpfj_var_align_up(
-        offsetof(struct bpfj_var_catalog, names) +
-        sizeof(struct bpfj_var_name*) * names.size());
-    for (std::size_t i = 0; i < names.size(); ++i) {
-      const auto& name = names[i];
-      auto* stored = reinterpret_cast<struct bpfj_var_name*>(
-          static_cast<char*>(*blob) + nameOff);
-      stored->id = static_cast<__u32>(i + 1);
-      stored->len = static_cast<__u32>(name.size());
-      std::memcpy(stored->str, name.data(), name.size());
-      stored->str[name.size()] = '\0';
-      publishedNames[i] = stored;
-      nameOff += bpfj_var_align_up(
-          offsetof(struct bpfj_var_name, str) + stored->len + 1);
-    }
-
-    return catalog;
+  if (names.empty()) {
+    return PublishedVarCatalog{};
   }
-  return nullptr;
+
+  auto blob = arena.alloc(varCatalogAllocSize(names));
+  if (!blob) {
+    return makeUnexpected(blob.error());
+  }
+
+  auto* catalog = static_cast<struct bpfj_var_catalog*>(*blob);
+  *catalog = {};
+  catalog->count = static_cast<__u32>(names.size());
+  auto* publishedNames = bpfj_var_catalog_names_mut(catalog);
+  PublishedVarNames byName;
+
+  std::uint32_t nameOff = bpfj_var_align_up(
+      offsetof(struct bpfj_var_catalog, names) +
+      sizeof(struct bpfj_var_name*) * names.size());
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    const auto& name = names[i];
+    auto* stored = reinterpret_cast<struct bpfj_var_name*>(
+        static_cast<char*>(*blob) + nameOff);
+    stored->id = static_cast<__u32>(i + 1);
+    stored->len = static_cast<__u32>(name.size());
+    std::memcpy(stored->str, name.data(), name.size());
+    stored->str[name.size()] = '\0';
+    publishedNames[i] = stored;
+    byName.emplace(name, stored);
+    nameOff += bpfj_var_align_up(
+        offsetof(struct bpfj_var_name, str) + stored->len + 1);
+  }
+
+  return PublishedVarCatalog{.catalog = catalog, .names = std::move(byName)};
 }
 
 [[nodiscard]] Expected<const struct bpfj_role_set*> publishRoleSet(
@@ -124,7 +165,7 @@ std::size_t slotIndex(std::uint64_t extra) noexcept {
   return set;
 }
 
-Expected<PublishedRolePolicies> publishPolicyGraph(
+Expected<PublishedPolicyGraph> publishPolicyGraph(
     PodArena& arena,
     const Policy& policy) noexcept {
   if (arena.ctrl()->role_policies != nullptr ||
@@ -153,7 +194,9 @@ Expected<PublishedRolePolicies> publishPolicyGraph(
         (source.hasMinSeq ? BPFJ_POLICY_HAS_MIN_SEQ : 0) |
         (source.lkmAny ? BPFJ_POLICY_LKM_ANY : 0) |
         (source.fsAny ? BPFJ_POLICY_FS_ANY : 0) |
-        (source.verityAny ? BPFJ_POLICY_VERITY_ANY : 0);
+        (source.verityAny ? BPFJ_POLICY_VERITY_ANY : 0) |
+        (source.hasUmount ? BPFJ_POLICY_HAS_UMOUNT : 0) |
+        (source.hasUmount && source.umount ? BPFJ_POLICY_UMOUNT_ANY : 0);
     out->bpf_mode = static_cast<__u8>(source.bpfMode);
     out->mq_sysv_mode = static_cast<__u8>(source.mqSysvMode);
     out->mq_posix_mode = static_cast<__u8>(source.mqPosixMode);
@@ -199,9 +242,12 @@ Expected<PublishedRolePolicies> publishPolicyGraph(
   if (!vars) {
     return makeUnexpected(vars.error());
   }
-  arena.ctrl()->var_catalog = *vars;
+  arena.ctrl()->var_catalog = vars->catalog;
   arena.ctrl()->runtime_versions = BPFJ_RUNTIME_VERSIONS;
-  return publishedPolicies;
+  return PublishedPolicyGraph{
+      .rolePolicies = std::move(publishedPolicies),
+      .varNames = std::move(vars->names),
+  };
 }
 
 Expected<const struct bpfj_str_map*> readRolePolicies(
@@ -231,33 +277,11 @@ Expected<const struct bpfj_role_policy*> lookupRolePolicy(
   if (!id) {
     return makeUnexpected(id.error());
   }
-  if (policies == nullptr || policies->capacity == 0) {
-    return nullptr;
+  auto found = lookupStringMap(policies, role, "role policy");
+  if (!found) {
+    return makeUnexpected(found.error());
   }
-
-  const auto* index = policies;
-  __u32 off = bpfj_str_map_hash(
-      role.data(),
-      static_cast<__u32>(role.size()),
-      index->capacity,
-      BPFJ_STR_MAP_MAX_STR_LEN);
-  for (std::size_t attempt = 0; attempt < BPFJ_STR_MAP_MAX_ATTEMPTS;
-       ++attempt) {
-    const auto& entry = index->vec[off];
-    if (entry.key == nullptr) {
-      return nullptr;
-    }
-    if (entry.key_len == role.size() &&
-        std::memcmp(entry.key, role.data(), role.size()) == 0) {
-      return static_cast<const struct bpfj_role_policy*>(entry.val);
-    }
-    if (++off == index->capacity) {
-      off = 0;
-    }
-  }
-  return makeUnexpected(makeError(
-      std::errc::no_space_on_device,
-      "role policy index exceeded its probe limit"));
+  return static_cast<const struct bpfj_role_policy*>(*found);
 }
 
 Expected<const struct bpfj_var_catalog*> readVarCatalog(
@@ -279,14 +303,14 @@ Expected<ResolvedPolicyVar> lookupVar(
         makeError(std::errc::invalid_argument, "a variable name is empty"));
   }
 
-  const std::uint32_t count = catalog == nullptr ? 0 : catalog->count;
-  const auto* publishedNames = bpfj_var_catalog_names(catalog);
-  for (std::uint32_t at = 0; at < count; ++at) {
-    const auto* published = publishedNames[at];
-    if (published != nullptr && published->len == name.size() &&
-        std::string_view(published->str, published->len) == name) {
-      return ResolvedPolicyVar{.id = published->id, .name = published};
-    }
+  auto found = lookupStringMap(
+      catalog == nullptr ? nullptr : catalog->by_name, name, "variable name");
+  if (!found) {
+    return makeUnexpected(found.error());
+  }
+  if (*found != nullptr) {
+    const auto* published = static_cast<const struct bpfj_var_name*>(*found);
+    return ResolvedPolicyVar{.id = published->id, .name = published};
   }
 
   return makeUnexpected(makeError(

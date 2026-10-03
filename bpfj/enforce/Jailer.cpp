@@ -156,15 +156,24 @@ Expected<ScratchMapFds> Jailer::load(
   if (!policyArena) {
     return makeUnexpected(policyArena.error());
   }
-  auto publishedPolicies = publishPolicyGraph(*policyArena, policy);
-  if (!publishedPolicies) {
-    return makeUnexpected(publishedPolicies.error());
+  auto publishedGraph = publishPolicyGraph(*policyArena, policy);
+  if (!publishedGraph) {
+    return makeUnexpected(publishedGraph.error());
   }
 
   StrMap<Skel> roleMap(
       created.value(), skel.bss().bpfj_heap_ctrl->role_policies, false);
-  if (auto res = roleMap.init(*publishedPolicies); !res) {
+  if (auto res = roleMap.init(publishedGraph->rolePolicies); !res) {
     return makeUnexpected(res.error());
+  }
+
+  auto* varCatalog = static_cast<struct bpfj_var_catalog*>(
+      skel.bss().bpfj_heap_ctrl->var_catalog);
+  if (varCatalog != nullptr) {
+    StrMap<Skel> varMap(created.value(), varCatalog->by_name, false);
+    if (auto res = varMap.init(publishedGraph->varNames); !res) {
+      return makeUnexpected(res.error());
+    }
   }
 
   if (replacementFrozen) {

@@ -155,7 +155,7 @@ TEST(MountEnforcer, FilesystemTypeListSelectsAllowedType) {
   Child actor([&] {
     const int allowed = mountFs(fixture.destination(), "tmpfs");
     if (allowed != 0) {
-      return allowed;
+      return 100 + allowed;
     }
     const int removed = unmount(fixture.destination());
     return removed == 0 ? mountFs(fixture.destination(), "proc") : removed;

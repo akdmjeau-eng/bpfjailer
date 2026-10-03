@@ -192,9 +192,14 @@ BPF_SRCS := \
 	bpfj/enforce/bpf/mount_enforce.bpf.c \
 	bpfj/enforce/bpf/enroll.bpf.c
 
+TEST_BPF_SRCS := tests/bpf/glob_map_test.bpf.c
+
 BPF_OBJS := $(BPF_SRCS:%.bpf.c=$(BUILD)/%.bpf.o)
 BPF_DEPS := $(BPF_OBJS:.bpf.o=.bpf.d)
 SKELS    := $(BPF_SRCS:%.bpf.c=$(BUILD)/%.skel.h)
+TEST_BPF_OBJS := $(TEST_BPF_SRCS:%.bpf.c=$(BUILD)/%.bpf.o)
+TEST_BPF_DEPS := $(TEST_BPF_OBJS:.bpf.o=.bpf.d)
+TEST_SKELS    := $(TEST_BPF_SRCS:%.bpf.c=$(BUILD)/%.skel.h)
 VMLINUX  := $(BUILD)/bpf/vmlinux/vmlinux.h
 
 # Everything but the entry point. bpfjctl and bpfjcmd are the same program
@@ -265,6 +270,7 @@ TEST_SRCS := \
 	tests/Enforce.cpp \
 	tests/EnrollGateTest.cpp \
 	tests/FsEnforcerTest.cpp \
+	tests/GlobMapTest.cpp \
 	tests/Harness.cpp \
 	tests/HarnessTest.cpp \
 	tests/HeapTest.cpp \
@@ -528,7 +534,7 @@ FORCE:
 # The skeletons and BPF objects are only ever reached through a pattern rule,
 # which make treats as intermediate and deletes on the way out -- regenerating
 # every one of them on the next build. They are outputs, not scratch.
-.SECONDARY: $(BPF_OBJS) $(SKELS)
+.SECONDARY: $(BPF_OBJS) $(SKELS) $(TEST_BPF_OBJS) $(TEST_SKELS)
 
 # Generated from the running kernel's BTF. Checking one in would be
 # reproducible but would go stale against the kernel actually being run; CO-RE
@@ -575,6 +581,8 @@ $(BUILD)/%.skel.h: $(BUILD)/%.bpf.o
 $(BUILD)/%.o: %.cpp $(SKELS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(BUILD)/tests/GlobMapTest.o: $(TEST_SKELS)
 
 # Rewritten only when the mode actually changes, so an unchanged mode leaves
 # the mtime alone and does not drag the binary through a needless relink.
@@ -786,3 +794,4 @@ clean:
 
 -include $(DEPS)
 -include $(BPF_DEPS)
+-include $(TEST_BPF_DEPS)

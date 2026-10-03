@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
@@ -14,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "bpfj/enforce/PodVars.h"
+#include "bpfj/enforce/bpf/types.h" // @manual
 #include "bpfj/enforce/bpf/types_unix.h" // @manual
 #include "bpfj/match/bpf/types_mount.h" // @manual
 
@@ -21,7 +22,6 @@
 #include "bpfj/enforce/bpf/unix_enforce.skel.h"
 #include "bpfj/lib/GlobMap.h"
 #include "bpfj/lib/Heap.h"
-#include "bpfj/lib/StrMap.h"
 #include "bpfj/libbpf-cpp/BpfSkel.h"
 #include "bpfj/match/FileMatchCached.h"
 
@@ -115,10 +115,8 @@ template <typename Skel>
 Expected<> compileAbstract(
     const std::shared_ptr<Skel>& obj,
     const GlobKeyResolver& resolveVariable,
-    const std::string& role,
     const Rules& rules,
-    std::deque<struct bpfj_glob_map*>& slots,
-    std::map<std::string, void*>& roleMaps) {
+    struct bpfj_glob_map*& slot) {
   std::vector<std::pair<std::string, std::uint64_t>> patterns;
   for (const auto& [pattern, allowed] : rules) {
     if (pattern.front() == '@') {
@@ -129,12 +127,10 @@ Expected<> compileAbstract(
     return unit;
   }
 
-  auto& slot = slots.emplace_back(nullptr);
   GlobMap<Skel> glob(obj, slot, false);
   if (auto res = glob.init(resolveVariable, std::move(patterns)); !res) {
     return res.error();
   }
-  roleMaps.emplace(role, slot);
   return unit;
 }
 
@@ -191,74 +187,72 @@ Expected<> UnixEnforcer::load(
     return found->second;
   };
 
-  std::deque<struct bpfj_file_matcher*> matcherSlots;
   std::vector<std::unique_ptr<Matcher>> matchers;
-  std::map<std::string, void*> roleMatchers;
-  std::deque<struct bpfj_glob_map*> globSlots;
-  std::map<std::string, void*> bindMaps;
-  std::map<std::string, void*> connectMaps;
-  std::map<std::string, void*> dgramMaps;
   bool hasAbstract = false;
+  auto* publishedPolicies = static_cast<struct bpfj_str_map*>(
+      skel.bss().bpfj_heap_ctrl->role_policies);
 
   for (const auto& [name, role] : policy.roles) {
     if (!configured(role)) {
       continue;
     }
+    auto foundPolicy = lookupRolePolicy(publishedPolicies, name);
+    if (!foundPolicy) {
+      return makeUnexpected(foundPolicy.error());
+    }
+    if (*foundPolicy == nullptr) {
+      return makeUnexpected(makeError(
+          std::errc::invalid_argument,
+          "Unix role is missing from the published role map: ",
+          name));
+    }
+    auto* rolePolicy = const_cast<struct bpfj_role_policy*>(*foundPolicy);
+
     std::map<std::string, struct bpfj_unix_path_entry> paths;
     addPathRules(paths, role.unixBind, BPFJ_UNIX_BIND);
     addPathRules(paths, role.unixConnect, BPFJ_UNIX_CONNECT);
     addPathRules(paths, role.unixDgram, BPFJ_UNIX_DGRAM);
     if (!paths.empty()) {
-      auto& slot = matcherSlots.emplace_back(nullptr);
       auto matcher = std::make_unique<Matcher>();
       if (auto res = matcher->init(
-              obj, resolveVariable, Matcher::SharedMaps{}, slot, paths);
+              obj,
+              resolveVariable,
+              Matcher::SharedMaps{},
+              rolePolicy->unix_path_matcher,
+              paths);
           !res) {
         return res.error();
       }
-      roleMatchers.emplace(name, slot);
       matchers.push_back(std::move(matcher));
     }
 
-    const auto before = globSlots.size();
     if (auto res = compileAbstract(
-            obj, resolveVariable, name, role.unixBind, globSlots, bindMaps);
+            obj,
+            resolveVariable,
+            role.unixBind,
+            rolePolicy->unix_bind_abstract);
         !res) {
       return res;
     }
     if (auto res = compileAbstract(
             obj,
             resolveVariable,
-            name,
             role.unixConnect,
-            globSlots,
-            connectMaps);
+            rolePolicy->unix_connect_abstract);
         !res) {
       return res;
     }
     if (auto res = compileAbstract(
-            obj, resolveVariable, name, role.unixDgram, globSlots, dgramMaps);
+            obj,
+            resolveVariable,
+            role.unixDgram,
+            rolePolicy->unix_dgram_abstract);
         !res) {
       return res;
     }
-    hasAbstract |= globSlots.size() != before;
-  }
-
-  StrMap<Skel> pathMap{obj, skel.bss().bpfj_unix_path_matchers, false};
-  StrMap<Skel> bindMap{obj, skel.bss().bpfj_unix_bind_abstract, false};
-  StrMap<Skel> connectMap{obj, skel.bss().bpfj_unix_connect_abstract, false};
-  StrMap<Skel> dgramMap{obj, skel.bss().bpfj_unix_dgram_abstract, false};
-  if (auto res = pathMap.init(roleMatchers); !res) {
-    return res.error();
-  }
-  if (auto res = bindMap.init(bindMaps); !res) {
-    return res.error();
-  }
-  if (auto res = connectMap.init(connectMaps); !res) {
-    return res.error();
-  }
-  if (auto res = dgramMap.init(dgramMaps); !res) {
-    return res.error();
+    hasAbstract |= rolePolicy->unix_bind_abstract != nullptr ||
+        rolePolicy->unix_connect_abstract != nullptr ||
+        rolePolicy->unix_dgram_abstract != nullptr;
   }
 
   if (hasAbstract) {
@@ -275,6 +269,7 @@ Expected<> UnixEnforcer::load(
             std::errc::not_enough_memory,
             "failed to reserve Unix socket glob matcher run"));
       }
+      bpfj_glob_run_init(*run);
     }
   }
 

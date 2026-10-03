@@ -142,7 +142,7 @@ static __always_inline bool bpfj_ipc_glob_matches(
   }
   bpfj_ipc_glob_bind_pod(run, patterns->map, pod);
   if (!bpfj_ipc_glob_bindings_complete(run) ||
-      bpfj_heap_read_kernel(run->str, len, (__u64)chars) < 0) {
+      bpfj_glob_run_read_kernel(run, len, (__u64)chars) < 0) {
     return false;
   }
   return bpfj_glob_map_contains_range(

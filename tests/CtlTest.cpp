@@ -791,7 +791,7 @@ TEST(Ctl, EnrollRejectsAVarThePolicyDoesNotDeclare) {
 
 TEST(Ctl, EnrollWithADeclaredVarShowsIt) {
   const std::string policy =
-      writePolicy("vars:\n  - vm_uuid\nroles:\n  role:\n");
+      writePolicy("vars:\n  - vm_uuid\nroles:\n  role:\n    any: true\n");
   ASSERT_EQ(ctl({"attach", policy}).status, 0);
 
   ASSERT_EQ(

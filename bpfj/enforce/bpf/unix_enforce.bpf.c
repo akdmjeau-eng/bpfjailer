@@ -22,29 +22,7 @@
 #define S_IFMT 0170000
 #define S_IFSOCK 0140000
 
-struct bpfj_str_map __arena* bpfj_unix_path_matchers;
-struct bpfj_str_map __arena* bpfj_unix_bind_abstract;
-struct bpfj_str_map __arena* bpfj_unix_connect_abstract;
-struct bpfj_str_map __arena* bpfj_unix_dgram_abstract;
 struct bpfj_mount_cache __arena bpfj_unix_mount_cache;
-
-static __noinline void __arena* bpfj_unix_for_role(
-    const struct bpfj_str_map __arena* map,
-    const struct bpfj_role_id* role) {
-  char key[BPFJ_FILE_MATCH_ROLE_KEY_LEN] = {};
-  __u32 i;
-  bpf_for(i, 0, ROLE_ID_LEN) {
-    key[i & (ROLE_ID_LEN - 1)] = role->id[i & (ROLE_ID_LEN - 1)];
-  }
-  key[BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1] = '\0';
-
-  void __arena* out = NULL;
-  if (bpfj_str_map_lookup_strlen(
-          map, key, BPFJ_FILE_MATCH_ROLE_KEY_LEN, &out) != 0) {
-    return NULL;
-  }
-  return out;
-}
 
 static __noinline bool bpfj_unix_path_allowed(
     struct bpfj_file_match_cached_state __arena* state,
@@ -135,7 +113,11 @@ static __noinline bool bpfj_unix_abstract_allowed(
   }
   bpfj_ipc_glob_bind_pod(run, map, pod);
   bpfj_unix_poison_missing_bindings(run);
-  run->str[0] = '@';
+  char __arena* input = bpfj_glob_run_owned_input(run, name_len + 1);
+  if (input == NULL) {
+    return false;
+  }
+  input[0] = '@';
   __u32 at;
   bpf_for(at, 0, BPFJ_GLOB_MAP_MAX_STR_LEN - 1) {
     if (at >= name_len) {
@@ -145,9 +127,8 @@ static __noinline bool bpfj_unix_abstract_allowed(
     if (bpf_probe_read_kernel(&byte, sizeof(byte), name + at) < 0) {
       return false;
     }
-    run->str[at + 1] = byte;
+    input[at + 1] = byte;
   }
-  run->len = name_len + 1;
   if (bpfj_glob_eval(run) < 0) {
     return false;
   }
@@ -159,9 +140,7 @@ static __noinline bool bpfj_unix_abstract_allowed(
     if (i >= map->num_accepts) {
       break;
     }
-    const __u32 word = map->accept_word[i] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
-    const __u32 bit = map->accept_bit[i] & 63;
-    if (((run->state[word] >> bit) & 1ULL) == 0) {
+    if (!bpfj_glob_state_has_accept(run, i)) {
       continue;
     }
     const __u64 value = map->accept_val[i];
@@ -203,8 +182,9 @@ static __always_inline int bpfj_unix_enforce_path(
     struct bpfj_uuid uuid = {};
     bpfj_pod_read_role_id(&role, pod);
     bpfj_pod_read_uuid(&uuid, pod);
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
     struct bpfj_file_matcher __arena* matcher =
-        bpfj_unix_for_role(bpfj_unix_path_matchers, &role);
+        policy ? policy->unix_path_matcher : NULL;
     if (matcher) {
       const long count = BPFJ_FILE_MATCH_CACHED(
           state,
@@ -229,7 +209,7 @@ static __always_inline int bpfj_unix_enforce_path(
 }
 
 static __always_inline int bpfj_unix_enforce_abstract(
-    const struct bpfj_str_map __arena* roles,
+    enum bpfj_unix_operation operation,
     const char* name,
     __u32 name_len) {
   struct task_struct* task = bpf_get_current_task_btf();
@@ -251,7 +231,23 @@ static __always_inline int bpfj_unix_enforce_abstract(
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
     struct bpfj_role_id role = {};
     bpfj_pod_read_role_id(&role, pod);
-    const struct bpfj_glob_map __arena* map = bpfj_unix_for_role(roles, &role);
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    const struct bpfj_glob_map __arena* map = NULL;
+    if (policy) {
+      switch (operation) {
+        case BPFJ_UNIX_BIND:
+          map = policy->unix_bind_abstract;
+          break;
+        case BPFJ_UNIX_CONNECT:
+          map = policy->unix_connect_abstract;
+          break;
+        case BPFJ_UNIX_DGRAM:
+          map = policy->unix_dgram_abstract;
+          break;
+        default:
+          break;
+      }
+    }
     if (map && !bpfj_unix_abstract_allowed(map, pod, name, name_len)) {
       return bpfj_unix_deny(pod, task, &role);
     }
@@ -263,7 +259,7 @@ static __always_inline int bpfj_unix_enforce_abstract(
 }
 
 static __always_inline int bpfj_unix_sockaddr_abstract(
-    const struct bpfj_str_map __arena* roles,
+    enum bpfj_unix_operation operation,
     const struct sockaddr* address,
     int addrlen) {
   const int path_offset = __builtin_offsetof(struct sockaddr_un, sun_path);
@@ -276,18 +272,18 @@ static __always_inline int bpfj_unix_sockaddr_abstract(
     return 0;
   }
   return bpfj_unix_enforce_abstract(
-      roles, path + 1, (__u32)(addrlen - path_offset - 1));
+      operation, path + 1, (__u32)(addrlen - path_offset - 1));
 }
 
 static __always_inline int bpfj_unix_address_abstract(
-    const struct bpfj_str_map __arena* roles,
+    enum bpfj_unix_operation operation,
     const struct unix_address* address) {
   if (!address) {
     return 0;
   }
   const int addrlen = BPF_CORE_READ(address, len);
   const struct sockaddr* name = (const struct sockaddr*)&address->name[0];
-  return bpfj_unix_sockaddr_abstract(roles, name, addrlen);
+  return bpfj_unix_sockaddr_abstract(operation, name, addrlen);
 }
 
 SEC("lsm/path_mknod")
@@ -315,7 +311,7 @@ int BPF_PROG(
       BPF_CORE_READ(sock, sk, __sk_common.skc_family) != AF_UNIX) {
     return lsm_ret;
   }
-  return bpfj_unix_sockaddr_abstract(bpfj_unix_bind_abstract, address, addrlen);
+  return bpfj_unix_sockaddr_abstract(BPFJ_UNIX_BIND, address, addrlen);
 }
 
 SEC("lsm/socket_connect")
@@ -333,8 +329,7 @@ int BPF_PROG(
   if (type != SOCK_STREAM && type != SOCK_SEQPACKET) {
     return 0;
   }
-  return bpfj_unix_sockaddr_abstract(
-      bpfj_unix_connect_abstract, address, addrlen);
+  return bpfj_unix_sockaddr_abstract(BPFJ_UNIX_CONNECT, address, addrlen);
 }
 
 SEC("lsm/unix_stream_connect")
@@ -392,7 +387,7 @@ int BPF_PROG(
     return 0;
   }
   return bpfj_unix_address_abstract(
-      bpfj_unix_dgram_abstract, BPF_CORE_READ(unix_sk, addr));
+      BPFJ_UNIX_DGRAM, BPF_CORE_READ(unix_sk, addr));
 }
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual MIT/GPL";

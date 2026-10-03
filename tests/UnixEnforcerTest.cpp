@@ -245,7 +245,7 @@ TEST(UnixEnforcer, LongestPathOverridesRootDefault) {
 
   Child actor([&] {
     const int allowed = bindPath(fixture.socket());
-    return allowed == 0 ? bindPath(fixture.other()) : allowed;
+    return allowed == 0 ? bindPath(fixture.other()) : 100 + allowed;
   });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), EACCES);
@@ -280,7 +280,7 @@ TEST(UnixEnforcer, AbstractGlobMostSpecificRuleWins) {
 
   Child actor([] {
     const int allowed = bindAbstract("bpfj-allowed");
-    return allowed == 0 ? bindAbstract("bpfj-denied") : allowed;
+    return allowed == 0 ? bindAbstract("bpfj-denied") : 100 + allowed;
   });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), EACCES);

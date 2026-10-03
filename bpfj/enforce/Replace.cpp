@@ -246,13 +246,11 @@ template <typename T>
     const struct bpfj_var_catalog* oldCatalog,
     const struct bpfj_var_catalog* newCatalog) noexcept {
   const struct bpfj_var_name* oldName = nullptr;
-  if (oldCatalog != nullptr) {
+  if (oldCatalog != nullptr && oldId > 0 && oldId <= oldCatalog->count) {
     const auto* names = bpfj_var_catalog_names(oldCatalog);
-    for (std::uint32_t i = 0; i < oldCatalog->count; ++i) {
-      if (names[i] != nullptr && names[i]->id == oldId) {
-        oldName = names[i];
-        break;
-      }
+    oldName = names[oldId - 1];
+    if (oldName != nullptr && oldName->id != oldId) {
+      oldName = nullptr;
     }
   }
   if (oldName == nullptr) {

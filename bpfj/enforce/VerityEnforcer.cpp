@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "bpfj/enforce/PodVars.h"
-#include "bpfj/enforce/RoleId.h"
 #include "bpfj/enforce/bpf/verity_enforce.skel.h"
 #include "bpfj/fsverity/Keyctl.h"
 #include "bpfj/fsverity/Keyring.h"
@@ -118,17 +117,12 @@ constexpr std::string_view kKeyringPrefix = "bpfj";
       continue;
     }
 
-    auto id = makeRoleId(role);
-    if (!id) {
-      return makeUnexpected(id.error());
-    }
-
     auto serial = buildKeyring(scope, role, rolePolicy, policy);
     if (!serial) {
       return makeUnexpected(serial.error());
     }
 
-    auto publishedPolicy = lookupRolePolicy(*policies, *id);
+    auto publishedPolicy = lookupRolePolicy(*policies, role);
     if (!publishedPolicy) {
       return makeUnexpected(publishedPolicy.error());
     }

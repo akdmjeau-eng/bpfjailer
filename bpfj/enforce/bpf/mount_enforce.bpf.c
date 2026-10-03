@@ -19,23 +19,8 @@
 #define MS_MOVE 8192
 #define BPFJ_REMOUNT_RELAY_NS (100ULL * 1000 * 1000)
 
-struct bpfj_str_map __arena* bpfj_mount_matchers;
 struct bpfj_dyn_lru __arena* bpfj_mount_match_lru;
 struct bpfj_mount_cache __arena bpfj_mount_cache;
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 4096);
-  __type(key, struct bpfj_mount_type_key);
-  __type(value, __u8);
-} bpfj_mount_types SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 256);
-  __type(key, struct bpfj_role_id);
-  __type(value, __u8);
-} bpfj_umount_roles SEC(".maps");
 
 struct bpfj_remount_relay {
   __u64 sb;
@@ -49,7 +34,7 @@ struct bpfj_remount_relay {
 struct bpfj_mount_scratch {
   struct bpfj_role_id role;
   struct bpfj_uuid uuid;
-  struct bpfj_mount_type_key type_key;
+  char type[BPFJ_MOUNT_FS_TYPE_LEN];
   bool has_type;
 };
 
@@ -59,23 +44,6 @@ struct {
   __type(key, __u64);
   __type(value, struct bpfj_remount_relay);
 } bpfj_remount_relays SEC(".maps");
-
-static __noinline struct bpfj_file_matcher __arena* bpfj_mount_for_role(
-    const struct bpfj_role_id* role) {
-  char key[BPFJ_FILE_MATCH_ROLE_KEY_LEN] = {};
-  __u32 i;
-  bpf_for(i, 0, ROLE_ID_LEN) {
-    key[i & (ROLE_ID_LEN - 1)] = role->id[i & (ROLE_ID_LEN - 1)];
-  }
-  key[BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1] = '\0';
-
-  void __arena* out = NULL;
-  if (bpfj_str_map_lookup_strlen(
-          bpfj_mount_matchers, key, BPFJ_FILE_MATCH_ROLE_KEY_LEN, &out) != 0) {
-    return NULL;
-  }
-  return out;
-}
 
 static __noinline int bpfj_mount_deny(
     struct bpfj_pod __arena* pod,
@@ -116,7 +84,7 @@ static __noinline bool bpfj_mount_match_allowed(
     if (pos > best_pos ||
         (pos == best_pos && entry->specificity > best_specificity) ||
         (pos == best_pos && entry->specificity == best_specificity &&
-         !entry->has_types)) {
+         !entry->types)) {
       best_pos = pos;
       best_specificity = entry->specificity;
       best = entry;
@@ -125,16 +93,17 @@ static __noinline bool bpfj_mount_match_allowed(
   if (!best) {
     return true;
   }
-  if (!best->has_types || !scratch->has_type) {
+  if (!best->types || !scratch->has_type) {
     return false;
   }
 
-  scratch->type_key.rule_id = best->rule_id;
-  return bpf_map_lookup_elem(&bpfj_mount_types, &scratch->type_key) != NULL;
+  void __arena* found = NULL;
+  return bpfj_str_map_lookup_strlen(
+             best->types, scratch->type, sizeof(scratch->type), &found) == 0;
 }
 
-// The pod loop is deliberately ordinary: file_match_cached and the role map
-// lookup use bpf_for, whose iterator state must not be nested.
+// The pod loop is deliberately ordinary: file_match_cached uses bpf_for,
+// whose iterator state must not be nested.
 static __always_inline int bpfj_mount_enforce_path(
     uintptr_t dentry,
     const char* type) {
@@ -150,10 +119,9 @@ static __always_inline int bpfj_mount_enforce_path(
   if (!scratch) {
     return -EACCES;
   }
-  __builtin_memset(&scratch->type_key, 0, sizeof(scratch->type_key));
+  __builtin_memset(scratch->type, 0, sizeof(scratch->type));
   scratch->has_type = type &&
-      bpf_probe_read_kernel_str(
-          scratch->type_key.type, sizeof(scratch->type_key.type), type) > 0;
+      bpf_probe_read_kernel_str(scratch->type, sizeof(scratch->type), type) > 0;
 
   BPFJ_FILE_MATCH_CACHED_ALLOC(state);
   if (!state) {
@@ -173,8 +141,9 @@ static __always_inline int bpfj_mount_enforce_path(
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
     bpfj_pod_read_role_id(&scratch->role, pod);
     bpfj_pod_read_uuid(&scratch->uuid, pod);
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
     struct bpfj_file_matcher __arena* matcher =
-        bpfj_mount_for_role(&scratch->role);
+        policy ? policy->mount_matcher : NULL;
     if (matcher) {
       const long count = BPFJ_FILE_MATCH_CACHED(
           state,
@@ -218,8 +187,9 @@ static __always_inline int bpfj_mount_enforce_umount(void) {
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
     struct bpfj_role_id role = {};
     bpfj_pod_read_role_id(&role, pod);
-    __u8* allowed = bpf_map_lookup_elem(&bpfj_umount_roles, &role);
-    if (allowed && !*allowed) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (policy && (policy->flags & BPFJ_POLICY_HAS_UMOUNT) &&
+        !(policy->flags & BPFJ_POLICY_UMOUNT_ANY)) {
       return bpfj_mount_deny(pod, task, &role, "umount");
     }
     if (bpfj_is_override(pod)) {
@@ -246,9 +216,8 @@ static __always_inline bool bpfj_mount_has_path_policy(void) {
     barrier_var(pod_pointer);
     struct bpfj_pod __arena* pod =
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
-    struct bpfj_role_id role = {};
-    bpfj_pod_read_role_id(&role, pod);
-    if (bpfj_mount_for_role(&role)) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (policy && policy->mount_matcher) {
       return true;
     }
     if (bpfj_is_override(pod)) {
@@ -401,7 +370,8 @@ int BPF_PROG(
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
     struct bpfj_role_id role = {};
     bpfj_pod_read_role_id(&role, pod);
-    if (bpfj_mount_for_role(&role)) {
+    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
+    if (policy && policy->mount_matcher) {
       return bpfj_mount_deny(pod, task, &role, "remount");
     }
     if (bpfj_is_override(pod)) {
@@ -462,4 +432,4 @@ int BPF_PROG(
   return lsm_ret ? lsm_ret : bpfj_mount_enforce_umount();
 }
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual MIT/GPL";

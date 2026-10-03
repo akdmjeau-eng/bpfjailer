@@ -2,11 +2,8 @@
 
 #include "bpfj/enforce/EnrollGate.h"
 
-#include <string>
-
 #include "bpfj/enforce/PodVars.h"
 #include "bpfj/enforce/Pods.h"
-#include "bpfj/enforce/RoleId.h"
 
 namespace bpfjailer {
 
@@ -32,11 +29,6 @@ Expected<bool> enrollPermitted(
     const PinConfig& cfg,
     pid_t pid,
     std::string_view role) noexcept {
-  auto target = makeRoleId(std::string(role));
-  if (!target) {
-    return makeUnexpected(target.error());
-  }
-
   auto arena = PodArena::open(cfg);
   if (!arena) {
     return makeUnexpected(arena.error());
@@ -45,7 +37,7 @@ Expected<bool> enrollPermitted(
   if (!policies) {
     return makeUnexpected(policies.error());
   }
-  auto targetPolicy = lookupRolePolicy(*policies, *target);
+  auto targetPolicy = lookupRolePolicy(*policies, role);
   if (!targetPolicy) {
     return makeUnexpected(targetPolicy.error());
   }

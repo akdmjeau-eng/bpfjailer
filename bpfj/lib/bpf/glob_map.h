@@ -6,6 +6,7 @@
 #include "bpfj/lib/bpf/heap.h"
 #include "bpfj/lib/bpf/types_glob_map.h"
 #include "bpfj/lib/bpf/types_heap.h"
+#include "bpfj/lib/bpf/vec.h"
 
 // The glob map compiles all patterns into a single bit-parallel NFA whose state
 // is partitioned into independent 64-bit words (see types_glob_map.h), advanced
@@ -17,13 +18,37 @@
 // (base + value length) and a per-gadget epsilon jump moves it to the fixed
 // "exit" bit (base + MAX_VAR_LEN).
 //
-// The matcher is split into GLOBAL functions so the verifier checks each once,
-// and both the compiled header (see GlobMap.h) and the per-run state live on
-// the arena, keeping ~8 KiB off the 512-byte BPF stack.
+// The matcher is split into GLOBAL functions so the verifier checks each once.
+// The compiled header and vector-backed run state live on the arena, keeping
+// scratch proportional to the map rather than to its limits.
 
 static __always_inline __u32
 bpfj_glob_ptr_off(void __arena* base, __arena const void* ptr) {
   return (__u32)((unsigned long)ptr - (unsigned long)base);
+}
+
+static __always_inline u64 __arena* bpfj_glob_word_at(
+    struct bpfj_vec __arena* vec,
+    u32 index) {
+  return bpfj_vec_at(vec, index);
+}
+
+static __always_inline struct bpfj_glob_gadget_run __arena* bpfj_glob_gadget_at(
+    struct bpfj_glob_run __arena* run,
+    u32 index) {
+  return bpfj_vec_at(&run->gadgets, index);
+}
+
+static __always_inline bool bpfj_glob_state_has_accept(
+    struct bpfj_glob_run __arena* run,
+    u32 accept) {
+  if (accept >= run->map->num_accepts) {
+    return false;
+  }
+  u32 word = run->map->accept_word[accept] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
+  u32 bit = run->map->accept_bit[accept] & 63;
+  u64 __arena* state = bpfj_glob_word_at(&run->state, word);
+  return state != NULL && (((*state >> bit) & 1ULL) != 0);
 }
 
 // The binding for a gadget's key, or NULL if unbound. Key 0 is never assigned,
@@ -73,12 +98,8 @@ static __always_inline bool bpfj_glob_map_wants_key(
 }
 
 static __always_inline void bpfj_glob_poison_binding(
-    __arena struct bpfj_glob_run* run,
-    u32 g) {
-  // Path components cannot contain NUL, so a full-width NUL string makes the
-  // gadget impossible to satisfy and keeps malformed bindings fail closed.
-  run->gadget_len[g] = BPFJ_GLOB_MAP_MAX_VAR_LEN;
-  bpfj_heap_zero_arena(run->gadget_val[g], BPFJ_GLOB_MAP_MAX_VAR_LEN);
+    __arena struct bpfj_glob_gadget_run* gadget) {
+  gadget->len = BPFJ_GLOB_MAP_MAX_VAR_LEN + 1;
 }
 
 // GLOBAL function: resolve every gadget's binding once and copy its value into
@@ -88,10 +109,20 @@ __noinline int bpfj_glob_load_bindings(
     __arena struct bpfj_glob_run* run __arg_arena) {
   u32 num_gadgets = run->map->num_gadgets;
 
+  long reserved = bpfj_vec_reserve(&run->gadgets, num_gadgets);
+  if (reserved < 0) {
+    return (int)reserved;
+  }
+  run->gadgets.size = num_gadgets;
+
   u32 g = 0;
   bpf_for(g, 0, BPFJ_GLOB_MAP_MAX_GADGETS) {
     if (g >= num_gadgets) {
       break;
+    }
+    struct bpfj_glob_gadget_run __arena* gadget = bpfj_glob_gadget_at(run, g);
+    if (gadget == NULL) {
+      return -ENOMEM;
     }
     u32 vlen = 0;
     __arena const struct bpfj_glob_binding* binding =
@@ -99,16 +130,18 @@ __noinline int bpfj_glob_load_bindings(
     if (binding != NULL) {
       vlen = binding->len;
       if (vlen > BPFJ_GLOB_MAP_MAX_VAR_LEN) {
-        bpfj_glob_poison_binding(run, g);
+        bpfj_glob_poison_binding(gadget);
         continue;
       }
       // Not unrolled, so the copy spills no temporaries onto this frame.
 #pragma clang loop unroll(disable)
       for (u32 k = 0; k < BPFJ_GLOB_MAP_MAX_VAR_LEN; ++k) {
-        run->gadget_val[g][k] = binding->val[k];
+        gadget->val[k] = k < vlen ? binding->val[k] : 0;
       }
+    } else {
+      bpfj_heap_zero_arena(gadget->val, BPFJ_GLOB_MAP_MAX_VAR_LEN);
     }
-    run->gadget_len[g] = vlen;
+    gadget->len = vlen;
   }
   return 0;
 }
@@ -135,11 +168,22 @@ __noinline int bpfj_glob_close(__arena struct bpfj_glob_run* run __arg_arena) {
       }
       u32 word = run->map->gadget_word[g] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
       u32 base = run->map->gadget_base[g];
-      u32 vlen = run->gadget_len[g];
+      struct bpfj_glob_gadget_run __arena* gadget = bpfj_glob_gadget_at(run, g);
+      if (gadget == NULL) {
+        return -ENOMEM;
+      }
+      u32 vlen = gadget->len;
+      if (vlen > BPFJ_GLOB_MAP_MAX_VAR_LEN) {
+        continue;
+      }
       u32 post = (base + vlen) & 63;
       u32 exit = (base + BPFJ_GLOB_MAP_MAX_VAR_LEN) & 63;
-      if (((run->state[word] >> post) & 1ULL) != 0) {
-        run->state[word] |= 1ULL << exit;
+      u64 __arena* state = bpfj_glob_word_at(&run->state, word);
+      if (state == NULL) {
+        return -ENOMEM;
+      }
+      if (((*state >> post) & 1ULL) != 0) {
+        *state |= 1ULL << exit;
       }
     }
 
@@ -149,7 +193,11 @@ __noinline int bpfj_glob_close(__arena struct bpfj_glob_run* run __arg_arena) {
       if (w >= num_words) {
         break;
       }
-      run->state[w] |= (run->state[w] & run->map->star_mask[w]) << 1;
+      u64 __arena* state = bpfj_glob_word_at(&run->state, w);
+      if (state == NULL) {
+        return -ENOMEM;
+      }
+      *state |= (*state & run->map->star_mask[w]) << 1;
     }
   }
   return 0;
@@ -169,7 +217,14 @@ __noinline int bpfj_glob_step(
   // if value[k] == ch. In the run state, not on the stack, for the budget.
   u32 w = 0;
   bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    run->var_advance[w] = 0;
+    if (w >= num_words) {
+      break;
+    }
+    u64 __arena* advance = bpfj_glob_word_at(&run->var_advance, w);
+    if (advance == NULL) {
+      return -ENOMEM;
+    }
+    *advance = 0;
   }
   u32 g = 0;
   bpf_for(g, 0, BPFJ_GLOB_MAP_MAX_GADGETS) {
@@ -178,12 +233,18 @@ __noinline int bpfj_glob_step(
     }
     u32 word = run->map->gadget_word[g] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
     u32 base = run->map->gadget_base[g];
-    u32 vlen = run->gadget_len[g];
+    struct bpfj_glob_gadget_run __arena* gadget = bpfj_glob_gadget_at(run, g);
+    u64 __arena* advance = bpfj_glob_word_at(&run->var_advance, word);
+    if (gadget == NULL || advance == NULL) {
+      return -ENOMEM;
+    }
+    u32 vlen = gadget->len;
     // Constant-bound and break-free so clang unrolls it rather than nesting a
     // loop the verifier would explore combinatorially.
     for (u32 k = 0; k < BPFJ_GLOB_MAP_MAX_VAR_LEN; ++k) {
-      if (k < vlen && (u8)run->gadget_val[g][k] == ch) {
-        run->var_advance[word] |= 1ULL << ((base + k) & 63);
+      if (vlen <= BPFJ_GLOB_MAP_MAX_VAR_LEN && k < vlen &&
+          (u8)gadget->val[k] == ch) {
+        *advance |= 1ULL << ((base + k) & 63);
       }
     }
   }
@@ -194,12 +255,17 @@ __noinline int bpfj_glob_step(
     if (w >= num_words) {
       break;
     }
-    u64 cur = run->state[w];
+    u64 __arena* state = bpfj_glob_word_at(&run->state, w);
+    u64 __arena* advance = bpfj_glob_word_at(&run->var_advance, w);
+    if (state == NULL || advance == NULL) {
+      return -ENOMEM;
+    }
+    u64 cur = *state;
     if (cur == 0) {
       continue;
     }
-    u64 cm = char_mask[(u32)ch * num_words + w] | run->var_advance[w];
-    run->state[w] = ((cur & cm) << 1) | (cur & star_mask[w]);
+    u64 cm = char_mask[(u32)ch * num_words + w] | *advance;
+    *state = ((cur & cm) << 1) | (cur & star_mask[w]);
   }
 
   // bpfj_glob_eval calls the closure separately, keeping the two siblings.
@@ -212,20 +278,26 @@ __noinline long bpfj_glob_eval_state(
   u32 num_words = run->map->num_words;
 
   // A separate frame, to stay within the bpf2bpf stack budget.
-  bpfj_glob_load_bindings(run);
-
-  // Every slot, so later reads are definitely initialized for the verifier.
-  u32 w = 0;
-  bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    u64 v = 0;
-    if (w < num_words) {
-      v = run->map->init_state[w];
-    }
-    run->state[w] = v;
+  long ret = bpfj_glob_load_bindings(run);
+  if (ret < 0) {
+    return ret;
   }
 
+  ret = bpfj_vec_assign(&run->state, run->map->init_state, num_words);
+  if (ret < 0) {
+    return ret;
+  }
+  ret = bpfj_vec_reserve(&run->var_advance, num_words);
+  if (ret < 0) {
+    return ret;
+  }
+  run->var_advance.size = num_words;
+
   // For a pattern starting with an empty ${NAME} or a '*'.
-  bpfj_glob_close(run);
+  ret = bpfj_glob_close(run);
+  if (ret < 0) {
+    return ret;
+  }
 
   u32 len = run->len;
   u32 i = 0;
@@ -233,8 +305,14 @@ __noinline long bpfj_glob_eval_state(
     if (i >= len) {
       break;
     }
-    bpfj_glob_step(run, (u8)run->str[i]);
-    bpfj_glob_close(run);
+    ret = bpfj_glob_step(run, (u8)run->str[i]);
+    if (ret < 0) {
+      return ret;
+    }
+    ret = bpfj_glob_close(run);
+    if (ret < 0) {
+      return ret;
+    }
   }
 
   return 0;
@@ -242,28 +320,28 @@ __noinline long bpfj_glob_eval_state(
 
 // GLOBAL function: evaluate the NFA and collect each matching pattern's value.
 __noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
+  bpfj_vec_clear(&run->results);
   long ret = bpfj_glob_eval_state(run);
   if (ret < 0) {
     return ret;
   }
 
-  // Stopping once the result buffer is full bounds `count` and lets the
-  // verifier converge, so at most BPFJ_GLOB_MAP_MAX_RESULTS are reported.
   long count = 0;
   u32 j = 0;
   bpf_for(j, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
-    if (j >= run->map->num_accepts || count >= BPFJ_GLOB_MAP_MAX_RESULTS) {
+    if (j >= run->map->num_accepts) {
       break;
     }
-    u32 aw = run->map->accept_word[j] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
-    u32 bit = run->map->accept_bit[j] & 63;
-    if (((run->state[aw] >> bit) & 1ULL) != 0) {
-      run->results[count] = run->map->accept_val[j];
+    if (bpfj_glob_state_has_accept(run, j)) {
+      u64 __arena* result = bpfj_vec_emplace_back(&run->results);
+      if (result == NULL) {
+        return -ENOMEM;
+      }
+      *result = run->map->accept_val[j];
       ++count;
     }
   }
 
-  run->num_matches = (u32)count;
   return count;
 }
 
@@ -279,6 +357,8 @@ static __noinline void bpfj_glob_run_bind(
     const struct bpfj_glob_map __arena* map,
     const struct bpfj_glob_bindings __arena* bindings) {
   run->map = map;
+  run->str = NULL;
+  run->len = 0;
 
   // Word-wise, not a struct assignment: clang lowers that to a memcpy whose
   // destination base folds back to the pre-addr_space_cast scalar. Only the
@@ -306,71 +386,82 @@ static __noinline void bpfj_glob_run_bind(
   run->bindings.count = count;
 }
 
-// Public entry point. Copies the search string into the run, runs the matcher,
-// and copies matching values into
-// out[0..min(matches, BPFJ_GLOB_MAP_MAX_RESULTS)).
+// Public entry point. References the arena search string for this evaluation;
+// matching values remain in run->results until the next evaluation.
 //
 // run: bound by bpfj_glob_run_bind, and meant to be reused across lookups --
-//      it is several KiB of arena, and the heap lock is a trylock, so
-//      allocating one per lookup would let heap contention read as a miss.
-// out: must be at least BPFJ_GLOB_MAP_MAX_RESULTS wide.
-//
+//      its vectors retain arena allocations, and the heap lock is a trylock,
+//      so allocating one per lookup would let heap contention read as a miss.
 // Returns the match count or a negative errno. A NULL run, or one bound to a
 // NULL header, matches nothing rather than dereferencing arena offset 0, which
 // reads the heap control struct rather than faulting.
 static __noinline long bpfj_glob_map_lookup(
     struct bpfj_glob_run __arena* run,
     const char __arena* str,
-    u32 len,
-    u64 __arena* out) {
+    u32 len) {
   if (run == NULL || run->map == NULL) {
     return 0;
   }
 
   if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
-    len = BPFJ_GLOB_MAP_MAX_STR_LEN;
+    return -E2BIG;
   }
+  if (str == NULL && len != 0) {
+    return -EINVAL;
+  }
+  run->str = str;
   run->len = len;
-
-  u32 i = 0;
-  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_STR_LEN) {
-    if (i >= len) {
-      break;
-    }
-
-    // TODO get rid of copy
-    run->str[i] = str[i];
-  }
-
-  long count = bpfj_glob_eval(run);
-
-  u32 n = count < 0 ? 0 : (u32)count;
-  if (n > BPFJ_GLOB_MAP_MAX_RESULTS) {
-    n = BPFJ_GLOB_MAP_MAX_RESULTS;
-  }
-  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_RESULTS) {
-    if (i >= n) {
-      break;
-    }
-
-    // TODO: copy again
-    out[i] = run->results[i];
-  }
-
-  return count;
+  return bpfj_glob_eval(run);
 }
 
-// Match one caller-assigned value without truncating at the result-vector
-// capacity, so several patterns carrying the same policy id remain exact.
+static __always_inline u64 __arena* bpfj_glob_map_result_at(
+    struct bpfj_glob_run __arena* run,
+    u32 index) {
+  return bpfj_vec_at(&run->results, index);
+}
+
+// Reserve run-owned input for a kernel-pointer caller to fill.
+static __noinline char __arena* bpfj_glob_run_owned_input(
+    struct bpfj_glob_run __arena* run,
+    u32 len) {
+  if (len > BPFJ_GLOB_MAP_MAX_STR_LEN ||
+      bpfj_vec_reserve(&run->owned_str, len) < 0) {
+    return NULL;
+  }
+  run->owned_str.size = len;
+  run->str = run->owned_str.buf;
+  run->len = len;
+  return run->owned_str.buf;
+}
+
+static __noinline long
+bpfj_glob_run_read_kernel(struct bpfj_glob_run __arena* run, u32 len, u64 src) {
+  if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+    return -E2BIG;
+  }
+  char __arena* input = bpfj_glob_run_owned_input(run, len);
+  if (input == NULL && len != 0) {
+    return -ENOMEM;
+  }
+  return len == 0 ? 0 : bpfj_heap_read_kernel(input, len, src);
+}
+
+// Match one caller-assigned value without materializing unrelated results.
 // The caller has already copied the search string into run->str.
 static __noinline long
 bpfj_glob_map_contains(struct bpfj_glob_run __arena* run, u32 len, u64 wanted) {
-  if (run == NULL || run->map == NULL || len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+  if (run == NULL || run->map == NULL) {
     return 0;
+  }
+  if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+    return -E2BIG;
+  }
+  if (run->str == NULL && len != 0) {
+    return -EINVAL;
   }
 
   run->len = len;
-  long ret = bpfj_glob_eval(run);
+  long ret = bpfj_glob_eval_state(run);
   if (ret < 0) {
     return ret;
   }
@@ -381,9 +472,7 @@ bpfj_glob_map_contains(struct bpfj_glob_run __arena* run, u32 len, u64 wanted) {
     if (i >= accepts) {
       break;
     }
-    u32 word = run->map->accept_word[i] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
-    u32 bit = run->map->accept_bit[i] & 63;
-    if (((run->state[word] >> bit) & 1ULL) != 0 &&
+    if (bpfj_glob_state_has_accept(run, i) &&
         run->map->accept_val[i] == wanted) {
       return 1;
     }
@@ -398,8 +487,14 @@ static __noinline long bpfj_glob_map_contains_range(
     u32 len,
     u32 first,
     u32 count) {
-  if (run == NULL || run->map == NULL || len > BPFJ_GLOB_MAP_MAX_STR_LEN ||
-      first > run->map->num_accepts || count > run->map->num_accepts - first) {
+  if (run == NULL || run->map == NULL) {
+    return 0;
+  }
+  if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+    return -E2BIG;
+  }
+  if ((run->str == NULL && len != 0) || first > run->map->num_accepts ||
+      count > run->map->num_accepts - first) {
     return 0;
   }
 
@@ -415,13 +510,24 @@ static __noinline long bpfj_glob_map_contains_range(
       break;
     }
     u32 accept = first + i;
-    u32 word = run->map->accept_word[accept] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
-    u32 bit = run->map->accept_bit[accept] & 63;
-    if (((run->state[word] >> bit) & 1ULL) != 0) {
+    if (bpfj_glob_state_has_accept(run, accept)) {
       return 1;
     }
   }
   return 0;
+}
+
+static __always_inline void bpfj_glob_run_destroy(
+    struct bpfj_glob_run __arena* run) {
+  bpfj_vec_destroy(&run->state);
+  bpfj_vec_destroy(&run->var_advance);
+  bpfj_vec_destroy(&run->gadgets);
+  bpfj_vec_destroy(&run->results);
+  bpfj_vec_destroy(&run->owned_str);
+  run->map = NULL;
+  run->str = NULL;
+  run->len = 0;
+  run->bindings.count = 0;
 }
 
 static __noinline void bpfj_glob_map_destroy(

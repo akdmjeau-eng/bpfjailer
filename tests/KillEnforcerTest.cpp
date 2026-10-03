@@ -87,7 +87,7 @@ TEST(KillEnforcer, EnforcesPoliciesWithOneAttachment) {
 
   ASSERT_EQ(
       runIsolated(
-          "an unconfigured role is unrestricted",
+          "an unspecified kill policy denies",
           [] {
             Child target;
             enroll("default-deny", ::getpid());

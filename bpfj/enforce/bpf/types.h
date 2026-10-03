@@ -123,6 +123,8 @@ enum bpfj_policy_mode {
 #define BPFJ_POLICY_LKM_ANY (1U << 4)
 #define BPFJ_POLICY_FS_ANY (1U << 5)
 #define BPFJ_POLICY_VERITY_ANY (1U << 6)
+#define BPFJ_POLICY_HAS_UMOUNT (1U << 7)
+#define BPFJ_POLICY_UMOUNT_ANY (1U << 8)
 
 struct bpfj_role_policy;
 struct bpfj_glob_map;
@@ -162,6 +164,11 @@ struct bpfj_role_policy {
   const struct bpfj_ipc_pattern_set __arena* mq_posix_patterns;
   const struct bpfj_ipc_pattern_set __arena* shm_posix_patterns;
   struct bpfj_file_matcher __arena* fs_matcher;
+  struct bpfj_file_matcher __arena* mount_matcher;
+  struct bpfj_file_matcher __arena* unix_path_matcher;
+  struct bpfj_glob_map __arena* unix_bind_abstract;
+  struct bpfj_glob_map __arena* unix_connect_abstract;
+  struct bpfj_glob_map __arena* unix_dgram_abstract;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
 };
 

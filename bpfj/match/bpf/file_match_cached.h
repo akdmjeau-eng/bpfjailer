@@ -6,7 +6,6 @@
 #include "bpfj/lib/bpf/heap.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 #include "bpfj/lib/bpf/perf_map.h"
-#include "bpfj/lib/bpf/str_map.h"
 #include "bpfj/lib/bpf/vec.h"
 #include "bpfj/match/bpf/mount.h"
 #include "bpfj/match/bpf/types_file_match.h"
@@ -113,48 +112,6 @@ volatile __u64 bpfj_file_match_cached_cache_miss_counter;
     }                                                                       \
     _ret;                                                                   \
   })
-
-// Defines `_name(const struct role_id*)`, returning the matcher that `_map`
-// registers for that role, or NULL if it registers none -- which is also the
-// "this role has no policy here" answer an enforcer wants.
-//
-// A macro that defines a function, rather than a function taking the table,
-// for two reasons. The table is a per-object global. And the staging buffer
-// has to be sized by a compile-time constant: the str map compares the search
-// key as ordinary memory of a size the verifier can pin down, which a role id
-// sitting in a map value is not, so the id is copied into a local first.
-// Expanding at the call site also means `struct role_id` and ROLE_ID_LEN
-// resolve there, and this header does not have to reach into the enforcers'
-// types for them.
-//
-// static __noinline, so the staging buffer gets a frame of its own rather than
-// the hook's; static rather than global, so the arena pointer it returns keeps
-// its provenance in the caller.
-#define BPFJ_FILE_MATCH_CACHED_DEFINE_MATCHER_FOR(_name, _map)         \
-  static __noinline struct bpfj_file_matcher __arena* _name(           \
-      const struct role_id* role) {                                    \
-    _Static_assert(                                                    \
-        ROLE_ID_LEN <= BPFJ_FILE_MATCH_ROLE_KEY_LEN,                   \
-        "a role id must fit in the staged lookup key");                \
-                                                                       \
-    char _key[BPFJ_FILE_MATCH_ROLE_KEY_LEN] = {};                      \
-    u32 _i;                                                            \
-    bpf_for(_i, 0, ROLE_ID_LEN) {                                      \
-      _key[_i & (BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1)] =                  \
-          role->id[_i & (ROLE_ID_LEN - 1)];                            \
-    }                                                                  \
-    /* The scan is bounded by the whole buffer, so make sure it finds  \
-     * a terminator even if the role id filled its own. */             \
-    _key[BPFJ_FILE_MATCH_ROLE_KEY_LEN - 1] = '\0';                     \
-                                                                       \
-    void __arena* _out = NULL;                                         \
-    if (bpfj_str_map_lookup_strlen(                                    \
-            (_map), _key, BPFJ_FILE_MATCH_ROLE_KEY_LEN, &_out) != 0) { \
-      return NULL;                                                     \
-    }                                                                  \
-                                                                       \
-    return _out;                                                       \
-  }
 
 // Rename is uncommon for enrolled tasks, and correctness matters more than
 // preserving unrelated cache entries. Retire the whole generation instead of
@@ -318,6 +275,7 @@ static __noinline void __arena* bpfj_file_match_cached_state_alloc(void) {
 
   bpfj_vec_init(&state->iters, sizeof(struct bpfj_file_match_cached_iter));
   bpfj_vec_init(&state->saved_dentries, sizeof(uintptr_t));
+  bpfj_glob_run_init(&state->glob_run);
   state->leaf = NULL;
   state->mount = 0;
   state->matcher = NULL;
@@ -340,15 +298,12 @@ static void bpfj_file_match_cached_state_free(void __arena** ptr) {
 
   struct bpfj_file_match_cached_state __arena* state = *ptr;
   bpfj_shared_ptr_release_arena(&state->mount_snapshot);
+  bpfj_glob_run_destroy(&state->glob_run);
   bpfj_vec_destroy(&state->iters);
   bpfj_vec_destroy(&state->saved_dentries);
   BPFJ_HEAP_FREE(state);
   *ptr = NULL;
 }
-
-struct bpfj_file_match_cached_glob_results {
-  __u64 results[BPFJ_GLOB_MAP_MAX_RESULTS];
-};
 
 // Cache generation advanced by an enrolled rename. The kernel rename seqcount
 // below still protects an individual path walk from racing a rename anywhere.
@@ -586,28 +541,26 @@ __noinline long bpfj_file_match_cached_nodes(
     struct bpfj_file_match_cached_state __arena* state __arg_arena,
     struct bpfj_file_match_name __arena* name __arg_arena,
     long size) {
-  BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_glob_results, results);
-  if (!results) {
-    return -ENOMEM;
-  }
-
   u64 len = size - 1; // Drop null term
   if (len > BPFJ_FILE_MATCH_NAME_LEN) {
     len = BPFJ_FILE_MATCH_NAME_LEN;
   }
 
-  long n = bpfj_glob_map_lookup(run, name->name, (u32)len, results->results);
+  long n = bpfj_glob_map_lookup(run, name->name, (u32)len);
   if (n < 0) {
     return n;
   }
 
   u32 i = 0;
-  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_RESULTS) {
+  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
     if (i >= (u32)n) {
       break;
     }
-
-    bpfj_file_match_cached_process_indexes(matcher, state, results->results[i]);
+    u64 __arena* result = bpfj_glob_map_result_at(run, i);
+    if (result == NULL) {
+      return -ENOMEM;
+    }
+    bpfj_file_match_cached_process_indexes(matcher, state, *result);
   }
 
   return 0;
