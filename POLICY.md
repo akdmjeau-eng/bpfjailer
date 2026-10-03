@@ -41,7 +41,8 @@ Most resource families use one of three mutually exclusive scopes:
 
 Leaving a scoped family unconfigured denies it. `any: true` supplies the open
 form for every family not configured more narrowly. `keyring-own` is the
-role-owned equivalent of `*-pod`.
+role-owned equivalent of `*-pod`. Proc's fully open option is spelled
+`any-proc`; every other scoped family uses the `*-any` spelling.
 
 A task holding several roles must be allowed by each role, newest first.
 `override-stacked: true` stops that actor-side walk at the marked role. It
@@ -52,11 +53,13 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | Family | Options | Behavior |
 |---|---|---|
 | Files | `paths`, `fs-any` | `paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`; it is mutually exclusive with `fs-any`. Leaving both unset denies access. |
-| Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, open exec, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
+| Executable code | `exec-paths` | Map path patterns to `allow-exec`, `allow-setuid`, and `allow-shared-object`. Leaving it unset denies executable code unless `any: true` applies. |
+| Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, bypass that integrity check, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
 | BPF | `bpf-pod`, `bpf-roles`, `bpf-any`, `untracked-bpf` | Gate `bpf(2)` and opening maps/programs by creator ownership. `untracked-bpf` suppresses ownership for objects created by the role and requires a BPF grant. |
 | Kernel loading | `lkm-any` | Permit module and kexec image loading; absence denies both. |
 | Signals | `kill-pod`, `kill-roles`, `kill-any` | Gate signals by target pod/role. |
 | Ptrace | `ptrace-pod`, `ptrace-roles`, `ptrace-any` | Gate attach and `PTRACE_TRACEME`; read-only inspection used by tools such as `ps` is not gated. |
+| Process files | `proc-pod`, `proc-roles`, `any-proc` | Gate access to another task through procfs after resolving its pid in that proc mount's pid namespace. |
 | Keyrings | `keyring-own`, `keyring-roles`, `keyring-any` | Gate writes to role fs-verity keyrings. |
 | System V queues | `mq-sysv-pod`, `mq-sysv-roles`, `mq-sysv-any` | Gate lookup, control, send and receive by tracked owner. |
 | POSIX queues | `mq-posix-pod`, `mq-posix-roles`, `mq-posix-any`, `mq-posix-pattern` | Gate open, descriptor receipt and queue operations by owner or name pattern. |
@@ -69,7 +72,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 Role and certificate references are validated when the policy is parsed.
 Unknown role options, duplicate entries and mutually exclusive scopes are
 errors. A task may hold at most eight pods, and each pod may carry at most 16
-variables.
+variables with values of at most 62 bytes.
 
 ## Paths and patterns
 
@@ -83,6 +86,14 @@ optional glob suffix. The variable must be declared by top-level `vars` and
 present on the pod for the dependent pattern to match. `NONE` denies access,
 `RDONLY` permits reads, `RDWR` permits reads and writes, and `RDEXEC` permits
 reads and execution.
+
+`exec-paths` uses the same cached path matching, independently of `paths` and
+fs-verity. Each entry is a permissions table; omitted permissions are false.
+`allow-exec` permits a normal exec, set-user-ID and set-group-ID binaries also
+need `allow-setuid`, and executable mmap or mprotect also needs
+`allow-shared-object`. The longest matching path wins. There is no
+operation-specific open key: `any: true` supplies unrestricted executable
+code only when the role has no `exec-paths` table.
 
 Unix pathname keys begin with `/` and apply recursively. Abstract names begin
 with `@` and use glob matching. The most specific matching rule wins and an
@@ -102,7 +113,12 @@ destination are denied because their LSM hook exposes no source type.
 POSIX queue and shared-memory patterns match names without their leading `/`.
 They support literals, `?`, `*`, and `${NAME}`. A pattern grants access
 regardless of owner and cannot be combined with the corresponding `*-any`.
-System V IPC is not name-matched.
+Backslash escapes a metacharacter. System V IPC is not name-matched.
+
+Variable-expanded matchers inspect only the first four variables carried by a
+pod, and a bound value may be at most 39 bytes to match. Longer values and the
+remaining variables are valid pod metadata but do not satisfy `$NAME` or
+`${NAME}` references.
 
 ## Resource ownership and capabilities
 

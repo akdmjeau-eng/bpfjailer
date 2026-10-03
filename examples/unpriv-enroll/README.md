@@ -78,6 +78,8 @@ outside.
 `bpfjctl wrap`: the same `ROLE USER_ID -- COMMAND`
 shape, except it enrolls over the socket instead of writing the maps, then
 execs. Jail membership survives exec, so the command inherits the pod.
+Pass `-V NAME=VALUE` repeatedly to set up to 16 variables declared by the
+policy.
 
 It is also the smallest demonstration of what `srv/Client.h` costs a caller:
 
@@ -86,9 +88,9 @@ $ ldd build/bpfjclient
     libstdc++.so.6 ... libc.so.6 ...
 ```
 
-No libbpf, no BPF skeletons. `build.sh` builds it on its own
-line for that reason — a service that wants to jail itself needs a C++
-compiler and nothing else.
+No libbpf, no BPF skeletons. `build.sh` builds it on its own line for that
+reason — a service that wants to jail itself needs only a C++ toolchain and
+the usual C/C++ runtime.
 
 ## systemd
 

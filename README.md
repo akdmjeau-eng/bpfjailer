@@ -24,6 +24,8 @@ then decides what each role may do:
   to, or whether it may write keyrings at all.
 - **Filesystem paths** — read, write and execute access using cached glob
   matchers evaluated in PID 1's mount namespace.
+- **Executable code** — separate path rules for exec, set-id exec and
+  executable file mappings.
 - **Kernel loading** — kernel module and kexec loading.
 - **IPC** — ownership-aware System V and POSIX message queues and shared
   memory, plus variable-expanded name patterns for POSIX objects.
@@ -48,7 +50,7 @@ and an unprivileged process can enroll itself through `bpfjsrv`.
 | `ctl/`    | `bpfjctl`     | General purpose tool for attaching, reloading, inspecting and detaching the jailer, and for enrolling processes. |
 | `cmd/`    | `bpfjcmd`     | `bpfjctl` with its arguments, and optionally its policy, compiled in. It ignores `argv`, so it can be statically linked and fs-verity signed as a single unit. |
 | `srv/`    | `bpfjsrv`     | Socket activated server that enrolls unprivileged callers into roles that allow it. |
-| `client/` | `bpfjclient`  | Minimal client for `bpfjsrv`. It depends only on libc. |
+| `client/` | `bpfjclient`  | Minimal client for `bpfjsrv`, with no libbpf or BPF-toolchain dependency. |
 | `log/`    | `bpfjlog`     | Consumer for the pinned diagnostic and structured-event ring buffers. |
 | `tests/`  | `bpfjtest`    | Test suite. |
 
@@ -107,6 +109,10 @@ The tests have to run as root, because each one creates a mount namespace and
 mounts a bpffs. `make test` builds as the invoking user and runs only the test
 binary under `sudo`.
 
+Tests run serially by default because concurrent BPF LSM detach can panic
+affected kernels. Use `make test TEST_ARGS=Suite.Test` for a focused case, and
+only opt into `-j N` or `BPFJTEST_JOBS=N` inside a disposable VM.
+
 ## Usage
 
 ```
@@ -114,7 +120,7 @@ sudo bpfjctl check  policy.toml          # parse a policy and report what it hol
 sudo bpfjctl attach policy.toml          # load and pin the jailer
 sudo bpfjctl replace policy.toml         # reload without releasing jailed tasks
 sudo bpfjctl wrap ROLE USER_ID -- CMD    # run CMD in a new pod
-sudo bpfjctl enroll ROLE USER_ID PID     # enroll a running process
+sudo bpfjctl enroll ROLE USER_ID PID [NAME=VALUE...] # enroll with variables
 sudo bpfjctl show PID                    # pods a process is in
 sudo bpfjctl list                        # every pod and its processes
 sudo bpfjctl detach                      # unpin and unload
@@ -210,6 +216,9 @@ through bpfjsrv is denied. Unix-socket and mount path maps differ: an
 unconfigured or unmatched operation is allowed, so use an explicit root deny
 when the map is intended as an allowlist. An absent `umount` abstains.
 
+The fully open proc option is named `any-proc`; the other ownership families
+use the `*-any` order.
+
 `any = true` opens every operation that has no more specific option. This is
 useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 `kill-roles`, `paths`, or `enforce-binary-certs` overrides `any` for that
@@ -221,6 +230,15 @@ are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
 component expands a variable carried by the pod. Path results are cached by
 mount identity and pod variable bindings and invalidated across filesystem
 mutation. `fs-any` and `paths` are mutually exclusive.
+
+`exec-paths` is an independent executable-code gate. Each matching path has
+`allow-exec`, `allow-setuid`, and `allow-shared-object` booleans; omitted
+permissions are false and the longest matching path wins. `allow-setuid` is
+required in addition to `allow-exec` for a set-user-ID or set-group-ID binary,
+while `allow-shared-object` covers executable file mappings. Ordinary `paths`
+access and fs-verity policy must also permit the operation. There is no
+`exec-any` key: `any = true` opens executable code only when `exec-paths` is
+absent.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its
@@ -275,7 +293,7 @@ socket.
 
 `mount` maps destination paths to lists of filesystem type names. Rules apply
 recursively, the longest matching path wins, and unmatched destinations are
-allowed. An empty list denies every mount at that path, so `'/':` is a
+allowed. An empty list denies every mount at that path, so `"/" = []` is a
 default-deny rule. `umount` is a role-wide boolean; leaving it out abstains,
 `false` denies unmounting, and `true` permits it. `move_mount` requires mount
 permission for the destination and umount permission for the source;
@@ -297,6 +315,13 @@ documented in `bpfj/policy/Policy.h`.
 list is refused, and with no `vars` at all no pod carries any. A `replace`
 carries each pod's variables across by name, and fails if the new policy no
 longer lists one a pod is carrying.
+
+A pod carries at most 16 variables and each value is at most 62 bytes.
+`bpfjctl enroll` accepts trailing `NAME=VALUE` arguments; `bpfjclient` uses a
+repeatable `-V NAME=VALUE`. Glob expansion currently examines only the first
+four variables in a pod, and a value longer than 39 bytes cannot match a
+`$NAME` or `${NAME}` reference even though it remains available as pod
+metadata.
 
 See [POLICY.md](POLICY.md) for the complete option matrix, matching semantics
 and replacement behavior.

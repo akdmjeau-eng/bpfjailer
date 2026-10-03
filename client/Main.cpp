@@ -51,7 +51,7 @@ const struct argp_option kOptions[] = {
      kVarKey,
      "NAME=VALUE",
      0,
-     "Set a pod variable, repeatable (at most 4)",
+     "Set a pod variable, repeatable (at most 16)",
      0},
     {},
 };
