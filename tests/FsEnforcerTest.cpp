@@ -89,6 +89,25 @@ TEST(FsEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_fs_file_ioctl"));
 }
 
+TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
+  Fixture fixture;
+  attach("      " + fixture.file() + ": NONE\n");
+
+  auto arena = bpfjailer::PodArena::open(testPins());
+  ASSERT(arena.hasValue());
+  const auto allocsBefore = arena->ctrl()->total_alloc;
+  const auto freesBefore = arena->ctrl()->total_free;
+  const auto usedBefore = arena->ctrl()->current_used;
+
+  for (int i = 0; i < 100; ++i) {
+    ASSERT_EQ(openErrno(fixture.file(), O_RDONLY), 0);
+  }
+
+  ASSERT_EQ(arena->ctrl()->total_alloc, allocsBefore);
+  ASSERT_EQ(arena->ctrl()->total_free, freesBefore);
+  ASSERT_EQ(arena->ctrl()->current_used, usedBefore);
+}
+
 TEST(FsEnforcer, ReadOnlyAllowsReadsAndDeniesWrites) {
   Fixture fixture;
   attach("      " + fixture.file() + ": RDONLY\n");

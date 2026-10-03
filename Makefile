@@ -302,6 +302,7 @@ TEST_BIN := $(BUILD)/bpfjtest
 # hang the link off it.
 LINKMODE     := $(BUILD)/.linkmode
 LINKMODE_NOW := $(if $(filter 1,$(STATIC)),static,dynamic)
+LIBARENA_CONFIG := $(BUILD)/.libarena-config
 
 # ---------------------------------------------------------------------------
 # bpfjcmd
@@ -537,7 +538,7 @@ $(VMLINUX):
 # the generated dependency applies to the target make actually builds. Without
 # these an edit to a header rebuilds nothing, and the stale skeleton that
 # leaves behind looks like the source change simply had no effect.
-$(BUILD)/%.bpf.o: %.bpf.c $(VMLINUX) | libarena-check
+$(BUILD)/%.bpf.o: %.bpf.c $(VMLINUX) $(LIBARENA_CONFIG) | libarena-check
 	@mkdir -p $(dir $@)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_LIBARENA_FLAGS) $(INCLUDES) -MMD -MP -MT $@ -MF $(@:.bpf.o=.bpf.d) -c $< -o $@.tmp
 	$(BPFTOOL) gen object $@ $@.tmp
@@ -550,6 +551,11 @@ libarena-check:
 		echo "libarena not found at '$(LIBARENA)'. Clone it and set LIBARENA:" >&2; \
 		echo "  git clone https://github.com/libbpf/libarena ~/libarena" >&2; \
 		echo "  make LIBARENA=~/libarena" >&2; \
+		exit 1; \
+	elif ! grep -q 'arena_spinlock_t __arg_arena __arena \*lock' \
+		"$(LIBARENA_INCLUDE)/bpf_arena_spin_lock.h"; then \
+		echo "libarena at '$(LIBARENA)' lacks arena argument tags." >&2; \
+		echo "Update libarena or use the fbsource vendored revision." >&2; \
 		exit 1; \
 	fi
 
@@ -570,6 +576,14 @@ $(LINKMODE): FORCE
 	@mkdir -p $(dir $@)
 	@if [ ! -f $@ ] || [ "$$(cat $@)" != "$(LINKMODE_NOW)" ]; then \
 		echo "$(LINKMODE_NOW)" > $@; \
+	fi
+
+# LIBARENA is a command-line path, so dependency files alone cannot tell make
+# that an existing BPF object was compiled against a different checkout.
+$(LIBARENA_CONFIG): FORCE
+	@mkdir -p $(dir $@)
+	@if [ ! -f $@ ] || [ "$$(cat $@)" != "$(LIBARENA_INCLUDE)" ]; then \
+		echo "$(LIBARENA_INCLUDE)" > $@; \
 	fi
 
 # Rewritten only when the arguments actually change, for the same reason as

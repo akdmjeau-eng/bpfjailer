@@ -84,13 +84,15 @@ static __noinline bool bpfj_fs_match_allowed(
 // loop is ordinarily one iteration and is unrolled rather than expressed with
 // bpf_for: file_match_cached itself uses bpf_for and those iterators must never
 // be nested.
-static __always_inline int bpfj_fs_enforce(
-    struct bpfj_file_match_cached_state __arena* state,
-    uintptr_t dentry,
-    __u32 wanted) {
+static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
   struct task_struct* task = bpf_get_current_task_btf();
   struct bpfj_pid_data* pidData = bpfj_get_current_pid_data();
   if (!task || !pidData || !dentry) {
+    return 0;
+  }
+
+  BPFJ_FILE_MATCH_CACHED_ALLOC(state);
+  if (!state) {
     return 0;
   }
 
@@ -143,11 +145,8 @@ static __always_inline int bpfj_fs_enforce(
   return 0;
 }
 
-#define BPFJ_FS_CHECK(_dentry, _mode)                    \
-  ({                                                     \
-    BPFJ_FILE_MATCH_CACHED_ALLOC(state);                 \
-    bpfj_fs_enforce(state, (uintptr_t)(_dentry), _mode); \
-  })
+#define BPFJ_FS_CHECK(_dentry, _mode) \
+  bpfj_fs_enforce((uintptr_t)(_dentry), _mode)
 
 SEC("lsm/file_open")
 int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
@@ -223,7 +222,13 @@ int BPF_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  return BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+  if (ret) {
+    return ret;
+  }
+
+  BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(bpfj_fs_match_lru, old_dentry);
+  return 0;
 }
 
 SEC("lsm/inode_rename")
@@ -242,11 +247,6 @@ int BPF_PROG(
     return ret;
   }
 
-  long invalidate = BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(
-      bpfj_fs_match_lru, old_dentry);
-  if (invalidate < 0) {
-    BPFJ_LOG_ERR(-invalidate, "filesystem rename cache invalidation failed");
-  }
   return 0;
 }
 

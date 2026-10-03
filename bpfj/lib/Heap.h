@@ -48,19 +48,25 @@ err::Expected<> init(Skel& obj) {
     return err::Error(std::errc::invalid_argument, "No arena mmap");
   }
 
-  void* const arenaBase =
-      reinterpret_cast<void*>(bpf_map__map_extra(obj->maps().bpfj_heap_arena));
-  if (arenaBase != nullptr) {
-    // OSS assigns a fixed map_extra so pinned arenas can be reopened at the
-    // same address. Replace libbpf's staging mapping there with the map fd.
-    constexpr std::size_t kArenaMapSize =
-        BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE;
+  // When the kernel exposes an arena address, replace libbpf's anonymous
+  // staging mapping for a reused pinned arena with the map fd. Older kernels
+  // report zero and libbpf's initial-value pointer is already the live map.
+  constexpr std::size_t kArenaMapSize =
+      BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE;
+  const int mapFd = bpf_map__fd(obj->maps().bpfj_heap_arena);
+  struct bpf_map_info info{};
+  __u32 infoLen = sizeof(info);
+  if (mapFd < 0 || bpf_obj_get_info_by_fd(mapFd, &info, &infoLen) != 0) {
+    return err::Error::fromErrno("Failed to inspect arena map");
+  }
+  if (info.map_extra != 0) {
+    void* const arenaBase = reinterpret_cast<void*>(info.map_extra);
     void* const mapped = ::mmap(
         arenaBase,
         kArenaMapSize,
         PROT_READ | PROT_WRITE,
         MAP_SHARED | MAP_FIXED,
-        bpf_map__fd(obj->maps().bpfj_heap_arena),
+        mapFd,
         0);
     if (mapped == MAP_FAILED) {
       return err::Error::fromErrno("Failed to mmap arena");
@@ -78,14 +84,14 @@ err::Expected<> init(Skel& obj) {
         std::errc::no_buffer_space, "Arena globals overflow their reservation");
   }
 
-  auto* ctrl = reinterpret_cast<struct bpfj_heap_control*>(ret);
+  auto* ctrl = static_cast<struct bpfj_heap_control*>(ret);
   if (ctrl->arena_size == 0) {
     constexpr __u32 arenaSize = BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE;
     // Only the initial-value extent is backed here. init_arena writes its
     // control block and first free-block header inside that extent while
     // recording the logical size that later allocations may grow into.
-    memset(ret, 0, size);
-    bpfj_heap_init_arena(ret, arenaSize);
+    memset(ret, 0, arenaSize);
+    bpfj_heap_init_arena(ctrl, arenaSize);
     // Redundant after the memset, but this is where the lock becomes usable
     // and bpfj_heap_init_arena() no-ops on an already-initialized arena.
     lock::init(ctrl->lock);

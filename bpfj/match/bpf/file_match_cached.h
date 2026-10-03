@@ -159,11 +159,16 @@ volatile __u64 bpfj_file_match_cached_cache_pod_cap_counter;
     return _out;                                                       \
   }
 
-// Takes the cache rather than a matcher: the cache is shared by every matcher
-// built against a policy, and a rename retires an entry for all of them at
-// once. There is no one matcher to ask.
-#define BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(_lru, _dentry) \
-  ({ bpfj_file_match_cached_check_invalidate_cache_on_rename(_lru, _dentry); })
+// Rename is uncommon for enrolled tasks, and correctness matters more than
+// preserving unrelated cache entries. Retire the whole generation instead of
+// allocating and contending on the LRU from the rename hook.
+#define BPFJ_FILE_MATCH_CACHED_INVALIDATE_ON_RENAME(_lru, _dentry)   \
+  ({                                                                 \
+    (void)(_lru);                                                    \
+    (void)(_dentry);                                                 \
+    __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1); \
+    0L;                                                              \
+  })
 
 // IMPLEMENTATION
 
@@ -364,26 +369,9 @@ struct bpfj_file_match_cached_glob_results {
   __u64 results[BPFJ_GLOB_MAP_MAX_RESULTS];
 };
 
-struct bpfj_file_match_cached_dir_walk {
-  __u32 count;
-  __u32 _pad;
-  struct bpfj_file_match_cached_key
-      entries[BPFJ_FILE_MATCH_CACHED_MAX_DIR_DESCENDANTS];
-};
-
-// We don't use the seqcount directly for caching because it flips too often
-// (with every rename), instead we invalidate individual cache entries from
-// renames. The global counter is only bumped as a fallback when a directory has
-// too many descendants to walk individually.
+// Cache generation advanced by an enrolled rename. The kernel rename seqcount
+// below still protects an individual path walk from racing a rename anywhere.
 static __u64 bpfj_file_match_cached_rename_counter = 0;
-
-#ifndef S_IFMT
-#define S_IFMT 0170000
-#endif
-
-#ifndef S_IFDIR
-#define S_IFDIR 0040000
-#endif
 
 // __noinline for the same reason as bpfj_mount_seqcount: its BPF_CORE_READ
 // scratch would otherwise sit in file_match_cached's frame, which is on the
@@ -1326,183 +1314,6 @@ long bpfj_file_match_cached_get_walked_path(
 
   BPFJ_DBG_LOG("file_match_cached: Walked path: %s", path);
 
-  return 0;
-}
-
-static long bpfj_file_match_cached_cache_iter(
-    struct bpf_map* map,
-    const void* key,
-    void* value,
-    void* ctx) {
-  (void)value;
-  struct bpfj_file_match_cached_key* lookup_key_ptr = ctx;
-  const struct bpfj_file_match_cached_key* key_ptr = key;
-  if (key_ptr->dev == lookup_key_ptr->dev &&
-      key_ptr->ino == lookup_key_ptr->ino &&
-      key_ptr->subvol == lookup_key_ptr->subvol) {
-    // We are renaming the same file, so we need to invalidate the cache entry
-    bpf_map_delete_elem(map, key);
-  }
-
-  return 0;
-}
-
-static __noinline long bpfj_file_match_cached_collect_descendants(
-    struct dentry* dir_dentry,
-    struct bpfj_file_match_cached_dir_walk __arena* walk __arg_arena) {
-  walk->count = 0;
-
-  // A rename preserves the renamed directory's own inode identity
-  // (dev/ino/subvol), so its cached decision is stale at the new path. Seed it
-  // as the first entry to invalidate alongside its descendants; otherwise a
-  // directory moved into a denied path keeps a stale ALLOW (fail-open).
-  struct inode* dir_inode = BPF_CORE_READ(dir_dentry, d_inode);
-  if (dir_inode) {
-    walk->entries[0].dev = BPF_CORE_READ(dir_inode, i_sb, s_dev);
-    walk->entries[0].ino = BPF_CORE_READ(dir_inode, i_ino);
-    walk->entries[0].subvol = bpfj_file_match_cached_subvol(dir_inode);
-    // Like every entry the walk below builds: `walk` is a heap block, so the
-    // padding starts as whatever the block last held, and the key is hashed
-    // and compared as raw words.
-    walk->entries[0]._pad = 0;
-    walk->count = 1;
-  }
-
-  struct hlist_node* child_node = BPF_CORE_READ(dir_dentry, d_children.first);
-
-  struct hlist_node* to_explore[BPFJ_FILE_MATCH_CACHED_MAX_CHILD_DENTRIES] = {
-      0};
-  u32 pos = 0;
-
-  u32 j;
-  bpf_for(j, 0, BPFJ_FILE_MATCH_CACHED_MAX_DIR_DESCENDANTS * 2) {
-    if (!child_node) {
-      if (pos == 0) {
-        break;
-      }
-
-      child_node = to_explore[--pos];
-      continue;
-    }
-
-    struct dentry* child = container_of(child_node, struct dentry, d_sib);
-    struct inode* inode = BPF_CORE_READ(child, d_inode);
-
-    child_node = BPF_CORE_READ(child, d_sib.next);
-
-    if (inode) {
-      unsigned int mode = BPF_CORE_READ(inode, i_mode);
-      if ((mode & S_IFMT) == S_IFDIR) {
-        if (pos >= BPFJ_FILE_MATCH_CACHED_MAX_CHILD_DENTRIES) {
-          // Too many children, stop
-          return -1;
-        }
-
-        to_explore[pos++] = child_node;
-        child_node = BPF_CORE_READ(child, d_children.first);
-      }
-
-      u32 idx = walk->count;
-      if (idx >= BPFJ_FILE_MATCH_CACHED_MAX_DIR_DESCENDANTS) {
-        // Too many entries, stop
-        return -1;
-      }
-
-      walk->entries[idx].dev = BPF_CORE_READ(inode, i_sb, s_dev);
-      walk->entries[idx].ino = BPF_CORE_READ(inode, i_ino);
-      walk->entries[idx].subvol = bpfj_file_match_cached_subvol(inode);
-      walk->entries[idx]._pad = 0;
-      walk->count = idx + 1;
-    }
-  }
-
-  if (child_node == NULL && pos == 0) {
-    return 0;
-  }
-
-  // Too many children, stop
-  return -1;
-}
-
-static __noinline long bpfj_file_match_cached_invalidate_dir(
-    struct bpfj_dyn_lru __arena* lru __arg_arena,
-    struct dentry* dir_dentry) {
-  BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_dir_walk, walk);
-  if (!walk) {
-    __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1);
-    return -ENOMEM;
-  }
-
-  long ret = bpfj_file_match_cached_collect_descendants(dir_dentry, walk);
-  if (ret < 0) {
-    __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1);
-    return 0;
-  }
-
-  u32 i = 0;
-  bpf_for(i, 0, BPFJ_FILE_MATCH_CACHED_MAX_DIR_DESCENDANTS) {
-    if (i >= walk->count) {
-      break;
-    }
-
-    struct bpfj_file_match_cached_key __arena* key = &walk->entries[i];
-
-    // Every descendant, not just the first: returning here left the rest of
-    // the directory cached against a path that no longer exists. Erased rather
-    // than wiped, for the reason in the caller.
-    if (bpfj_dyn_lru_erase(lru, (u64 __arena*)key) < 0) {
-      // The only failure is a contended lock, and a descendant left behind is
-      // a stale cache entry. Fall back to the global counter, which retires
-      // every entry at once -- the same escape hatch a directory too wide to
-      // walk uses.
-      __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1);
-      return 0;
-    }
-  }
-
-  return 0;
-}
-
-static long bpfj_file_match_cached_check_invalidate_cache_on_rename(
-    struct bpfj_dyn_lru __arena* lru __arg_arena,
-    struct dentry* dentry) {
-  struct inode* inode = BPF_CORE_READ(dentry, d_inode);
-  if (!inode) {
-    return -EINVAL;
-  }
-
-  unsigned int mode = BPF_CORE_READ(inode, i_mode);
-  if ((mode & S_IFMT) == S_IFDIR) {
-    return bpfj_file_match_cached_invalidate_dir(lru, dentry);
-  }
-
-  BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_key, key);
-  if (!key) {
-    return -ENOMEM;
-  }
-
-  key->dev = BPF_CORE_READ(inode, i_sb, s_dev);
-  key->ino = BPF_CORE_READ(inode, i_ino);
-  key->subvol = bpfj_file_match_cached_subvol(inode);
-  key->_pad = 0;
-
-  BPFJ_DBG_LOG(
-      "file_match_cached: Renaming file, invalidating cache entry dev=0x%lu ino=%lu subvol=%lu",
-      key->dev,
-      key->ino,
-      key->subvol);
-
-  // Erased, not wiped: the entry is keyed on the file's identity, and a rename
-  // does not change that, so leaving an emptied map behind would hold a slot
-  // and a recency position for a path that has to be walked again anyway.
-  if (bpfj_dyn_lru_erase(lru, (u64 __arena*)key) < 0) {
-    // Same escape hatch as the directory walk, for the same reason: the only
-    // failure is a contended map lock, an absent key erases successfully, and
-    // the caller does nothing with the error. Left alone, a rename that lost
-    // the lock keeps a stale ALLOW under an identity the rename does not
-    // change.
-    __sync_fetch_and_add(&bpfj_file_match_cached_rename_counter, 1);
-  }
   return 0;
 }
 
