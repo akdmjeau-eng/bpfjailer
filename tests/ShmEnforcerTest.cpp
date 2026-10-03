@@ -503,25 +503,28 @@ TEST(ShmEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   const std::string removedPosix = uniquePosixName();
   const std::string yaml =
       "roles:\n  owner:\n    any: true\n  client:\n    any: true\n"
+      "    any: true\n"
       "    shm-sysv-roles:\n      - owner\n"
       "    shm-posix-roles:\n      - owner\n";
   attach(yaml);
-  enroll("owner", ::getpid());
-
   Child replacer([yaml] {
     auto replaced = replaceJailer(testPins(), policyOf(yaml));
     if (!replaced) {
-      bpfjailer::test::noteDiagnostic(
-          "      " + replaced.error().message() + "\n");
+      const std::string diagnostic =
+          "      replace: " + replaced.error().message() + "\n";
+      (void)::write(STDERR_FILENO, diagnostic.data(), diagnostic.size());
       const int code = replaced.error().code().value();
       return code == 0 ? 1 : code;
     }
     return 0;
   });
+  auto journalArena = bpfjailer::PodArena::open(testPins());
+  ASSERT(journalArena);
+  enroll("owner", ::getpid());
   int replaceStatus = -1;
   std::thread replacing([&] { replaceStatus = replacer.run(); });
 
-  const bool recording = waitForMutationJournal();
+  const bool recording = waitForMutationJournal(*journalArena);
   const int createKeptSysv = createSysv(keptSysv);
   const int createRemovedSysv = createSysv(removedSysv);
   const int removedSysvId = ::shmget(removedSysv, 0, 0);

@@ -275,7 +275,8 @@ struct bpfj_shm_mount_key {
   __u64 mount_id;
 };
 
-#define BPFJ_MUTATION_JOURNAL_CAPACITY 65536U
+#define BPFJ_MUTATION_JOURNAL_CAPACITY 4096U
+#define BPFJ_MUTATION_JOURNAL_LEGACY_CAPACITY 65536U
 
 enum bpfj_mutation_journal_state {
   BPFJ_MUTATION_JOURNAL_OFF = 0,

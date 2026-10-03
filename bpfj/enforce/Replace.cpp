@@ -9,6 +9,7 @@
 #include <sys/syscall.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -643,7 +644,10 @@ struct MutationJournal {
   if (auto res = lockJournal(*journal, guard); !res) {
     return makeUnexpected(res.error());
   }
-  if (journal->entries.capacity != BPFJ_MUTATION_JOURNAL_CAPACITY ||
+  const bool compatibleCapacity =
+      journal->entries.capacity == BPFJ_MUTATION_JOURNAL_CAPACITY ||
+      journal->entries.capacity == BPFJ_MUTATION_JOURNAL_LEGACY_CAPACITY;
+  if (!compatibleCapacity ||
       journal->entries.elem_size != sizeof(struct bpfj_mutation_record) ||
       journal->entries.buf == nullptr) {
     return makeUnexpected(makeError(
@@ -832,10 +836,32 @@ struct MutationReplayMaps {
   const auto failure =
       __atomic_load_n(&owner.journal->failure, __ATOMIC_ACQUIRE);
   if (failure == BPFJ_MUTATION_JOURNAL_FULL) {
+    std::array<std::uint32_t, BPFJ_MUTATION_SHM_POSIX_PENDING + 1> domains{};
+    const auto* records = static_cast<const struct bpfj_mutation_record*>(
+        owner.journal->entries.buf);
+    for (std::uint32_t i = 0; i < owner.journal->entries.capacity; ++i) {
+      if (records[i].committed != 0 && records[i].domain < domains.size()) {
+        ++domains[records[i].domain];
+      }
+    }
     return makeUnexpected(makeError(
         std::errc::no_buffer_space,
         "ownership mutation journal exhausted its capacity during "
-        "replacement"));
+        "replacement (BPF maps ",
+        std::to_string(domains[BPFJ_MUTATION_BPF_MAP_OWNER]),
+        ", BPF programs ",
+        std::to_string(domains[BPFJ_MUTATION_BPF_PROG_OWNER]),
+        ", MQ ",
+        std::to_string(
+            domains[BPFJ_MUTATION_MQ_SYSV_OWNER] +
+            domains[BPFJ_MUTATION_MQ_POSIX_OWNER] +
+            domains[BPFJ_MUTATION_MQ_POSIX_PENDING]),
+        ", SHM ",
+        std::to_string(
+            domains[BPFJ_MUTATION_SHM_SYSV_OWNER] +
+            domains[BPFJ_MUTATION_SHM_POSIX_OWNER] +
+            domains[BPFJ_MUTATION_SHM_POSIX_PENDING]),
+        ")"));
   }
   if (failure == BPFJ_MUTATION_JOURNAL_CONTENDED) {
     return makeUnexpected(makeError(

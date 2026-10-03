@@ -90,7 +90,7 @@ int bpfj_heap_syscall(void* ctx) {
     return (int)bpfj_heap_free(req.arg);
   }
   if (req.op == BPFJ_HEAP_SYSCALL_GROW) {
-    return (int)bpfj_heap_grow_preallocated(req.arg, req.expected_arena_size);
+    return (int)bpfj_heap_grow(req.arg);
   }
   return -EINVAL;
 }

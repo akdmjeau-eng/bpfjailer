@@ -108,22 +108,26 @@ int BPF_PROG(bpfj_mq_sysv_alloc, struct kern_ipc_perm* msq, int lsm_ret) {
 
 SEC("lsm/msg_queue_free_security")
 int BPF_PROG(bpfj_mq_sysv_free, struct kern_ipc_perm* msq) {
-  if (msq) {
-    BPFJ_MUTATION_TRANSACTION(transaction);
-    if (bpfj_mutation_begin(&transaction) <= 0) {
-      return 0;
-    }
-    const __u64 key = (__u64)msq;
-    bpf_map_delete_elem(&bpfj_mq_sysv_owners, &key);
-    bpfj_mutation_mq_owner(
-        &transaction,
-        BPFJ_MUTATION_MQ_SYSV_OWNER,
-        BPFJ_MUTATION_DELETE,
-        key,
-        0,
-        NULL,
-        0);
+  if (!msq) {
+    return 0;
   }
+  const __u64 key = (__u64)msq;
+  if (!bpf_map_lookup_elem(&bpfj_mq_sysv_owners, &key)) {
+    return 0;
+  }
+  BPFJ_MUTATION_TRANSACTION(transaction);
+  if (bpfj_mutation_begin(&transaction) <= 0) {
+    return 0;
+  }
+  bpf_map_delete_elem(&bpfj_mq_sysv_owners, &key);
+  bpfj_mutation_mq_owner(
+      &transaction,
+      BPFJ_MUTATION_MQ_SYSV_OWNER,
+      BPFJ_MUTATION_DELETE,
+      key,
+      0,
+      NULL,
+      0);
   return 0;
 }
 
@@ -313,7 +317,15 @@ int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
   const bool pending =
       bpf_map_lookup_elem(&bpfj_mq_posix_pending, &pending_key) != NULL;
   const bool mqueue = bpfj_is_mqueue_inode(inode);
-  if (!pending && !mqueue) {
+  struct super_block* sb = inode ? BPF_CORE_READ(inode, i_sb) : NULL;
+  const bool unlinked = mqueue && sb && BPF_CORE_READ(inode, i_nlink) == 0;
+  const struct bpfj_posix_mq_key key = {
+      .dev = unlinked ? BPF_CORE_READ(sb, s_dev) : 0,
+      .ino = unlinked ? BPF_CORE_READ(inode, i_ino) : 0,
+  };
+  const bool owned =
+      key.ino != 0 && bpf_map_lookup_elem(&bpfj_mq_posix_owners, &key) != NULL;
+  if (!pending && !owned) {
     return 0;
   }
 
@@ -333,24 +345,18 @@ int BPF_PROG(bpfj_mq_posix_free, struct inode* inode) {
         0);
   }
 
-  struct super_block* sb = inode ? BPF_CORE_READ(inode, i_sb) : NULL;
-  if (mqueue && sb) {
-    struct bpfj_posix_mq_key key = {
-        .dev = BPF_CORE_READ(sb, s_dev),
-        .ino = BPF_CORE_READ(inode, i_ino),
-    };
-    if (key.ino != 0) {
-      bpf_map_delete_elem(&bpfj_mq_posix_owners, &key);
-      bpfj_mutation_mq_owner(
-          &transaction,
-          BPFJ_MUTATION_MQ_POSIX_OWNER,
-          BPFJ_MUTATION_DELETE,
-          key.dev,
-          key.ino,
-          NULL,
-          0);
-    }
+  if (owned) {
+    bpf_map_delete_elem(&bpfj_mq_posix_owners, &key);
+    bpfj_mutation_mq_owner(
+        &transaction,
+        BPFJ_MUTATION_MQ_POSIX_OWNER,
+        BPFJ_MUTATION_DELETE,
+        key.dev,
+        key.ino,
+        NULL,
+        0);
   }
+
   return 0;
 }
 

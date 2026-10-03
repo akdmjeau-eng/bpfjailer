@@ -685,13 +685,14 @@ TEST(BpfEnforcer, OwnershipSurvivesAReplace) {
 TEST(BpfEnforcer, OwnershipMutationsDuringReplaceAreReplayed) {
   const std::string yaml = "roles:\n  owner:\n    bpf-roles:\n      - owner\n";
   attach(yaml);
-  enroll("owner", ::getpid());
-
   Child replacer([yaml] { return replaceErrno(yaml); });
+  auto journalArena = bpfjailer::PodArena::open(testPins());
+  ASSERT(journalArena);
+  enroll("owner", ::getpid());
   int replaceStatus = -1;
   std::thread replacing([&] { replaceStatus = replacer.run(); });
 
-  const bool recording = waitForMutationJournal();
+  const bool recording = waitForMutationJournal(*journalArena);
   const int keptFd = ::bpf_map_create(
       BPF_MAP_TYPE_HASH,
       "bpfj_race_keep",

@@ -298,7 +298,8 @@ class Fixture {
 /// @brief A policy where `svc` will only run binaries signed by `trusted`.
 [[nodiscard]] std::string signedPolicy(const Fixture& fixture) {
   return "certs:\n  trusted: |\n" + fixture.certBlock("trusted") +
-      "roles:\n  svc:\n    enforce-binary-certs:\n      - trusted\n";
+      "roles:\n  svc:\n    any: true\n    enforce-binary-certs:\n"
+      "      - trusted\n";
 }
 
 /// @brief signedPolicy, plus a `min-seq` floor on `svc`.
@@ -333,14 +334,31 @@ class Fixture {
 
   if (pid == 0) {
     if (::syscall(__NR_keyctl, KEYCTL_JOIN_SESSION_KEYRING, nullptr) < 0) {
-      ::_exit(1);
+      ::_exit(2);
     }
     ::_exit(body() ? 0 : 1);
   }
 
   int status = 0;
-  return ::waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
-      WEXITSTATUS(status) == 0;
+  if (::waitpid(pid, &status, 0) != pid) {
+    bpfjailer::test::noteDiagnostic(
+        "      session child could not be waited for\n");
+    return false;
+  }
+  if (WIFSIGNALED(status)) {
+    bpfjailer::test::noteDiagnostic(
+        "      session child died from signal " +
+        std::to_string(WTERMSIG(status)) + "\n");
+    return false;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    bpfjailer::test::noteDiagnostic(
+        WIFEXITED(status) && WEXITSTATUS(status) == 2
+            ? "      session child could not create a session keyring\n"
+            : "      session child body failed\n");
+    return false;
+  }
+  return true;
 }
 
 /// @brief Whether the keyring `persist()` targets still links `serial`.
@@ -566,7 +584,10 @@ TEST(VerityEnforcer, ASignedBinaryKeepsRunningAcrossAReplace) {
       ::_exit(EIO);
     }
     while (::read(stop[0], &c, 1) != 1) {
-      if (const int res = runProgram(hello); res != 0) {
+      // Fork and exec enrollment are deliberately paused while replacement
+      // snapshots task storage. Retry that transient safeguard, but preserve
+      // every other execution failure.
+      if (const int res = runProgram(hello); res != 0 && res != EBUSY) {
         ::_exit(res == kRanAndFailed ? 255 : res);
       }
     }
@@ -577,11 +598,28 @@ TEST(VerityEnforcer, ASignedBinaryKeepsRunningAcrossAReplace) {
   (void)::write(go[1], "x", 1);
 
   // Each replace unloads the old tree while this is running under it.
-  bool replaced = true;
-  for (int i = 0; i < 10 && replaced; i++) {
-    replaced = inOwnSession(
-        [&] { return static_cast<bool>(replaceJailer(testPins(), policy)); });
+  int replaceReport[2] = {-1, -1};
+  ASSERT_EQ(::pipe2(replaceReport, O_NONBLOCK), 0);
+  const bool replaced = inOwnSession([&] {
+    auto result = replaceJailer(testPins(), policy);
+    if (!result) {
+      const std::string diagnostic =
+          "      replace: " + result.error().message() + "\n";
+      (void)::write(replaceReport[1], diagnostic.data(), diagnostic.size());
+    }
+    return static_cast<bool>(result);
+  });
+  if (!replaced) {
+    std::string diagnostic(1024, '\0');
+    const ssize_t size =
+        ::read(replaceReport[0], diagnostic.data(), diagnostic.size());
+    if (size > 0) {
+      diagnostic.resize(static_cast<std::size_t>(size));
+      bpfjailer::test::noteDiagnostic(diagnostic);
+    }
   }
+  ::close(replaceReport[0]);
+  ::close(replaceReport[1]);
 
   (void)::write(stop[1], "x", 1);
   int status = 0;

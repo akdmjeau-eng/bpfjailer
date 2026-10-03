@@ -44,7 +44,7 @@ void loadJailer(const Policy& policy);
 [[nodiscard]] bool pinnedMapIsEmpty(std::string_view name);
 
 /// @brief Wait until a replacement has enabled the old arena's journal.
-[[nodiscard]] bool waitForMutationJournal();
+[[nodiscard]] bool waitForMutationJournal(const PodArena& arena);
 
 /// @brief Put `pid` in a new pod of `role`, ending the test if it fails.
 /// Always Threads::All, every caller enrolling an already-running process, and

@@ -63,17 +63,12 @@ bool pinnedMapIsEmpty(std::string_view name) {
   return empty;
 }
 
-bool waitForMutationJournal() {
+bool waitForMutationJournal(const PodArena& arena) {
   using namespace std::chrono_literals;
   const auto deadline = std::chrono::steady_clock::now() + 60s;
-  auto arena = PodArena::open(testPins());
-  if (!arena) {
-    noteDiagnostic("      journal observer: " + arena.error().message() + "\n");
-    return false;
-  }
   do {
     const auto* journal = static_cast<const struct bpfj_mutation_journal*>(
-        arena->ctrl()->mutation_journal);
+        arena.ctrl()->mutation_journal);
     if (journal != nullptr &&
         journal->state == BPFJ_MUTATION_JOURNAL_RECORDING) {
       return true;

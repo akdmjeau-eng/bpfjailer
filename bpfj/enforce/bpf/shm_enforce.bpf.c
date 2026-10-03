@@ -129,22 +129,26 @@ int BPF_PROG(bpfj_shm_sysv_alloc, struct kern_ipc_perm* shp, int lsm_ret) {
 
 SEC("lsm/shm_free_security")
 int BPF_PROG(bpfj_shm_sysv_free, struct kern_ipc_perm* shp) {
-  if (shp) {
-    BPFJ_MUTATION_TRANSACTION(transaction);
-    if (bpfj_mutation_begin(&transaction) <= 0) {
-      return 0;
-    }
-    const __u64 key = (__u64)shp;
-    bpf_map_delete_elem(&bpfj_shm_sysv_owners, &key);
-    bpfj_mutation_shm_owner(
-        &transaction,
-        BPFJ_MUTATION_SHM_SYSV_OWNER,
-        BPFJ_MUTATION_DELETE,
-        key,
-        0,
-        NULL,
-        0);
+  if (!shp) {
+    return 0;
   }
+  const __u64 key = (__u64)shp;
+  if (!bpf_map_lookup_elem(&bpfj_shm_sysv_owners, &key)) {
+    return 0;
+  }
+  BPFJ_MUTATION_TRANSACTION(transaction);
+  if (bpfj_mutation_begin(&transaction) <= 0) {
+    return 0;
+  }
+  bpf_map_delete_elem(&bpfj_shm_sysv_owners, &key);
+  bpfj_mutation_shm_owner(
+      &transaction,
+      BPFJ_MUTATION_SHM_SYSV_OWNER,
+      BPFJ_MUTATION_DELETE,
+      key,
+      0,
+      NULL,
+      0);
   return 0;
 }
 
@@ -450,7 +454,11 @@ int BPF_PROG(
     const struct path* dir,
     struct dentry* dentry,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : bpfj_posix_shm_path_check(dir, dentry);
+  if (lsm_ret) {
+    return lsm_ret;
+  }
+  const int ret = bpfj_posix_shm_path_check(dir, dentry);
+  return ret;
 }
 
 SEC("lsm/path_truncate")
@@ -473,7 +481,8 @@ int BPF_PROG(bpfj_shm_posix_free, struct inode* inode) {
   const bool pending =
       bpf_map_lookup_elem(&bpfj_shm_posix_pending, &pending_key) != NULL;
   struct bpfj_posix_shm_key key = {};
-  const bool owned = bpfj_posix_shm_key_from_inode(inode, &key) &&
+  const bool owned = BPF_CORE_READ(inode, i_nlink) == 0 &&
+      bpfj_posix_shm_key_from_inode(inode, &key) &&
       bpf_map_lookup_elem(&bpfj_shm_posix_owners, &key) != NULL;
   if (!pending && !owned) {
     return 0;
@@ -506,6 +515,7 @@ int BPF_PROG(bpfj_shm_posix_free, struct inode* inode) {
         NULL,
         0);
   }
+
   return 0;
 }
 

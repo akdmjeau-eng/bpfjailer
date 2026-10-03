@@ -160,30 +160,6 @@ runHeapSyscall(Skel&& skel, __u32 op, __u32 arg, __u32 expectedArenaSize = 0) {
   return static_cast<long>(static_cast<std::int32_t>(opts.retval));
 }
 
-inline long
-prefaultGrowth(void* base, __u32 minBytes, __u32& expectedArenaSize) {
-  auto* ctrl = reinterpret_cast<struct bpfj_heap_control*>(base);
-  expectedArenaSize = ctrl->arena_size;
-  if (expectedArenaSize >= BPFJ_HEAP_MAX_ARENA_SIZE) {
-    return -ENOMEM;
-  }
-
-  const __u32 bytes = bpfj_heap_growth_size(minBytes, expectedArenaSize);
-
-  auto* start = reinterpret_cast<std::uint8_t*>(base) + expectedArenaSize;
-  for (__u64 offset = 0; offset < bytes; offset += BPFJ_HEAP_PAGE_SIZE) {
-    std::uint8_t expected = 0;
-    __atomic_compare_exchange_n(
-        start + offset,
-        &expected,
-        0,
-        false,
-        __ATOMIC_RELAXED,
-        __ATOMIC_RELAXED);
-  }
-  return 0;
-}
-
 // Userspace alloc/free (call after init)
 
 // Grow the committed free space by at least 'minBytes' and insert it as one
@@ -280,20 +256,10 @@ inline long allocOffset(Skel&& skel, __u32 size) {
     long offset =
         runHeapSyscall(std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_ALLOC, size);
     if (offset == BPFJ_HEAP_NULL || offset == -ENOMEM) {
-      __u32 expectedArenaSize = 0;
-      long ret = prefaultGrowth(
-          base(std::forward<Skel>(skel)), size, expectedArenaSize);
+      const long ret = runHeapSyscall(
+          std::forward<Skel>(skel), BPFJ_HEAP_SYSCALL_GROW, size);
       if (ret < 0) {
-        BPFJ_LOG(ERR) << "heap: prefault growth failed: " << ret;
-        return ret;
-      }
-      ret = runHeapSyscall(
-          std::forward<Skel>(skel),
-          BPFJ_HEAP_SYSCALL_GROW,
-          size,
-          expectedArenaSize);
-      if (ret < 0) {
-        BPFJ_LOG(ERR) << "heap: publishing prefaulted growth failed: " << ret;
+        BPFJ_LOG(ERR) << "heap: BPF arena growth failed: " << ret;
         return ret;
       }
       offset = runHeapSyscall(
