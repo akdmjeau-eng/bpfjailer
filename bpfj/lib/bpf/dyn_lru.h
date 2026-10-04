@@ -226,24 +226,27 @@ static __noinline struct bpfj_dyn_lru_entry __arena* bpfj_dyn_lru_evict(
   return victim;
 }
 
-long bpfj_dyn_lru_insert(
+// Insert a value whose buffer and reference count are already owned by the
+// caller. This function consumes that ownership whether insertion succeeds or
+// fails. Allocating the pair before entering this subprogram keeps allocator
+// calls out of already-deep matcher call chains.
+static __always_inline long bpfj_dyn_lru_insert_owned(
     struct bpfj_dyn_lru __arena* map __arg_arena,
     __u64 __arena* key __arg_arena,
-    void __arena* val __arg_arena) {
+    void __arena* val __arg_arena,
+    __u32 __arena* refcount __arg_arena) {
+  struct bpfj_shared_ptr val_sp = {
+      .buf = val,
+      .refcount = refcount,
+  };
+
   // Before anything reads through `map` -- including the key_size below.
   if (!bpfj_dyn_lru_usable(map)) {
-    BPFJ_HEAP_FREE(val);
+    bpfj_shared_ptr_release(&val_sp);
     return -EINVAL;
   }
 
   __u32 key_words = bpfj_dyn_lru_key_words(map->key_size);
-
-  // The one allocation left on this path, taken before the lock.
-  struct bpfj_shared_ptr val_sp = bpfj_shared_ptr_adopt(val);
-  if (!val_sp.refcount) {
-    BPFJ_HEAP_FREE(val);
-    return -ENOMEM;
-  }
 
   const __u32 kNoSlot = ~(__u32)0;
   long rc = 0;
@@ -322,6 +325,26 @@ unlocked:
   bpfj_shared_ptr_release(&retired);
   bpfj_shared_ptr_release(&val_sp);
   return rc;
+}
+
+static __always_inline long bpfj_dyn_lru_insert(
+    struct bpfj_dyn_lru __arena* map __arg_arena,
+    __u64 __arena* key __arg_arena,
+    void __arena* val __arg_arena) {
+  // Preserve the raw-pointer API for callers that do not already own a
+  // shared pointer. The LRU consumes `val` on every return path.
+  if (!bpfj_dyn_lru_usable(map)) {
+    BPFJ_HEAP_FREE(val);
+    return -EINVAL;
+  }
+
+  struct bpfj_shared_ptr val_sp = bpfj_shared_ptr_adopt(val);
+  if (!val_sp.refcount) {
+    BPFJ_HEAP_FREE(val);
+    return -ENOMEM;
+  }
+
+  return bpfj_dyn_lru_insert_owned(map, key, val_sp.buf, val_sp.refcount);
 }
 
 long bpfj_dyn_lru_lookup(

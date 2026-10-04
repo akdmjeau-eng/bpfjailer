@@ -208,16 +208,11 @@ __noinline int bpfj_glob_close(__arena struct bpfj_glob_run* run __arg_arena) {
 __noinline int bpfj_glob_step(
     __arena struct bpfj_glob_run* run __arg_arena,
     u8 ch) {
-  u32 num_words = run->map->num_words;
-  u32 num_gadgets = run->map->num_gadgets;
-  __arena const u64* char_mask = run->map->char_mask;
-  __arena const u64* star_mask = run->map->star_mask;
-
   // Per-word variable advance mask for this byte: gadget bit (base+k) is set
   // if value[k] == ch. In the run state, not on the stack, for the budget.
   u32 w = 0;
   bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    if (w >= num_words) {
+    if (w >= run->map->num_words) {
       break;
     }
     u64 __arena* advance = bpfj_glob_word_at(&run->var_advance, w);
@@ -228,7 +223,7 @@ __noinline int bpfj_glob_step(
   }
   u32 g = 0;
   bpf_for(g, 0, BPFJ_GLOB_MAP_MAX_GADGETS) {
-    if (g >= num_gadgets) {
+    if (g >= run->map->num_gadgets) {
       break;
     }
     u32 word = run->map->gadget_word[g] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
@@ -252,7 +247,7 @@ __noinline int bpfj_glob_step(
   // Literal/'?'/variable tokens that match ch move one bit; '*' tokens consume
   // ch and stay.
   bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    if (w >= num_words) {
+    if (w >= run->map->num_words) {
       break;
     }
     u64 __arena* state = bpfj_glob_word_at(&run->state, w);
@@ -264,8 +259,8 @@ __noinline int bpfj_glob_step(
     if (cur == 0) {
       continue;
     }
-    u64 cm = char_mask[(u32)ch * num_words + w] | *advance;
-    *state = ((cur & cm) << 1) | (cur & star_mask[w]);
+    u64 cm = run->map->char_mask[(u32)ch * run->map->num_words + w] | *advance;
+    *state = ((cur & cm) << 1) | (cur & run->map->star_mask[w]);
   }
 
   // bpfj_glob_eval calls the closure separately, keeping the two siblings.
@@ -318,31 +313,61 @@ __noinline long bpfj_glob_eval_state(
   return 0;
 }
 
-// GLOBAL function: evaluate the NFA and collect each matching pattern's value.
-__noinline long bpfj_glob_eval(__arena struct bpfj_glob_run* run __arg_arena) {
+struct bpfj_glob_collect_ctx {
+  struct bpfj_glob_run __arena* run;
+};
+
+// A callback gives result collection its own verifier stack rather than adding
+// another bpf2bpf frame to file matching's already deep call chain.
+static long bpfj_glob_collect_result(u32 j, void* data) {
+  struct bpfj_glob_collect_ctx* ctx = data;
+  struct bpfj_glob_run __arena* run = ctx->run;
+  if (j >= run->map->num_accepts) {
+    return 1;
+  }
+  if (!bpfj_glob_state_has_accept(run, j)) {
+    return 0;
+  }
+
+  void __arena* buf = run->results.buf;
+  if (buf == NULL) {
+    run->collect_error = -ENOMEM;
+    return 1;
+  }
+  u32 off = bpfj_heap_clamp_off(run->collect_count * sizeof(u64));
+  u64 __arena* result = (u64 __arena*)((char __arena*)buf + off);
+  *result = run->map->accept_val[j];
+  ++run->collect_count;
+  return 0;
+}
+
+// Evaluate the NFA and collect each matching pattern's value. This wrapper is
+// inline so it does not add a frame to either of the two independent phases.
+static __always_inline long bpfj_glob_eval(
+    __arena struct bpfj_glob_run* run __arg_arena) {
   bpfj_vec_clear(&run->results);
-  long ret = bpfj_glob_eval_state(run);
+  long ret = bpfj_vec_reserve(&run->results, run->map->num_accepts);
   if (ret < 0) {
     return ret;
   }
-
-  long count = 0;
-  u32 j = 0;
-  bpf_for(j, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
-    if (j >= run->map->num_accepts) {
-      break;
-    }
-    if (bpfj_glob_state_has_accept(run, j)) {
-      u64 __arena* result = bpfj_vec_emplace_back(&run->results);
-      if (result == NULL) {
-        return -ENOMEM;
-      }
-      *result = run->map->accept_val[j];
-      ++count;
-    }
+  ret = bpfj_glob_eval_state(run);
+  if (ret < 0) {
+    return ret;
   }
-
-  return count;
+  run->collect_count = 0;
+  run->collect_error = 0;
+  struct bpfj_glob_collect_ctx ctx = {
+      .run = run,
+  };
+  ret = bpf_loop(BPFJ_GLOB_MAP_MAX_ACCEPTS, bpfj_glob_collect_result, &ctx, 0);
+  if (ret < 0) {
+    return ret;
+  }
+  if (run->collect_error < 0) {
+    return run->collect_error;
+  }
+  run->results.size = run->collect_count;
+  return run->collect_count;
 }
 
 // Bind a run to the compiled header it will match against and copy in the
@@ -395,7 +420,7 @@ static __noinline void bpfj_glob_run_bind(
 // Returns the match count or a negative errno. A NULL run, or one bound to a
 // NULL header, matches nothing rather than dereferencing arena offset 0, which
 // reads the heap control struct rather than faulting.
-static __noinline long bpfj_glob_map_lookup(
+static __always_inline long bpfj_glob_map_lookup(
     struct bpfj_glob_run __arena* run,
     const char __arena* str,
     u32 len) {

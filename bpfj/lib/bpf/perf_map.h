@@ -21,12 +21,10 @@ bpfj_perf_map_seed_at(__arena const __u32* seeds, __u32 idx) {
 // `map` is the arena-resident header (see PerfMap.h). A NULL header means the
 // owner never built this map: treat it as empty rather than dereferencing arena
 // offset 0, the heap control struct, which reads rather than faults.
-static __noinline long bpfj_perf_map_lookup(
-    __arena const struct bpfj_perf_map* map,
-    __u64 key,
-    __u64* val) {
+static __always_inline __arena const struct bpfj_perf_map_slot*
+bpfj_perf_map_find(__arena const struct bpfj_perf_map* map, __u64 key) {
   if (map == NULL || map->num_slots == 0) {
-    return -ENOENT;
+    return NULL;
   }
 
   __u32 bucket = bpfj_perf_map_hash(key, 0, map->num_buckets);
@@ -37,6 +35,31 @@ static __noinline long bpfj_perf_map_lookup(
       bpfj_perf_map_slot_at(map->slots, slot_idx);
 
   if (!slot->occupied || slot->key != key) {
+    return NULL;
+  }
+
+  return slot;
+}
+
+static __noinline long bpfj_perf_map_lookup(
+    __arena const struct bpfj_perf_map* map,
+    __u64 key,
+    __u64* val) {
+  __arena const struct bpfj_perf_map_slot* slot = bpfj_perf_map_find(map, key);
+  if (slot == NULL) {
+    return -ENOENT;
+  }
+
+  *val = slot->val;
+  return 0;
+}
+
+static __noinline long bpfj_perf_map_lookup_arena(
+    __arena const struct bpfj_perf_map* map,
+    __u64 key,
+    __u64 __arena* val __arg_arena) {
+  __arena const struct bpfj_perf_map_slot* slot = bpfj_perf_map_find(map, key);
+  if (slot == NULL) {
     return -ENOENT;
   }
 

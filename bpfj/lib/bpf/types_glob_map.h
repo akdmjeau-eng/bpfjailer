@@ -104,6 +104,8 @@ struct bpfj_glob_run {
   struct bpfj_vec gadgets;
   struct bpfj_vec results;
   struct bpfj_vec owned_str;
+  __u32 collect_count;
+  int collect_error;
 };
 
 // Initialize only the vec headers; their buffers grow on the first lookup.
@@ -144,4 +146,6 @@ static inline void bpfj_glob_run_init(struct bpfj_glob_run __arena* run) {
   run->owned_str.size = 0;
   run->owned_str.capacity = 0;
   run->owned_str._pad = 0;
+  run->collect_count = 0;
+  run->collect_error = 0;
 }

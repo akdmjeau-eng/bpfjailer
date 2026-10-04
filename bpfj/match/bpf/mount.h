@@ -259,7 +259,7 @@ __noinline long bpfj_mount_load(
 }
 
 // Lookup the canonical transition for a true filesystem or subvolume root.
-__noinline long bpfj_mount_find_parent(
+static __always_inline long bpfj_mount_find_parent(
     struct bpfj_mount_snapshot __arena* snapshot __arg_arena,
     uintptr_t root_i,
     struct bpfj_mount_fallback __arena* out __arg_arena) {
