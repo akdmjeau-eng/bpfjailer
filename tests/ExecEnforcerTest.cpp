@@ -9,15 +9,18 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <filesystem>
 #include <string>
 
 #include "bpfj/enforce/ExecEnforcer.h"
 #include "bpfj/enforce/FsEnforcer.h"
+#include "bpfj/enforce/PodVars.h"
 
 using bpfjailer::ExecEnforcer;
 using bpfjailer::FsEnforcer;
+using bpfjailer::PodVar;
 using bpfjailer::Policy;
 using bpfjailer::test::Child;
 using bpfjailer::test::enroll;
@@ -294,6 +297,62 @@ TEST(ExecEnforcer, LongestPathMatchWins) {
   enroll("svc", actor.pid());
 
   ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(ExecEnforcer, MoreSpecificPathWinsAtSameDepth) {
+  const std::string executable = truePath();
+  attach(
+      "[roles.svc]\n" + rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", "/usr/bin/*", false, false, false) +
+      rule("svc", executable, true, false, false));
+
+  Child actor([&] { return runProgram(executable); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(ExecEnforcer, BoundVariableComponentIsSpecific) {
+  const std::filesystem::path executable = truePath();
+  const std::string directory = executable.parent_path().string();
+  const std::string program = executable.filename().string();
+  attach(
+      "vars = [\"PROGRAM\"]\n[roles.svc]\n" +
+      rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", directory + "/*", false, false, false) +
+      rule("svc", directory + "/$PROGRAM", true, false, false));
+
+  Child actor([&] { return runProgram(executable.string()); });
+  const std::array vars{PodVar{.name = "PROGRAM", .value = program}};
+  enroll("svc", actor.pid(), vars);
+
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(ExecEnforcer, MoreSpecificDenialWinsAtSameDepth) {
+  const std::string executable = truePath();
+  attach(
+      "[roles.svc]\n" + rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", "/usr/bin/*", true, false, false) +
+      rule("svc", executable, false, false, false));
+
+  Child actor([&] { return runProgram(executable); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(ExecEnforcer, DenialWinsEquallySpecificTie) {
+  const std::string executable = truePath();
+  attach(
+      "[roles.svc]\n" + rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", "/usr/*/true", true, false, false) +
+      rule("svc", "/usr/bin/*", false, false, false));
+
+  Child actor([&] { return runProgram(executable); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), EACCES);
 }
 
 TEST(ExecEnforcer, EveryStackedRoleMustAllowExec) {

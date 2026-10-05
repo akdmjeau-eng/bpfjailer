@@ -93,9 +93,12 @@ fs-verity. It is an array of rule tables with a `path` and an `allow` array.
 The permissions are `exec`, `set-id`, and `shared-object`; an empty array
 denies all three at that path. Set-user-ID and set-group-ID binaries need both
 `exec` and `set-id`, while executable mmap or mprotect needs `shared-object`.
-The longest matching path wins. `exec-any = true` opens all three operations
-and is mutually exclusive with `exec-paths`; `any: true` supplies the same
-open behavior only when neither narrower option is present.
+The longest matching path wins. At equal depth, the rule with more non-wildcard
+components wins; a bound `$NAME` component is specific, while `*` is not. An
+equally specific denial wins a tie. `exec-any = true`
+opens all three operations and is mutually exclusive with `exec-paths`;
+`any: true` supplies the same open behavior only when neither narrower option
+is present.
 
 ```toml
 [[roles.worker.exec-paths]]

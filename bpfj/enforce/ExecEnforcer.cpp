@@ -2,6 +2,8 @@
 
 #include "bpfj/enforce/ExecEnforcer.h"
 
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -28,6 +30,29 @@ namespace {
   return (policy.allowExec ? BPFJ_EXEC_ALLOW_EXEC : 0) |
       (policy.allowSetuid ? BPFJ_EXEC_ALLOW_SETUID : 0) |
       (policy.allowSharedObject ? BPFJ_EXEC_ALLOW_SHARED_OBJECT : 0);
+}
+
+[[nodiscard]] std::uint8_t pathSpecificity(std::string_view path) noexcept {
+  std::uint8_t specificity = 0;
+  std::size_t begin = 0;
+  while (begin < path.size()) {
+    while (begin < path.size() && path[begin] == '/') {
+      ++begin;
+    }
+    const auto end = path.find('/', begin);
+    const auto component = path.substr(
+        begin,
+        end == std::string_view::npos ? path.size() - begin : end - begin);
+    if (!component.empty() && component != "*" &&
+        specificity != std::numeric_limits<std::uint8_t>::max()) {
+      ++specificity;
+    }
+    if (end == std::string_view::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return specificity;
 }
 
 } // namespace
@@ -90,7 +115,12 @@ Expected<> ExecEnforcer::load(
     }
     std::map<std::string, struct bpfj_exec_path_entry> paths;
     for (const auto& [path, permissions] : role.execPaths) {
-      paths.emplace(path, bpfj_exec_path_entry{.flags = toFlags(permissions)});
+      paths.emplace(
+          path,
+          bpfj_exec_path_entry{
+              .flags = toFlags(permissions),
+              .specificity = pathSpecificity(path),
+          });
     }
 
     auto foundPolicy = lookupRolePolicy(publishedPolicies, name);

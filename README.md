@@ -233,9 +233,12 @@ mutation. `fs-any` and `paths` are mutually exclusive.
 rules. Each rule has a `path` and an `allow` list containing `exec`, `set-id`,
 or `shared-object`; an empty list is a denial. `set-id` requires `exec`, and
 `shared-object` covers executable file mappings. The longest matching path
-wins. `exec-any = true` opens executable code without opening unrelated
-operations and is mutually exclusive with `exec-paths`. Ordinary `paths`
-access and fs-verity policy must also permit the operation.
+wins; at equal depth, the rule with more non-wildcard components wins. A bound
+`$NAME` component is specific, while a `*` component is not. An equally
+specific denial wins a tie. `exec-any = true` opens executable code
+without opening unrelated operations and is mutually exclusive with
+`exec-paths`. Ordinary `paths` access and fs-verity policy must also permit the
+operation.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its

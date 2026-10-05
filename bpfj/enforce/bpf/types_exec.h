@@ -8,4 +8,5 @@
 
 struct bpfj_exec_path_entry {
   __u32 flags;
+  __u8 specificity;
 };
