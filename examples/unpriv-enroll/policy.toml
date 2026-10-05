@@ -33,10 +33,16 @@ ptrace-pod = true
 proc-pod = true
 mq-sysv-pod = true
 mq-posix-pod = true
-mq-posix-pattern = ["/bpfj-example-*"]
 shm-sysv-pod = true
 shm-posix-pod = true
-shm-posix-pattern = ["/bpfj-example-*"]
+
+[[roles.sandbox.mq-posix-pattern]]
+name = "/bpfj-example-*"
+allow = true
+
+[[roles.sandbox.shm-posix-pattern]]
+name = "/bpfj-example-*"
+allow = true
 
 [[roles.sandbox.exec-paths]]
 path = "/"
@@ -47,9 +53,9 @@ path = "/"
 allow = false
 
 [[roles.sandbox.unix-bind]]
-path = "@*"
+name = "@*"
 allow = false
 
 [[roles.sandbox.unix-bind]]
-path = "@bpfj-sandbox-demo"
+name = "@bpfj-sandbox-demo"
 allow = true

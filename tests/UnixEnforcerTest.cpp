@@ -220,7 +220,9 @@ void attach(std::string rules, std::string vars = {}) {
 
 [[nodiscard]] std::string
 rule(std::string_view operation, const std::string& path, bool allow) {
-  return "[[roles.svc." + std::string(operation) + "]]\npath = \"" + path +
+  const std::string_view selector = path.starts_with('@') ? "name" : "path";
+  return "[[roles.svc." + std::string(operation) + "]]\n" +
+      std::string(selector) + " = \"" + path +
       "\"\nallow = " + (allow ? "true\n" : "false\n");
 }
 

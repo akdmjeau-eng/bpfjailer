@@ -142,9 +142,29 @@ static __always_inline bool bpfj_ipc_glob_matches(
   }
   bpfj_ipc_glob_bind_pod(run, patterns->map, pod);
   if (!bpfj_ipc_glob_bindings_complete(run) ||
-      bpfj_glob_run_read_kernel(run, len, (__u64)chars) < 0) {
+      bpfj_glob_run_read_kernel(run, len, (__u64)chars) < 0 ||
+      bpfj_glob_eval_state(run) < 0) {
     return false;
   }
-  return bpfj_glob_map_contains_range(
-             run, len, patterns->first_accept, patterns->num_accepts) > 0;
+
+  __u64 best = 0;
+  bool matched = false;
+  __u32 offset;
+  bpf_for(offset, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
+    if (offset >= patterns->num_accepts) {
+      break;
+    }
+    const __u32 accept = patterns->first_accept + offset;
+    if (accept >= run->map->num_accepts ||
+        !bpfj_glob_state_has_accept(run, accept)) {
+      continue;
+    }
+    const __u64 value = run->map->accept_val[accept];
+    if (!matched || (value >> 1) > (best >> 1) ||
+        ((value >> 1) == (best >> 1) && (value & 1) == 0)) {
+      matched = true;
+      best = value;
+    }
+  }
+  return matched && (best & 1) != 0;
 }

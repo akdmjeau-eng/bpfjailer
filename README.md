@@ -165,11 +165,17 @@ bpf-pod = true                # only BPF objects from its own pod
 lkm-any = false               # deny module and kexec loading
 mq-sysv-pod = true            # only SysV queues from its own pod
 mq-posix-pod = true           # only POSIX queues from its own pod
-mq-posix-pattern = ["service-${vm_uuid}-*"]
 shm-sysv-pod = true           # only SysV SHM from its own pod
 shm-posix-pod = true          # only POSIX SHM from its own pod
-shm-posix-pattern = ["service-${vm_uuid}-*"]
 keyring-own = true            # only its own role's keyring
+
+[[roles.webserver.mq-posix-pattern]]
+name = "/service-${vm_uuid}-*"
+allow = true
+
+[[roles.webserver.shm-posix-pattern]]
+name = "/service-${vm_uuid}-*"
+allow = true
 
 [[roles.webserver.exec-paths]]
 path = "/usr/bin/webserver"
@@ -200,7 +206,7 @@ path = "/run/webserver"
 allow = true
 
 [[roles.webserver.unix-connect]]
-path = "@control-${vm_uuid}"
+name = "@control-${vm_uuid}"
 allow = true
 
 [[roles.webserver.unix-dgram]]
@@ -274,14 +280,16 @@ POSIX queues are tracked by the mqueuefs superblock device and inode number;
 the separate mqueuefs instances used by IPC namespaces, so the IPC namespace
 inode is not part of the key.
 
-`mq-posix-pattern` and `shm-posix-pattern` are lists of POSIX object names that
-override the corresponding owner-role list. Patterns match the name without
-its leading slash and support literals, `?`, `*`, and `${NAME}` references to
-the acquiring pod's declared variables. Every referenced variable must be
-present on that pod or the pattern does not match. A pattern establishes a
-restricted policy and cannot be combined with the corresponding `*-any`.
-Patterns apply to opens, descriptor receipt, and the later queue or mapping
-operations checked by the enforcer. They do not apply to System V IPC.
+`mq-posix-pattern` and `shm-posix-pattern` are arrays of `{ name, allow }`
+rules that override the corresponding owner-role list. Names begin with `/`,
+as they do at the POSIX syscall interface, and support literals, `?`, `*`, and
+`${NAME}` references to the acquiring pod's declared variables. Every
+referenced variable must be present on that pod or the pattern does not match.
+The most specific matching rule wins and an equally specific denial wins a
+tie; an unmatched name is denied. Name rules establish a restricted policy
+and cannot be combined with the corresponding `*-any`. They apply to opens,
+descriptor receipt, and the later queue or mapping operations checked by the
+enforcer. They do not apply to System V IPC.
 
 POSIX descriptors already held when a process is enrolled, or inherited by a
 fork inside a pod, are capabilities and are not revoked. Descriptor transfer

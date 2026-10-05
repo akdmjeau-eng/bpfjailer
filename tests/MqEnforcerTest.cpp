@@ -395,11 +395,32 @@ TEST(MqEnforcer, PosixPatternOverridesUnknownOwnership) {
 
 [roles]
 
-[roles.client]
-mq-posix-pattern = "bpfj-mq-?est-*-${SERIAL}"
+[[roles.client.mq-posix-pattern]]
+name = "/bpfj-mq-?est-*-${SERIAL}"
+allow = true
 )toml");
   const std::array vars{PodVar{.name = "SERIAL", .value = serial}};
   enroll("client", ::getpid(), vars);
+
+  ASSERT_EQ(acquirePosix(name), 0);
+  ASSERT_EQ(::mq_unlink(name.c_str()), 0);
+}
+
+TEST(MqEnforcer, MoreSpecificPosixNameRuleOverridesDenial) {
+  const std::string name = uniquePosixName();
+  ASSERT_EQ(createPosix(name), 0);
+  attach(
+      R"toml([roles]
+
+[[roles.client.mq-posix-pattern]]
+name = "/bpfj-mq-test-*"
+allow = true
+
+[[roles.client.mq-posix-pattern]]
+name = "/bpfj-*"
+allow = false
+)toml");
+  enroll("client", ::getpid());
 
   ASSERT_EQ(acquirePosix(name), 0);
   ASSERT_EQ(::mq_unlink(name.c_str()), 0);
@@ -417,8 +438,9 @@ TEST(MqEnforcer, PosixPatternWithAMissingVariableDoesNotMatch) {
 
 [roles]
 
-[roles.client]
-mq-posix-pattern = "bpfj-mq-test-*-${SERIAL}"
+[[roles.client.mq-posix-pattern]]
+name = "/bpfj-mq-test-*-${SERIAL}"
+allow = true
 )toml");
   enroll("client", ::getpid());
 
@@ -568,8 +590,9 @@ TEST(MqEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
 [roles.owner]
 any = true
 
-[roles.client]
-mq-posix-pattern = "bpfj-mq-test-*"
+[[roles.client.mq-posix-pattern]]
+name = "/bpfj-mq-test-*"
+allow = true
 )toml",
       0);
 }

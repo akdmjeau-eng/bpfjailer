@@ -65,6 +65,7 @@ constexpr std::string_view kPaths = "paths";
 constexpr std::string_view kExecPaths = "exec-paths";
 constexpr std::string_view kExecAny = "exec-any";
 constexpr std::string_view kPath = "path";
+constexpr std::string_view kName = "name";
 constexpr std::string_view kAllow = "allow";
 constexpr std::string_view kExec = "exec";
 constexpr std::string_view kSetId = "set-id";
@@ -412,32 +413,136 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
     std::string_view key,
     const toml::node* node) noexcept {
   const std::string what = "role '" + role + "': " + std::string(key);
-  auto parsedRules = parseRuleTables(
-      what,
-      node,
-      [&](const std::string& path) {
-        if (!path.empty() && path.front() == '@') {
-          return err::Expected<err::Unit>{err::unit};
-        }
-        if (!path.empty() && path.front() == '/') {
-          return validatePathPattern(what, path);
-        }
-        return err::Expected<err::Unit>{err::Error(
-            std::errc::invalid_argument,
-            what + " rule path '" + path + "' must start with '/' or '@'")};
-      },
-      true);
-  if (parsedRules.hasError()) {
-    return parsedRules.error();
+  const auto* nodes = node != nullptr ? node->as_array() : nullptr;
+  if (nodes == nullptr) {
+    return err::Error(
+        std::errc::invalid_argument, what + " must be an array of rule tables");
   }
+  if (nodes->empty()) {
+    return err::Error(
+        std::errc::invalid_argument, what + " must contain at least one rule");
+  }
+
   std::map<std::string, bool> rules;
-  for (const auto& rule : *parsedRules) {
-    if (rule.allow == nullptr || !rule.allow->is_boolean()) {
+  bool hasRoot = false;
+  bool hasRootGlob = false;
+  for (const auto& ruleNode : *nodes) {
+    const auto* rule = ruleNode.as_table();
+    if (rule == nullptr) {
+      return err::Error(
+          std::errc::invalid_argument, what + " entries must be rule tables");
+    }
+    const std::set<std::string_view> allowedKeys = {kPath, kName, kAllow};
+    for (const auto& [option, child] : *rule) {
+      (void)child;
+      if (!allowedKeys.contains(option.str())) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule has unknown option '" + std::string(option.str()) +
+                "'");
+      }
+    }
+
+    const auto* pathNode = findChild(*rule, kPath);
+    const auto* nameNode = findChild(*rule, kName);
+    if ((pathNode == nullptr) == (nameNode == nullptr)) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + rule.path + "': allow must be true or false");
+          what + " rule must contain exactly one of path or name");
     }
-    rules.emplace(rule.path, rule.allow->value<bool>().value());
+    const auto selector = pathNode != nullptr ? kPath : kName;
+    auto value = parseString(
+        pathNode != nullptr ? pathNode : nameNode,
+        what + " rule " + std::string(selector));
+    if (value.hasError()) {
+      return value.error();
+    }
+    if (pathNode != nullptr) {
+      if (auto valid = validatePathPattern(what, *value); valid.hasError()) {
+        return valid.error();
+      }
+      hasRoot = hasRoot || *value == "/";
+      hasRootGlob = hasRootGlob || *value == "/*";
+      if (hasRoot && hasRootGlob) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " cannot contain both '/' and '/*'");
+      }
+    } else if (value->size() < 2 || value->front() != '@') {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule name '" + *value + "' must start with '@'");
+    }
+    const auto* allow = findChild(*rule, kAllow);
+    if (allow == nullptr || !allow->is_boolean()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + *value + "': allow must be true or false");
+    }
+    if (!rules.emplace(*value, allow->value<bool>().value()).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains " + std::string(selector) + " '" + *value +
+              "' twice");
+    }
+  }
+  return rules;
+}
+
+[[nodiscard]] err::Expected<std::map<std::string, bool>> parsePosixNameRules(
+    const std::string& role,
+    std::string_view key,
+    const toml::node* node) noexcept {
+  const std::string what = "role '" + role + "': " + std::string(key);
+  const auto* nodes = node != nullptr ? node->as_array() : nullptr;
+  if (nodes == nullptr) {
+    return err::Error(
+        std::errc::invalid_argument, what + " must be an array of rule tables");
+  }
+  if (nodes->empty()) {
+    return err::Error(
+        std::errc::invalid_argument, what + " must contain at least one rule");
+  }
+
+  std::map<std::string, bool> rules;
+  for (const auto& ruleNode : *nodes) {
+    const auto* rule = ruleNode.as_table();
+    if (rule == nullptr) {
+      return err::Error(
+          std::errc::invalid_argument, what + " entries must be rule tables");
+    }
+    const std::set<std::string_view> allowedKeys = {kName, kAllow};
+    for (const auto& [option, child] : *rule) {
+      (void)child;
+      if (!allowedKeys.contains(option.str())) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule has unknown option '" + std::string(option.str()) +
+                "'");
+      }
+    }
+    auto name = parseString(findChild(*rule, kName), what + " rule name");
+    if (name.hasError()) {
+      return name.error();
+    }
+    if (name->size() < 2 || name->front() != '/' ||
+        name->find('/', 1) != std::string::npos) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule name '" + *name +
+              "' must start with one '/' and contain no other '/'");
+    }
+    const auto* allow = findChild(*rule, kAllow);
+    if (allow == nullptr || !allow->is_boolean()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + *name + "': allow must be true or false");
+    }
+    if (!rules.emplace(*name, allow->value<bool>().value()).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains name '" + *name + "' twice");
+    }
   }
   return rules;
 }
@@ -794,11 +899,10 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
     }
     const auto parsePatterns =
         [&](std::string_view key,
-            std::vector<std::string>& patterns,
+            std::map<std::string, bool>& patterns,
             AccessMode& mode) -> err::Expected<err::Unit> {
       if (const auto* child = findChild(*body, key)) {
-        auto parsed =
-            parseIdList("role '" + id + "': " + std::string(key), child);
+        auto parsed = parsePosixNameRules(id, key, child);
         if (parsed.hasError()) {
           return parsed.error();
         }

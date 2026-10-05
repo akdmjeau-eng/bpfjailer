@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -18,6 +20,35 @@
 
 namespace bpfjailer {
 
+[[nodiscard]] inline std::uint64_t ipcPatternPriority(
+    std::string_view pattern,
+    bool allowed) noexcept {
+  std::uint32_t specific = 0;
+  for (std::size_t i = 0; i < pattern.size(); ++i) {
+    if (pattern[i] == '\\' && i + 1 < pattern.size()) {
+      ++specific;
+      ++i;
+      continue;
+    }
+    if (pattern[i] == '*' || pattern[i] == '?') {
+      continue;
+    }
+    if (pattern[i] == '$' && i + 1 < pattern.size() && pattern[i + 1] == '{') {
+      const auto close = pattern.find('}', i + 2);
+      if (close != std::string_view::npos) {
+        ++specific;
+        i = close;
+        continue;
+      }
+    }
+    ++specific;
+  }
+  const auto length = std::min<std::size_t>(pattern.size(), 0xffff);
+  const std::uint64_t priority =
+      (static_cast<std::uint64_t>(specific) << 16) | length;
+  return (priority << 1) | static_cast<std::uint64_t>(allowed);
+}
+
 template <heap::BpfSkelWithHeap Skel>
 Expected<> compileIpcPatterns(
     const std::shared_ptr<Skel>& skel,
@@ -26,7 +57,7 @@ Expected<> compileIpcPatterns(
     struct bpfj_glob_run*& run2,
     struct bpfj_glob_run*& run3,
     const Policy& policy,
-    std::vector<std::string> RolePolicy::* patterns,
+    std::map<std::string, bool> RolePolicy::* patterns,
     const struct bpfj_ipc_pattern_set __arena* bpfj_role_policy::*
         published) noexcept {
   struct RoleRange {
@@ -42,8 +73,9 @@ Expected<> compileIpcPatterns(
       continue;
     }
     const auto first = static_cast<std::uint32_t>(entries.size());
-    for (const auto& pattern : rolePatterns) {
-      entries.emplace_back(pattern, 0);
+    for (const auto& [pattern, allowed] : rolePatterns) {
+      entries.emplace_back(
+          pattern.substr(1), ipcPatternPriority(pattern.substr(1), allowed));
     }
     ranges.push_back(
         RoleRange{

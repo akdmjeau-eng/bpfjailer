@@ -89,8 +89,8 @@ struct RolePolicy {
   std::vector<std::string> mqPosix;
   AccessMode mqPosixMode = AccessMode::Deny;
 
-  /// @brief POSIX queue names this role may acquire regardless of ownership.
-  std::vector<std::string> mqPosixPatterns;
+  /// @brief POSIX queue name patterns and whether they may be acquired.
+  std::map<std::string, bool> mqPosixPatterns;
 
   /// @brief Roles whose System V shared-memory segments this role may
   /// acquire. The three states match `mqSysv`.
@@ -101,9 +101,8 @@ struct RolePolicy {
   std::vector<std::string> shmPosix;
   AccessMode shmPosixMode = AccessMode::Deny;
 
-  /// @brief POSIX shared-memory names this role may acquire regardless of
-  /// ownership.
-  std::vector<std::string> shmPosixPatterns;
+  /// @brief POSIX shared-memory name patterns and whether they may be acquired.
+  std::map<std::string, bool> shmPosixPatterns;
 
   /// @brief Whether what this role creates is left unowned, keeping BPF's
   /// restriction without its ownership. Only meaningful on a role allowed to

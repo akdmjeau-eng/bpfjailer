@@ -393,7 +393,10 @@ any = true
 
 [roles.client]
 shm-posix-roles = []
-shm-posix-pattern = "bpfj-shm-?est-*-${SERIAL}"
+
+[[roles.client.shm-posix-pattern]]
+name = "/bpfj-shm-?est-*-${SERIAL}"
+allow = true
 )toml");
   Child creator([name] { return createPosix(name); });
   enroll("owner", creator.pid());
@@ -559,8 +562,9 @@ TEST(ShmEnforcer, PosixDescriptorReceiptAllowsAMatchingPattern) {
 [roles.owner]
 any = true
 
-[roles.client]
-shm-posix-pattern = "bpfj-shm-test-*"
+[[roles.client.shm-posix-pattern]]
+name = "/bpfj-shm-test-*"
+allow = true
 )toml",
       0);
 }

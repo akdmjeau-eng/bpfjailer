@@ -271,7 +271,7 @@ path = "/run/svc"
 allow = false
 
 [[roles.svc.unix-bind]]
-path = "@svc-*"
+name = "@svc-*"
 allow = true
 
 [[roles.svc.unix-connect]]
@@ -279,7 +279,7 @@ path = "/run/peer"
 allow = true
 
 [[roles.svc.unix-dgram]]
-path = "@log-${UUID}"
+name = "@log-${UUID}"
 allow = false
 )toml");
   ASSERT_OK(policy);
@@ -291,18 +291,18 @@ allow = false
   ASSERT_EQ(role.unixDgram.at("@log-${UUID}"), false);
 }
 
-TEST(Policy, RejectsUnixSocketRuleWithoutNameKind) {
+TEST(Policy, RejectsAbstractUnixSocketNameInPath) {
   auto policy = Policy::parse(R"toml([roles]
 
 [roles.svc]
 
 [[roles.svc.unix-bind]]
-path = "relative"
+path = "@svc"
 allow = false
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must start with '/' or '@'") !=
+      policy.error().message().find("must start with '/'") !=
       std::string::npos);
 }
 
@@ -319,6 +319,52 @@ allow = "sometimes"
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must be true or false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsUnixSocketRuleWithBothPathAndName) {
+  auto policy = Policy::parse(R"toml([[roles.svc.unix-bind]]
+path = "/run/svc"
+name = "@svc"
+allow = true
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("exactly one of path or name") !=
+      std::string::npos);
+}
+
+TEST(Policy, ParsesPosixNameRules) {
+  auto policy = Policy::parse(R"toml(vars = ["UUID"]
+
+[[roles.svc.mq-posix-pattern]]
+name = "/svc-*"
+allow = false
+
+[[roles.svc.mq-posix-pattern]]
+name = "/svc-${UUID}"
+allow = true
+
+[[roles.svc.shm-posix-pattern]]
+name = "/cache-*"
+allow = true
+)toml");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("svc");
+  ASSERT_EQ(role.mqPosixPatterns.at("/svc-*"), false);
+  ASSERT_EQ(role.mqPosixPatterns.at("/svc-${UUID}"), true);
+  ASSERT_EQ(role.shmPosixPatterns.at("/cache-*"), true);
+}
+
+TEST(Policy, RejectsPosixNameWithoutLeadingSlash) {
+  auto policy = Policy::parse(R"toml([[roles.svc.mq-posix-pattern]]
+name = "svc-*"
+allow = true
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("must start with one '/'") !=
       std::string::npos);
 }
 

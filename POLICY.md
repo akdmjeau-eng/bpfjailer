@@ -121,14 +121,15 @@ path = "/usr/lib"
 allow = ["shared-object"]
 ```
 
-Unix rule paths begin with `/` for pathnames and apply recursively. Abstract
-names begin with `@` and use glob matching. The most specific matching rule
-wins and an equally specific denial wins a tie. Missing or unmatched pathname
-policy denies, so a `true` rule opens its subtree. Unmatched abstract names are
-allowed, so an abstract-name allowlist needs a catch-all denial plus more
-specific grants. `any: true` opens pathname operations that have no explicit
-Unix operation table. Already-connected, inherited or transferred Unix socket
-descriptors remain capabilities and are not dynamically revoked.
+Unix pathname rules use `{ path, allow }`; paths begin with `/` and apply
+recursively. Abstract socket rules use `{ name, allow }`; names begin with `@`
+and use glob matching. The most specific matching rule wins and an equally
+specific denial wins a tie. Missing or unmatched pathname policy denies, so a
+`true` rule opens its subtree. Unmatched abstract names are allowed, so an
+abstract-name allowlist needs a catch-all denial plus more specific grants.
+`any: true` opens pathname operations that have no explicit Unix operation
+table. Already-connected, inherited or transferred Unix socket descriptors
+remain capabilities and are not dynamically revoked.
 
 For `mount`, `allow` is an array of filesystem type names. Missing and unmatched
 mount policy denies, an empty array explicitly denies a matched destination,
@@ -147,10 +148,13 @@ new-mount-API reconfigure has no destination in its LSM hook and requires
 because their LSM hook exposes no source type, and legacy `MS_MOVE` requires
 `umount-any` because its source path is unavailable to the hook.
 
-POSIX queue and shared-memory patterns match names without their leading `/`.
-They support literals, `?`, `*`, and `${NAME}`. A pattern grants access
-regardless of owner and cannot be combined with the corresponding `*-any`.
-Backslash escapes a metacharacter. System V IPC is not name-matched.
+POSIX queue and shared-memory name policies are arrays of `{ name, allow }`
+rules. Names start with `/`, matching the argument accepted by `mq_open` and
+`shm_open`, and support literals, `?`, `*`, and `${NAME}`. The most specific
+matching rule wins and an equally specific denial wins a tie; an unmatched
+name is denied. An allowed match grants access regardless of owner. Name rules
+cannot be combined with the corresponding `*-any`. Backslash escapes a
+metacharacter. System V IPC is not name-matched.
 
 Variable-expanded matchers inspect only the first four variables carried by a
 pod, and a bound value may be at most 39 bytes to match. Longer values and the

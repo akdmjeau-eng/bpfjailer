@@ -721,8 +721,13 @@ TEST(Ctl, CheckAcceptsMessageQueuePosixPatterns) {
 
 [roles]
 
-[roles.client]
-mq-posix-pattern = ["service-*", "service-${UUID}"]
+[[roles.client.mq-posix-pattern]]
+name = "/service-*"
+allow = false
+
+[[roles.client.mq-posix-pattern]]
+name = "/service-${UUID}"
+allow = true
 )toml");
 
   const CommandResult res = runCtl({"check", policy});
@@ -734,8 +739,11 @@ TEST(Ctl, CheckRejectsMessageQueuePatternAndAnyTogether) {
       R"toml([roles]
 
 [roles.muddled]
-mq-posix-pattern = "service-*"
 mq-posix-any = true
+
+[[roles.muddled.mq-posix-pattern]]
+name = "/service-*"
+allow = true
 )toml");
 
   const CommandResult res = runCtl({"check", policy});
@@ -790,8 +798,13 @@ TEST(Ctl, CheckAcceptsSharedMemoryPosixPatterns) {
 
 [roles]
 
-[roles.client]
-shm-posix-pattern = ["service-?", "service-${UUID}"]
+[[roles.client.shm-posix-pattern]]
+name = "/service-?"
+allow = false
+
+[[roles.client.shm-posix-pattern]]
+name = "/service-${UUID}"
+allow = true
 )toml");
 
   const CommandResult res = runCtl({"check", policy});
@@ -803,8 +816,11 @@ TEST(Ctl, CheckRejectsSharedMemoryPatternAndAnyTogether) {
       R"toml([roles]
 
 [roles.muddled]
-shm-posix-pattern = "service-*"
 shm-posix-any = true
+
+[[roles.muddled.shm-posix-pattern]]
+name = "/service-*"
+allow = true
 )toml");
 
   const CommandResult res = runCtl({"check", policy});
