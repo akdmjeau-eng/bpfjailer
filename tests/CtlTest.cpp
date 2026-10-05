@@ -623,7 +623,7 @@ bpf-any = "maybe"
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("neither true nor false"));
+  ASSERT(res.errHas("must be true or false"));
 }
 
 TEST(Ctl, CheckRejectsAKillAnyThatIsNotABoolean) {
@@ -635,7 +635,7 @@ kill-any = "maybe"
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("neither true nor false"));
+  ASSERT(res.errHas("must be true or false"));
 }
 
 TEST(Ctl, CheckRejectsAPtraceAnyThatIsNotABoolean) {
@@ -647,7 +647,7 @@ ptrace-any = "maybe"
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("neither true nor false"));
+  ASSERT(res.errHas("must be true or false"));
 }
 
 TEST(Ctl, CheckRejectsAKeyringAnyThatIsNotABoolean) {
@@ -659,7 +659,7 @@ keyring-any = "maybe"
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("neither true nor false"));
+  ASSERT(res.errHas("must be true or false"));
 }
 
 TEST(Ctl, CheckRejectsALkmAnyThatIsNotABoolean) {
@@ -671,7 +671,7 @@ lkm-any = "maybe"
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("neither true nor false"));
+  ASSERT(res.errHas("must be true or false"));
 }
 
 TEST(Ctl, CheckAcceptsIndependentMessageQueuePolicies) {
@@ -839,7 +839,7 @@ min-seq = "8x"
   // is worse than no floor, so the whole value has to be digits.
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("is '8x', which is not a non-negative integer"));
+  ASSERT(res.errHas("min-seq must be a non-negative integer"));
 }
 
 TEST(Ctl, CheckRejectsAMinSeqThatDoesNotFit) {
@@ -851,7 +851,7 @@ min-seq = 99999999999999999999999999
 
   const CommandResult res = runCtl({"check", policy});
   ASSERT_EQ(res.status, 1);
-  ASSERT(res.errHas("does not fit"));
+  ASSERT(res.errHas("is not representable as a signed 64-bit integer"));
 }
 
 TEST(Ctl, CheckRejectsAMinSeqWithNoCertificateToCheckIt) {
@@ -1032,6 +1032,7 @@ TEST(Ctl, EnrollAcceptsSixteenDeclaredVars) {
 [roles]
 
 [roles.role]
+any = true
 )toml");
 
   ASSERT_EQ(ctl({"attach", writePolicy(policy)}).status, 0);

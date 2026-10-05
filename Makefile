@@ -161,15 +161,11 @@ BPF_CFLAGS ?= \
 	-D$(BPF_ARCH_DEF) \
 	-D__TARGET_ARCH_$(BPF_ARCH)
 
-# libarena gates arena_spinlock_t on ENABLE_ATOMICS_TESTS. Its header declares
-# the lock's queue nodes without defining them, expecting its own objects to
-# be linked in, so lock.h defines them when BPFJ_DEFINE_LIBARENA_QNODES says
-# this is that header. It includes <vmlinux.h> by bare name, hence the second
-# include directory. Kept apart from BPF_CFLAGS so overriding that does not
-# drop them.
+# bpf_atomic.h includes <vmlinux.h> by bare name, hence the second include
+# directory. Kept apart from BPF_CFLAGS so overriding that does not drop it.
 BPF_LIBARENA_FLAGS = \
 	-DENABLE_ATOMICS_TESTS \
-	-DBPFJ_DEFINE_LIBARENA_QNODES \
+	-DBPFJ_OSS_BUILD \
 	-I$(LIBARENA_INCLUDE) \
 	-I$(dir $(VMLINUX))
 

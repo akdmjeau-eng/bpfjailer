@@ -42,7 +42,7 @@ static __always_inline struct bpfj_glob_gadget_run __arena* bpfj_glob_gadget_at(
 static __always_inline bool bpfj_glob_state_has_accept(
     struct bpfj_glob_run __arena* run,
     u32 accept) {
-  if (accept >= run->map->num_accepts) {
+  if (accept >= BPFJ_GLOB_MAP_MAX_ACCEPTS || accept >= run->map->num_accepts) {
     return false;
   }
   u32 word = run->map->accept_word[accept] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
@@ -208,11 +208,16 @@ __noinline int bpfj_glob_close(__arena struct bpfj_glob_run* run __arg_arena) {
 __noinline int bpfj_glob_step(
     __arena struct bpfj_glob_run* run __arg_arena,
     u8 ch) {
+  u32 num_words = run->map->num_words;
+  u32 num_gadgets = run->map->num_gadgets;
+  __arena const u64* char_mask = run->map->char_mask;
+  __arena const u64* star_mask = run->map->star_mask;
+
   // Per-word variable advance mask for this byte: gadget bit (base+k) is set
   // if value[k] == ch. In the run state, not on the stack, for the budget.
   u32 w = 0;
   bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    if (w >= run->map->num_words) {
+    if (w >= num_words) {
       break;
     }
     u64 __arena* advance = bpfj_glob_word_at(&run->var_advance, w);
@@ -223,7 +228,7 @@ __noinline int bpfj_glob_step(
   }
   u32 g = 0;
   bpf_for(g, 0, BPFJ_GLOB_MAP_MAX_GADGETS) {
-    if (g >= run->map->num_gadgets) {
+    if (g >= num_gadgets) {
       break;
     }
     u32 word = run->map->gadget_word[g] & (BPFJ_GLOB_MAP_MAX_WORDS - 1);
@@ -247,7 +252,7 @@ __noinline int bpfj_glob_step(
   // Literal/'?'/variable tokens that match ch move one bit; '*' tokens consume
   // ch and stay.
   bpf_for(w, 0, BPFJ_GLOB_MAP_MAX_WORDS) {
-    if (w >= run->map->num_words) {
+    if (w >= num_words) {
       break;
     }
     u64 __arena* state = bpfj_glob_word_at(&run->state, w);
@@ -259,8 +264,8 @@ __noinline int bpfj_glob_step(
     if (cur == 0) {
       continue;
     }
-    u64 cm = run->map->char_mask[(u32)ch * run->map->num_words + w] | *advance;
-    *state = ((cur & cm) << 1) | (cur & run->map->star_mask[w]);
+    u64 cm = char_mask[(u32)ch * num_words + w] | *advance;
+    *state = ((cur & cm) << 1) | (cur & star_mask[w]);
   }
 
   // bpfj_glob_eval calls the closure separately, keeping the two siblings.
@@ -507,6 +512,25 @@ bpfj_glob_map_contains(struct bpfj_glob_run __arena* run, u32 len, u64 wanted) {
 
 // Match only one contiguous range of compiled accepts without collecting or
 // scanning matches belonging to other callers sharing the same NFA.
+struct bpfj_glob_contains_range_ctx {
+  struct bpfj_glob_run __arena* run;
+  u32 first;
+  u32 count;
+  bool matched;
+};
+
+static long bpfj_glob_contains_range_result(u32 i, void* data) {
+  struct bpfj_glob_contains_range_ctx* ctx = data;
+  if (i >= ctx->count) {
+    return 1;
+  }
+  if (bpfj_glob_state_has_accept(ctx->run, ctx->first + i)) {
+    ctx->matched = true;
+    return 1;
+  }
+  return 0;
+}
+
 static __noinline long bpfj_glob_map_contains_range(
     struct bpfj_glob_run __arena* run,
     u32 len,
@@ -518,8 +542,13 @@ static __noinline long bpfj_glob_map_contains_range(
   if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
     return -E2BIG;
   }
-  if ((run->str == NULL && len != 0) || first > run->map->num_accepts ||
-      count > run->map->num_accepts - first) {
+  if ((run->str == NULL && len != 0) || first > BPFJ_GLOB_MAP_MAX_ACCEPTS ||
+      count > BPFJ_GLOB_MAP_MAX_ACCEPTS - first) {
+    return 0;
+  }
+  u32 num_accepts = run->map->num_accepts;
+  if (num_accepts > BPFJ_GLOB_MAP_MAX_ACCEPTS || first > num_accepts ||
+      count > num_accepts - first) {
     return 0;
   }
 
@@ -529,17 +558,17 @@ static __noinline long bpfj_glob_map_contains_range(
     return ret;
   }
 
-  u32 i = 0;
-  bpf_for(i, 0, BPFJ_GLOB_MAP_MAX_ACCEPTS) {
-    if (i >= count) {
-      break;
-    }
-    u32 accept = first + i;
-    if (bpfj_glob_state_has_accept(run, accept)) {
-      return 1;
-    }
+  struct bpfj_glob_contains_range_ctx ctx = {
+      .run = run,
+      .first = first,
+      .count = count,
+      .matched = false,
+  };
+  ret = bpf_loop(count, bpfj_glob_contains_range_result, &ctx, 0);
+  if (ret < 0) {
+    return ret;
   }
-  return 0;
+  return ctx.matched;
 }
 
 static __always_inline void bpfj_glob_run_destroy(

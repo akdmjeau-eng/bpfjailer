@@ -3,48 +3,144 @@
 #pragma once
 
 // A spin lock that lives in the BPF arena, so the same lock word can be taken
-// from BPF and from userspace (bpfj/lib/Lock.h). Two ways to take it from BPF:
-// a trylock, and libarena's waiting arena_spin_lock_irqsave() through
-// BPFJ_LOCK_WAIT_GUARD or bpfj_lock_acquire(). The waiting one is unsafe
-// against a userspace holder on two counts:
+// from BPF and from userspace (bpfj/lib/Lock.h). BPF only attempts the lock
+// once. Waiting is unsafe against a userspace holder on two counts:
 //
 //   - it waits with preemption disabled, so a BPF program spinning on a
 //     userspace holder parked on the same CPU keeps it from running, and
-//   - its bail-out can return with the pending bit set or its queue node
-//     still linked, which wedges the lock for both sides.
+//   - a bounded queued-lock bail-out can leave pending or queue state behind,
+//     which wedges the lock for both sides.
 //
 // Userspace may wait, since it yields rather than spins and a BPF holder
 // always releases before its program returns.
 //
-// types_lock.h first: it supplies the __arena qualifier libarena's header
-// declares its own types with.
+// bpf_atomic.h supplies the acquire/release operations over arena memory.
+#include <bpf_atomic.h>
+#include <errno.h>
+
 #include "bpfj/lib/bpf/kfuncs.h"
 #include "bpfj/lib/bpf/types_lock.h"
 
-// Angle-bracket include: the BPF build gets the libarena headers as an include
-// directory, and arena_spinlock_t is gated on ENABLE_ATOMICS_TESTS -- both
-// from bpfjailer/defs.bzl under Buck and from the Makefile's LIBARENA in the
-// open source build. This also pulls in libarena's 64 KiB qnodes __arena
-// global, so only objects declaring an ARENA map may use it.
-#include <bpf_arena_spin_lock.h>
+struct bpfj_arena_spinlock {
+  union {
+    atomic_t val;
+    struct {
+      __u8 locked;
+      __u8 pending;
+      __u16 tail;
+    };
+    struct {
+      __u16 locked_pending;
+      __u16 tail_word;
+    };
+  };
+};
 
-// Upstream libarena (the Makefile build) only declares the queue nodes its
-// slow path uses, expecting libarena's own objects to be linked in. That slow
-// path is emitted whether or not anything reaches it, so the declaration has
-// to resolve. fbsource's vendored copy, which Buck uses, defines them itself.
-#ifdef BPFJ_DEFINE_LIBARENA_QNODES
-struct arena_qnode __weak __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
-#endif
+#define BPFJ_LOCKED_VAL 1U
+#define BPFJ_LOCKED_MASK 0xffU
+#define BPFJ_PENDING_VAL 0x100U
+#define BPFJ_PENDING_MASK 0xff00U
+
+// Keep the heap's initial 64 KiB backed by arena data. libbpf only exposes and
+// backs an arena's initial mapping to the extent described by this section.
+__u8 __weak __arena __hidden bpfj_lock_arena_backing[64 * 1024];
 
 _Static_assert(
-    sizeof(arena_spinlock_t) == sizeof(__u32),
-    "struct bpfj_lock must stay layout-compatible with arena_spinlock_t");
+    sizeof(struct bpfj_arena_spinlock) == sizeof(__u32),
+    "struct bpfj_lock must stay a bare 32-bit word");
 
 // The shared struct stores the bare word so types_heap.h can embed it without
 // dragging libarena's header into arena-less objects.
-static __always_inline arena_spinlock_t __arena* bpfj_lock_qspinlock(
+static __always_inline struct bpfj_arena_spinlock __arena* bpfj_lock_qspinlock(
     struct bpfj_lock __arena* l) {
-  return (arena_spinlock_t __arena*)&l->val;
+  return (struct bpfj_arena_spinlock __arena*)&l->val;
+}
+
+static __always_inline int bpfj_arena_spin_trylock(
+    struct bpfj_arena_spinlock __arena* lock) {
+  int val = atomic_read(&lock->val);
+  if (val != 0) {
+    return 0;
+  }
+  return atomic_try_cmpxchg_acquire(&lock->val, &val, BPFJ_LOCKED_VAL);
+}
+
+static __always_inline void bpfj_arena_clear_pending(
+    struct bpfj_arena_spinlock __arena* lock) {
+  WRITE_ONCE(lock->pending, 0);
+}
+
+static __always_inline __u32
+bpfj_arena_fetch_set_pending(struct bpfj_arena_spinlock __arena* lock) {
+  __u32 old = atomic_read(&lock->val);
+  do {
+    const __u32 next = old | BPFJ_PENDING_VAL;
+    cond_break_label(failed);
+    if (atomic_try_cmpxchg_acquire(&lock->val, &old, next)) {
+      return old;
+    }
+  } while (true);
+failed:
+  return old;
+}
+
+static __always_inline int bpfj_arena_spin_lock_slowpath(
+    struct bpfj_arena_spinlock __arena* lock,
+    __u32 val) {
+  if (val == BPFJ_PENDING_VAL) {
+    int count = 1;
+    val = atomic_cond_read_relaxed_label(
+        &lock->val, (VAL != BPFJ_PENDING_VAL) || !count--, failed);
+  }
+  if (val & ~BPFJ_LOCKED_MASK) {
+    return -EBUSY;
+  }
+
+  val = bpfj_arena_fetch_set_pending(lock);
+  if (val & ~BPFJ_LOCKED_MASK) {
+    if (!(val & BPFJ_PENDING_MASK)) {
+      bpfj_arena_clear_pending(lock);
+    }
+    return -EBUSY;
+  }
+  if (val & BPFJ_LOCKED_MASK) {
+    (void)smp_cond_load_acquire_label(&lock->locked, !VAL, failed);
+  }
+  WRITE_ONCE(lock->locked_pending, BPFJ_LOCKED_VAL);
+  return 0;
+failed:
+  // Bounded waiting is a transient miss just like observing a held lock.
+  return -EBUSY;
+}
+
+static __always_inline void bpfj_arena_spin_unlock(
+    struct bpfj_arena_spinlock __arena* lock) {
+  smp_store_release(&lock->locked, 0);
+}
+
+static __always_inline int bpfj_arena_spin_lock_irqsave(
+    struct bpfj_arena_spinlock __arena* lock,
+    unsigned long* flags) {
+  bpf_local_irq_save(flags);
+  bpf_preempt_disable();
+  int val = 0;
+  if (atomic_try_cmpxchg_acquire(&lock->val, &val, BPFJ_LOCKED_VAL)) {
+    return 0;
+  }
+  const int error = bpfj_arena_spin_lock_slowpath(lock, val);
+  if (error != 0) {
+    bpf_preempt_enable();
+    bpf_local_irq_restore(flags);
+  }
+  return error;
+}
+
+static __always_inline void bpfj_arena_spin_unlock_irqrestore(
+    struct bpfj_arena_spinlock __arena* lock,
+    unsigned long* flags) {
+  bpfj_arena_spin_unlock(lock);
+  bpf_preempt_enable();
+  bpf_local_irq_restore(flags);
 }
 
 // Put a lock into the free state: required before first use, and not safe to
@@ -60,13 +156,11 @@ static void bpfj_lock_init(struct bpfj_lock __arena* l) {
 // arena_spin_lock() this does not disable preemption, which costs waiters
 // latency but cannot deadlock.
 static int bpfj_lock_trylock(struct bpfj_lock __arena* l) {
-  return arena_spin_trylock(bpfj_lock_qspinlock(l));
+  return bpfj_arena_spin_trylock(bpfj_lock_qspinlock(l));
 }
 
-// Release a lock taken with bpfj_lock_trylock(): arena_spin_unlock() minus its
-// bpf_preempt_enable(), which would unbalance the preempt count.
 static void bpfj_lock_unlock(struct bpfj_lock __arena* l) {
-  smp_store_release(&bpfj_lock_qspinlock(l)->locked, 0);
+  bpfj_arena_spin_unlock(bpfj_lock_qspinlock(l));
 }
 
 // Whether the lock is currently held, without attempting to take it.
@@ -105,42 +199,20 @@ static void bpfj_lock_guard_cleanup(struct bpfj_lock_guard* guard) {
 
 #define BPFJ_LOCK_GUARD_RELEASE(_name) _name.lock = NULL
 
-// Waiting acquisition through libarena's arena_spin_lock_irqsave(), which
-// queues behind other waiters and holds the lock with interrupts off, so
-// nothing that interrupts a holder can spin on it from the same CPU.
-// lsm/task_free, for one, runs from an RCU callback in softirq context.
-// BPFJ_LOCK_WAIT_HELD() says whether the guard holds the lock. If not,
-// libarena gave up waiting.
-//
-// Locks taken this way while holding another must nest in one order across
-// every caller: two waiters each holding what the other wants spin until
-// libarena gives up, and a lock it gives up on can be left unusable. They also
-// come off in the reverse order they went on, which the verifier enforces for
-// the interrupt state. The trylock guard above is for locks userspace may hold
-// while it triggers the BPF program that wants them.
+// Bound waiting where bpf_local_irq_save() exists, with a trylock fallback on
+// older internal kernels that cannot resolve that kfunc.
+#define BPFJ_ARENA_LOCK(_lock, _flags)                    \
+  (bpf_ksym_exists(bpf_local_irq_save)                    \
+       ? bpfj_arena_spin_lock_irqsave((_lock), &(_flags)) \
+       : (bpfj_arena_spin_trylock((_lock)) ? 0 : -EBUSY))
 
-// libarena's arena_spin_lock_irqsave() where the kernel has
-// bpf_local_irq_save(), which arrived in 6.14. Older kernels cannot verify
-// libarena's waiting lock at all -- 6.11 rejects the call to its global slow
-// path with preemption disabled -- so there the lock stays the single
-// arena_spin_trylock() it was before, and a collision fails with -EBUSY.
-// bpf_ksym_exists() is a load-time constant, so the verifier prunes the branch
-// the running kernel cannot take.
-#define BPFJ_ARENA_LOCK(_lock, _flags)              \
-  (bpf_ksym_exists(bpf_local_irq_save)              \
-       ? arena_spin_lock_irqsave((_lock), (_flags)) \
-       : (arena_spin_trylock((_lock)) ? 0 : -EBUSY))
-
-// The release matching BPFJ_ARENA_LOCK. The trylock branch is
-// arena_spin_unlock() minus its bpf_preempt_enable(), the trylock never having
-// disabled preemption.
-#define BPFJ_ARENA_UNLOCK(_lock, _flags)               \
-  do {                                                 \
-    if (bpf_ksym_exists(bpf_local_irq_save)) {         \
-      arena_spin_unlock_irqrestore((_lock), (_flags)); \
-    } else {                                           \
-      smp_store_release(&(_lock)->locked, 0);          \
-    }                                                  \
+#define BPFJ_ARENA_UNLOCK(_lock, _flags)                     \
+  do {                                                       \
+    if (bpf_ksym_exists(bpf_local_irq_save)) {               \
+      bpfj_arena_spin_unlock_irqrestore((_lock), &(_flags)); \
+    } else {                                                 \
+      bpfj_arena_spin_unlock((_lock));                       \
+    }                                                        \
   } while (0)
 
 // Inline so the arena pointer keeps its type: the verifier does not support

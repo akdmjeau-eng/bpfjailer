@@ -288,11 +288,11 @@ int bpfj_replace_snapshot(struct bpf_iter__task* ctx) {
       __u32 payload_size = var->type == BPFJ_VAR_TYPE_STR
           ? (__u32)var->size + 1
           : sizeof(struct vsock_address);
+      barrier_var(payload_size);
       if (payload_size > sizeof(snapshot_scratch->value)) {
         bpfj_replace_count(&bpfj_replace_incompatible);
         return 0;
       }
-      barrier_var(payload_size);
       const unsigned char __arena* value = var->val;
       int n;
       bpf_for(n, 0, BPFJ_OSS_VAR_VAL_LEN) {

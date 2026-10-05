@@ -341,14 +341,14 @@ TEST(MountEnforcer, RemountIsDeniedByFalseRule) {
 TEST(MountEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
   Fixture fixture;
   const Policy policy = policyOf(
-      "[roles.denied.mount]\n\"" + fixture.destination() +
-      "\" = []\n"
+      "[[roles.denied.mount]]\npath = \"" + fixture.destination() +
+      "\"\nallow = false\n"
       "[roles.override]\noverride-stacked = true\n"
-      "[roles.override.mount]\n\"" +
+      "[[roles.override.mount]]\npath = \"" +
       fixture.destination() +
-      "\" = [\"tmpfs\"]\n"
-      "[roles.top.mount]\n\"" +
-      fixture.destination() + "\" = []\n");
+      "\"\nallow = true\nfilesystems = [\"tmpfs\"]\n"
+      "[[roles.top.mount]]\npath = \"" +
+      fixture.destination() + "\"\nallow = false\n");
   loadJailer(policy);
   ASSERT_OK(MountEnforcer::load(testPins(), policy));
 

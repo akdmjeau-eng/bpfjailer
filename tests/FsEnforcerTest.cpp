@@ -143,14 +143,14 @@ fs-any = true
 TEST(FsEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
   Fixture fixture;
   const Policy policy = policyOf(
-      "[roles.denied.paths]\n\"" + fixture.file() +
-      "\" = \"NONE\"\n"
+      "[[roles.denied.paths]]\npath = \"" + fixture.file() +
+      "\"\nallow = false\n"
       "[roles.override]\noverride-stacked = true\n"
-      "[roles.override.paths]\n\"" +
+      "[[roles.override.paths]]\npath = \"" +
       fixture.file() +
-      "\" = \"RDONLY\"\n"
-      "[roles.top.paths]\n\"" +
-      fixture.file() + "\" = \"NONE\"\n");
+      "\"\nallow = true\naccess = \"read-only\"\n"
+      "[[roles.top.paths]]\npath = \"" +
+      fixture.file() + "\"\nallow = false\n");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 

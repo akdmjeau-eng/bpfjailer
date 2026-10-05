@@ -45,8 +45,8 @@ static __always_inline struct bpfj_glob_run __arena* bpfj_ipc_glob_claim(
   return NULL;
 }
 
-static __always_inline bool bpfj_ipc_glob_bindings_complete(
-    const struct bpfj_glob_run __arena* run) {
+__noinline bool bpfj_ipc_glob_bindings_complete(
+    const struct bpfj_glob_run __arena* run __arg_arena) {
   u32 wanted = run->map->num_vars;
   u32 bound = run->bindings.count;
   u32 i = 0;
@@ -72,14 +72,14 @@ static __always_inline bool bpfj_ipc_glob_bindings_complete(
   return true;
 }
 
-static __always_inline void bpfj_ipc_glob_bind_pod(
-    struct bpfj_glob_run __arena* run,
-    const struct bpfj_glob_map __arena* map,
-    const struct bpfj_pod __arena* pod) {
+__noinline int bpfj_ipc_glob_bind_pod(
+    struct bpfj_glob_run __arena* run __arg_arena,
+    const struct bpfj_glob_map __arena* map __arg_arena,
+    const struct bpfj_pod __arena* pod __arg_arena) {
   run->map = map;
   run->bindings.count = 0;
   if (pod == NULL || map == NULL) {
-    return;
+    return 0;
   }
 
   u32 count = pod->var_array.count;
@@ -117,20 +117,23 @@ static __always_inline void bpfj_ipc_glob_bind_pod(
     }
     run->bindings.count = at + 1;
   }
+  return 0;
 }
 
-static __always_inline bool bpfj_ipc_glob_matches(
-    const struct bpfj_ipc_pattern_set __arena* patterns,
-    const struct bpfj_pod __arena* pod,
-    const struct qstr* name) {
-  if (patterns == NULL || patterns->map == NULL || pod == NULL ||
-      name == NULL || patterns->num_accepts == 0) {
+// GLOBAL function: keep the matcher outside the gate's policy branches. Older
+// verifiers otherwise explore the product of those branches and every bounded
+// glob loop.
+__noinline bool bpfj_ipc_glob_matches_global(
+    const struct bpfj_ipc_pattern_set __arena* patterns __arg_arena,
+    const struct bpfj_pod __arena* pod __arg_arena,
+    u32 len,
+    u64 chars) {
+  if (patterns == NULL || patterns->map == NULL || pod == NULL || chars == 0 ||
+      patterns->num_accepts == 0) {
     return false;
   }
 
-  u32 len = BPF_CORE_READ(name, len);
-  const unsigned char* chars = BPF_CORE_READ(name, name);
-  if (chars == NULL || len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
+  if (len > BPFJ_GLOB_MAP_MAX_STR_LEN) {
     return false;
   }
 
@@ -142,7 +145,7 @@ static __always_inline bool bpfj_ipc_glob_matches(
   }
   bpfj_ipc_glob_bind_pod(run, patterns->map, pod);
   if (!bpfj_ipc_glob_bindings_complete(run) ||
-      bpfj_glob_run_read_kernel(run, len, (__u64)chars) < 0 ||
+      bpfj_glob_run_read_kernel(run, len, chars) < 0 ||
       bpfj_glob_eval_state(run) < 0) {
     return false;
   }
@@ -167,4 +170,16 @@ static __always_inline bool bpfj_ipc_glob_matches(
     }
   }
   return matched && (best & 1) != 0;
+}
+
+static __always_inline bool bpfj_ipc_glob_matches(
+    const struct bpfj_ipc_pattern_set __arena* patterns,
+    const struct bpfj_pod __arena* pod,
+    const struct qstr* name) {
+  if (name == NULL) {
+    return false;
+  }
+  u32 len = BPF_CORE_READ(name, len);
+  const unsigned char* chars = BPF_CORE_READ(name, name);
+  return bpfj_ipc_glob_matches_global(patterns, pod, len, (u64)chars);
 }

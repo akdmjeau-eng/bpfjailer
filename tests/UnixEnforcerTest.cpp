@@ -382,13 +382,14 @@ TEST(UnixEnforcer, OperationsAreIndependent) {
 TEST(UnixEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
   Fixture fixture;
   const Policy policy = policyOf(
-      "[roles.denied]\nunix-bind.\"" + fixture.socket() +
-      "\" = false\n"
-      "[roles.override]\noverride-stacked = true\nunix-bind.\"" +
+      "[[roles.denied.unix-bind]]\npath = \"" + fixture.socket() +
+      "\"\nallow = false\n"
+      "[roles.override]\noverride-stacked = true\n"
+      "[[roles.override.unix-bind]]\npath = \"" +
       fixture.socket() +
-      "\" = true\n"
-      "[roles.top]\nunix-bind.\"" +
-      fixture.socket() + "\" = false\n");
+      "\"\nallow = true\n"
+      "[[roles.top.unix-bind]]\npath = \"" +
+      fixture.socket() + "\"\nallow = false\n");
   loadJailer(policy);
   ASSERT_OK(UnixEnforcer::load(testPins(), policy));
 

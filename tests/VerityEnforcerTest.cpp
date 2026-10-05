@@ -72,7 +72,10 @@ void attach(const std::string& toml) {
 
   const pid_t pid = ::fork();
   if (pid < 0) {
-    return errno;
+    const int failed = errno;
+    ::close(report[0]);
+    ::close(report[1]);
+    return failed;
   }
 
   if (pid == 0) {
@@ -293,7 +296,8 @@ class Fixture {
 /// @brief A policy where `svc` will only run binaries signed by `trusted`.
 [[nodiscard]] std::string signedPolicy(const Fixture& fixture) {
   return "[certs]\ntrusted = \"" + fixture.certBlock("trusted") +
-      R"toml("\n
+      R"toml("
+
 [roles.svc]
 any = true
 enforce-binary-certs = ["trusted"]
@@ -820,7 +824,7 @@ TEST(VerityEnforcer, ARestrictedRoleMayWriteItsOwnKeyring) {
 
 TEST(VerityEnforcer, ARoleWithNoKeyringMayNotWriteItsOwnKeyring) {
   Fixture fixture;
-  attach(signedPolicy(fixture) + "");
+  attach(signedPolicy(fixture) + "keyring-own = false\n");
   enroll("svc", ::getpid());
 
   ASSERT_EQ(addKeyErrno(keyringOf("svc")), EPERM);

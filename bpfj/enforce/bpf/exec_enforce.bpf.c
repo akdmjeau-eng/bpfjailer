@@ -22,8 +22,10 @@
 struct bpfj_dyn_lru __arena* bpfj_exec_match_lru;
 struct bpfj_mount_cache __arena bpfj_exec_mount_cache;
 
-static __noinline bool bpfj_exec_match_allowed(
-    struct bpfj_file_match_cached_state __arena* state,
+// GLOBAL function: verify path-entry selection independently from the policy
+// walk while returning only the scalar decision supported by BPF subprograms.
+__noinline bool bpfj_exec_match_allowed(
+    struct bpfj_file_match_cached_state __arena* state __arg_arena,
     __u32 wanted,
     long count) {
   __s32 best_pos = -1;

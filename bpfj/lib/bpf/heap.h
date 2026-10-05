@@ -50,7 +50,12 @@ static __always_inline struct bpfj_heap_control __arena* bpfj_heap_get_ctrl(
 // Associate the arena map with the current BPF program so the verifier permits
 // __arena dereferences; every program using heap pointers must call it. The
 // lookup is dead at runtime but the verifier still sees the reference.
-static __noinline void bpfj_heap_use_arena(void) {
+#ifdef BPFJ_OSS_BUILD
+#define BPFJ_HEAP_USE_ARENA_ATTR __always_inline
+#else
+#define BPFJ_HEAP_USE_ARENA_ATTR __noinline
+#endif
+static BPFJ_HEAP_USE_ARENA_ATTR void bpfj_heap_use_arena(void) {
   // Gated on rodata so the reference is dropped where there is no arena.
   if (!bpfj_heap_enabled) {
     return;
@@ -61,6 +66,7 @@ static __noinline void bpfj_heap_use_arena(void) {
     bpf_map_lookup_elem(&bpfj_heap_arena, &zero);
   }
 }
+#undef BPFJ_HEAP_USE_ARENA_ATTR
 
 __noinline long bpfj_heap_alloc(u32 size);
 __noinline long bpfj_heap_free(u32 offset);

@@ -63,13 +63,15 @@ static __noinline struct bpfj_mount_scratch* bpfj_mount_scratch_claim(
   return bpfj_scratch_alloc(sizeof(struct bpfj_mount_scratch), slot);
 }
 
-static __noinline bool bpfj_mount_match_allowed(
-    struct bpfj_file_match_cached_state __arena* state,
-    long count,
-    struct bpfj_mount_scratch* scratch) {
+// GLOBAL function: select the best mount rule independently while returning
+// only its scalar index to the caller.
+__noinline long bpfj_mount_best_match(
+    struct bpfj_file_match_cached_state __arena* state __arg_arena,
+    long count) {
   __s32 best_pos = -1;
   __u8 best_specificity = 0;
   struct bpfj_mount_path_entry* best = NULL;
+  long best_index = -1;
   __u32 i;
   bpf_for(i, 0, BPFJ_FILE_MATCH_MAX_ITERS) {
     if (i >= count) {
@@ -88,9 +90,23 @@ static __noinline bool bpfj_mount_match_allowed(
       best_pos = pos;
       best_specificity = entry->specificity;
       best = entry;
+      best_index = i;
     }
   }
-  if (!best) {
+  return best_index;
+}
+
+static __always_inline bool bpfj_mount_match_allowed(
+    struct bpfj_file_match_cached_state __arena* state,
+    long count,
+    struct bpfj_mount_scratch* scratch) {
+  const long best_index = bpfj_mount_best_match(state, count);
+  if (best_index < 0) {
+    return false;
+  }
+  struct bpfj_mount_path_entry* best =
+      BPFJ_FILE_MATCH_CACHED_LOOKUP(state, best_index);
+  if (best == NULL) {
     return false;
   }
   if (best->any_type) {
