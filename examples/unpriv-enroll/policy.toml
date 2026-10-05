@@ -46,7 +46,8 @@ allow = true
 
 [[roles.sandbox.exec-paths]]
 path = "/"
-allow = ["exec", "shared-object"]
+allow = true
+permissions = ["exec", "shared-object"]
 
 [[roles.sandbox.unix-bind]]
 path = "/"

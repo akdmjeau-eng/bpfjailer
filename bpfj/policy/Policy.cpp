@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <exception>
+#include <initializer_list>
 #include <set>
 #include <string>
 #include <string_view>
@@ -67,6 +68,9 @@ constexpr std::string_view kExecAny = "exec-any";
 constexpr std::string_view kPath = "path";
 constexpr std::string_view kName = "name";
 constexpr std::string_view kAllow = "allow";
+constexpr std::string_view kAccess = "access";
+constexpr std::string_view kPermissions = "permissions";
+constexpr std::string_view kFilesystems = "filesystems";
 constexpr std::string_view kExec = "exec";
 constexpr std::string_view kSetId = "set-id";
 constexpr std::string_view kSharedObject = "shared-object";
@@ -246,13 +250,15 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
 
 struct ParsedRule {
   std::string path;
-  const toml::node* allow;
+  const toml::table* table;
+  bool allow;
 };
 
 template <typename ValidatePath>
 [[nodiscard]] err::Expected<std::vector<ParsedRule>> parseRuleTables(
     const std::string& what,
     const toml::node* node,
+    std::initializer_list<std::string_view> detailKeys,
     ValidatePath validatePath,
     bool rejectRootGlobCollision) noexcept {
   const auto* nodes = node != nullptr ? node->as_array() : nullptr;
@@ -267,6 +273,8 @@ template <typename ValidatePath>
 
   std::vector<ParsedRule> rules;
   std::set<std::string> seen;
+  std::set<std::string_view> allowedKeys = {kPath, kAllow};
+  allowedKeys.insert(detailKeys);
   bool hasRoot = false;
   bool hasRootGlob = false;
   for (const auto& ruleNode : *nodes) {
@@ -275,7 +283,6 @@ template <typename ValidatePath>
       return err::Error(
           std::errc::invalid_argument, what + " entries must be rule tables");
     }
-    const std::set<std::string_view> allowedKeys = {kPath, kAllow};
     for (const auto& [key, child] : *rule) {
       (void)child;
       if (!allowedKeys.contains(key.str())) {
@@ -304,8 +311,15 @@ template <typename ValidatePath>
           std::errc::invalid_argument,
           what + " cannot contain both '/' and '/*'");
     }
+    const auto* allow = findChild(*rule, kAllow);
+    if (allow == nullptr || !allow->is_boolean()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + *parsedPath +
+              "': allow must be true or false");
+    }
     rules.push_back(
-        ParsedRule{std::move(*parsedPath), findChild(*rule, kAllow)});
+        ParsedRule{std::move(*parsedPath), rule, allow->value<bool>().value()});
   }
   return rules;
 }
@@ -317,6 +331,7 @@ template <typename ValidatePath>
   auto rules = parseRuleTables(
       what,
       node,
+      {kAccess},
       [&](const std::string& path) { return validatePathPattern(what, path); },
       false);
   if (rules.hasError()) {
@@ -324,23 +339,32 @@ template <typename ValidatePath>
   }
   std::map<std::string, FileMode> paths;
   for (const auto& rule : *rules) {
-    auto mode =
-        parseString(rule.allow, what + " rule for '" + rule.path + "': allow");
-    if (mode.hasError()) {
-      return mode.error();
+    const auto* accessNode = findChild(*rule.table, kAccess);
+    if (!rule.allow) {
+      if (accessNode != nullptr) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + rule.path +
+                "': access is only valid when allow is true");
+      }
+      paths.emplace(rule.path, FileMode::None);
+      continue;
+    }
+    auto access =
+        parseString(accessNode, what + " rule for '" + rule.path + "': access");
+    if (access.hasError()) {
+      return access.error();
     }
     FileMode parsed;
-    if (*mode == "NONE") {
-      parsed = FileMode::None;
-    } else if (*mode == "RDONLY") {
+    if (*access == "read-only") {
       parsed = FileMode::ReadOnly;
-    } else if (*mode == "RDWR") {
+    } else if (*access == "read-write") {
       parsed = FileMode::ReadWrite;
     } else {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + rule.path + "': allow is '" + *mode +
-              "'; expected NONE, RDONLY or RDWR");
+          what + " rule for '" + rule.path + "': access is '" + *access +
+              "'; expected read-only or read-write");
     }
     paths.emplace(rule.path, parsed);
   }
@@ -353,6 +377,7 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
   auto rules = parseRuleTables(
       what,
       node,
+      {kPermissions},
       [&](const std::string& path) { return validatePathPattern(what, path); },
       false);
   if (rules.hasError()) {
@@ -362,20 +387,37 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
   std::map<std::string, ExecPathPolicy> paths;
   for (const auto& rule : *rules) {
     ExecPathPolicy parsed;
+    const auto* permissionsNode = findChild(*rule.table, kPermissions);
+    if (!rule.allow) {
+      if (permissionsNode != nullptr) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + rule.path +
+                "': permissions is only valid when allow is true");
+      }
+      paths.emplace(rule.path, parsed);
+      continue;
+    }
     std::set<std::string> seen;
     const auto* permissions =
-        rule.allow != nullptr ? rule.allow->as_array() : nullptr;
+        permissionsNode != nullptr ? permissionsNode->as_array() : nullptr;
     if (permissions == nullptr) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + rule.path + "': allow must be an array");
+          what + " rule for '" + rule.path + "': permissions must be an array");
+    }
+    if (permissions->empty()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + rule.path +
+              "': permissions must not be empty when allow is true");
     }
     for (const auto& permissionNode : *permissions) {
       if (!permissionNode.is_string()) {
         return err::Error(
             std::errc::invalid_argument,
             what + " rule for '" + rule.path +
-                "': allow entries must be strings");
+                "': permissions entries must be strings");
       }
       const std::string permission =
           permissionNode.value<std::string>().value();
@@ -553,6 +595,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
   auto parsedRules = parseRuleTables(
       what,
       node,
+      {kFilesystems},
       [&](const std::string& path) { return validatePathPattern(what, path); },
       true);
   if (parsedRules.hasError()) {
@@ -560,12 +603,29 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
   }
   std::map<std::string, std::vector<std::string>> rules;
   for (const auto& rule : *parsedRules) {
+    const auto* filesystemsNode = findChild(*rule.table, kFilesystems);
+    if (!rule.allow) {
+      if (filesystemsNode != nullptr) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + rule.path +
+                "': filesystems is only valid when allow is true");
+      }
+      rules.emplace(rule.path, std::vector<std::string>{});
+      continue;
+    }
     const auto* array =
-        rule.allow != nullptr ? rule.allow->as_array() : nullptr;
+        filesystemsNode != nullptr ? filesystemsNode->as_array() : nullptr;
     if (array == nullptr) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + rule.path + "': allow must be an array");
+          what + " rule for '" + rule.path + "': filesystems must be an array");
+    }
+    if (array->empty()) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + rule.path +
+              "': filesystems must not be empty when allow is true");
     }
     std::vector<std::string> types;
     std::set<std::string> seen;
@@ -574,7 +634,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         return err::Error(
             std::errc::invalid_argument,
             what + " rule for '" + rule.path +
-                "': allow entries must be strings");
+                "': filesystems entries must be strings");
       }
       std::string type = typeNode.value<std::string>().value();
       if (type.empty() || type.size() >= 64) {
@@ -604,6 +664,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
   auto parsedRules = parseRuleTables(
       what,
       node,
+      {},
       [&](const std::string& path) { return validatePathPattern(what, path); },
       true);
   if (parsedRules.hasError()) {
@@ -611,23 +672,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
   }
   std::map<std::string, bool> rules;
   for (const auto& rule : *parsedRules) {
-    auto permission =
-        parseString(rule.allow, what + " rule for '" + rule.path + "': allow");
-    if (permission.hasError()) {
-      return permission.error();
-    }
-    bool allowed;
-    if (*permission == "ANY" || *permission == "any") {
-      allowed = true;
-    } else if (*permission == "NONE" || *permission == "none") {
-      allowed = false;
-    } else {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " rule for '" + rule.path + "': allow is '" + *permission +
-              "'; expected NONE or ANY");
-    }
-    rules.emplace(rule.path, allowed);
+    rules.emplace(rule.path, rule.allow);
   }
   return rules;
 }

@@ -19,15 +19,17 @@ TEST(Policy, ParsesPathModes) {
 
 [[roles.svc.paths]]
 path = "/etc"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.svc.paths]]
 path = "/var/lib/svc"
-allow = "RDWR"
+allow = true
+access = "read-write"
 
 [[roles.svc.paths]]
 path = "/secret"
-allow = "NONE"
+allow = false
 )toml");
   ASSERT_OK(policy);
 
@@ -37,25 +39,50 @@ allow = "NONE"
   ASSERT(paths.at("/secret") == FileMode::None);
 }
 
-TEST(Policy, RejectsUnknownPathMode) {
+TEST(Policy, RejectsUnknownPathAccess) {
   auto policy = Policy::parse(R"toml([roles]
 
 [roles.svc]
 
 [[roles.svc.paths]]
 path = "/etc"
-allow = "RDEXEC"
+allow = true
+access = "read-execute"
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("expected NONE, RDONLY or RDWR") !=
+      policy.error().message().find("expected read-only or read-write") !=
       std::string::npos);
+}
+
+TEST(Policy, RejectsNonBooleanPathAllow) {
+  auto policy = Policy::parse(R"toml([[roles.svc.paths]]
+path = "/etc"
+allow = "RDONLY"
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("allow must be true or false") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsAccessOnDeniedPath) {
+  auto policy = Policy::parse(R"toml([[roles.svc.paths]]
+path = "/secret"
+allow = false
+access = "read-only"
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find(
+          "access is only valid when allow is true") != std::string::npos);
 }
 
 TEST(Policy, RejectsRecursivePathGlob) {
   auto policy = Policy::parse(R"toml([[roles.svc.paths]]
 path = "/etc/**"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -83,11 +110,13 @@ TEST(Policy, RejectsDuplicatePaths) {
 
 [[roles.svc.paths]]
 path = "/etc"
-allow = "RDWR"
+allow = true
+access = "read-write"
 
 [[roles.svc.paths]]
 path = "/etc"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 )toml");
   ASSERT(!policy);
 }
@@ -96,11 +125,12 @@ TEST(Policy, AllowsDistinctRootPathRules) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.paths]]
 path = "/"
-allow = "NONE"
+allow = false
 
 [[roles.svc.paths]]
 path = "/*"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 )toml");
   ASSERT_OK(policy);
 
@@ -113,11 +143,13 @@ TEST(Policy, ParsesExecPathPermissions) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = ["exec", "set-id"]
+allow = true
+permissions = ["exec", "set-id"]
 
 [[roles.svc.exec-paths]]
 path = "/usr/lib"
-allow = ["shared-object"]
+allow = true
+permissions = ["shared-object"]
 )toml");
   ASSERT_OK(policy);
 
@@ -134,7 +166,8 @@ TEST(Policy, RejectsUnknownExecPathPermission) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = ["jit"]
+allow = true
+permissions = ["jit"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -142,7 +175,7 @@ allow = ["jit"]
       std::string::npos);
 }
 
-TEST(Policy, RejectsExecPathRuleWithUnknownOption) {
+TEST(Policy, RejectsExecPathRuleWithoutAllow) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
@@ -150,8 +183,21 @@ permissions = ["exec"]
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("unknown option 'permissions'") !=
+      policy.error().message().find("allow must be true or false") !=
       std::string::npos);
+}
+
+TEST(Policy, RejectsPermissionsOnDeniedExecPath) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = false
+permissions = ["exec"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find(
+          "permissions is only valid when allow is true") != std::string::npos);
 }
 
 TEST(Policy, RejectsScalarExecPathEntry) {
@@ -179,7 +225,8 @@ TEST(Policy, RejectsRelativeExecPath) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "usr/bin/svc"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -191,7 +238,8 @@ TEST(Policy, RejectsRecursiveExecPathGlob) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/lib/**"
-allow = ["shared-object"]
+allow = true
+permissions = ["shared-object"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -203,7 +251,8 @@ TEST(Policy, RejectsSetIdWithoutExec) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = ["set-id"]
+allow = true
+permissions = ["set-id"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -215,11 +264,12 @@ TEST(Policy, RejectsDuplicateExecPath) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 
 [[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = []
+allow = false
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -231,11 +281,12 @@ TEST(Policy, AllowsDistinctRootExecPathRules) {
   auto policy = Policy::parse(
       R"toml([[roles.svc.exec-paths]]
 path = "/"
-allow = []
+allow = false
 
 [[roles.svc.exec-paths]]
 path = "/*"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 )toml");
   ASSERT_OK(policy);
 
@@ -251,7 +302,8 @@ exec-any = true
 
 [[roles.svc.exec-paths]]
 path = "/usr/bin/svc"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -400,35 +452,38 @@ TEST(Policy, ParsesMountAndUmountRules) {
 
 [[roles.svc.mount]]
 path = "/srv/data"
-allow = ["ext4", "xfs"]
+allow = true
+filesystems = ["ext4", "xfs"]
 
 [[roles.svc.mount]]
 path = "/any-upper"
-allow = ["ANY"]
+allow = true
+filesystems = ["ANY"]
 
 [[roles.svc.mount]]
 path = "/any-lower"
-allow = ["any"]
+allow = true
+filesystems = ["any"]
 
 [[roles.svc.mount]]
 path = "/blocked"
-allow = []
+allow = false
 
 [[roles.svc.umount]]
 path = "/"
-allow = "NONE"
+allow = false
 
 [[roles.svc.umount]]
 path = "/srv/data"
-allow = "ANY"
+allow = true
 
 [[roles.svc.umount]]
 path = "/run"
-allow = "none"
+allow = false
 
 [[roles.svc.umount]]
 path = "/run/service"
-allow = "any"
+allow = true
 )toml");
   ASSERT_OK(policy);
 
@@ -454,7 +509,8 @@ TEST(Policy, RejectsRelativeMountDestination) {
 
 [[roles.svc.mount]]
 path = "relative"
-allow = ["tmpfs"]
+allow = true
+filesystems = ["tmpfs"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -469,11 +525,24 @@ TEST(Policy, RejectsScalarMountFilesystemType) {
 
 [[roles.svc.mount]]
 path = "/run"
-allow = "tmpfs"
+allow = true
+filesystems = "tmpfs"
 )toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must be an array") != std::string::npos);
+}
+
+TEST(Policy, RejectsFilesystemsOnDeniedMount) {
+  auto policy = Policy::parse(R"toml([[roles.svc.mount]]
+path = "/run"
+allow = false
+filesystems = ["tmpfs"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find(
+          "filesystems is only valid when allow is true") != std::string::npos);
 }
 
 TEST(Policy, RejectsBooleanUmount) {
@@ -491,7 +560,7 @@ umount = false
 TEST(Policy, RejectsRelativeUmountPath) {
   auto policy = Policy::parse(R"toml([[roles.svc.umount]]
 path = "relative"
-allow = "ANY"
+allow = true
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -499,14 +568,14 @@ allow = "ANY"
       std::string::npos);
 }
 
-TEST(Policy, RejectsUnknownUmountPermission) {
+TEST(Policy, RejectsNonBooleanUmountAllow) {
   auto policy = Policy::parse(R"toml([[roles.svc.umount]]
 path = "/srv"
 allow = "ALLOW"
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("expected NONE or ANY") !=
+      policy.error().message().find("allow must be true or false") !=
       std::string::npos);
 }
 
@@ -516,7 +585,8 @@ mount-any = true
 
 [[roles.svc.mount]]
 path = "/srv"
-allow = ["tmpfs"]
+allow = true
+filesystems = ["tmpfs"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -529,7 +599,7 @@ umount-any = true
 
 [[roles.svc.umount]]
 path = "/srv"
-allow = "ANY"
+allow = true
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -544,11 +614,11 @@ TEST(Policy, RejectsCollidingMountRootRules) {
 
 [[roles.svc.mount]]
 path = "/"
-allow = []
+allow = false
 
 [[roles.svc.mount]]
 path = "/*"
-allow = []
+allow = false
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -685,11 +755,12 @@ any = true
 
 [[roles.sandbox.mount]]
 path = "/srv/only"
-allow = ["tmpfs"]
+allow = true
+filesystems = ["tmpfs"]
 
 [[roles.sandbox.umount]]
 path = "/srv/only"
-allow = "ANY"
+allow = true
 )toml");
   ASSERT_OK(policy);
 
@@ -724,7 +795,8 @@ any = true
 
 [[roles.sandbox.exec-paths]]
 path = "/usr/bin/only"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 )toml");
   ASSERT_OK(policy);
 

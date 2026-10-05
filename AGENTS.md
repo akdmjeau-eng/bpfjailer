@@ -53,11 +53,11 @@ Filesystem, Unix-socket and mount matchers share the cached file-matching machin
 
 ## Policy semantics
 
-Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix pathname, mount, and unmount rules are default-deny when absent or unmatched; abstract Unix-socket names remain opt-in filters where an unmatched name is allowed. `mount-any` and `umount-any` are the open forms for mount operations. Mount filesystem lists accept `ANY`, and hierarchical umount rules map paths to `NONE` or `ANY`; both values also accept lowercase.
+Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix pathname, mount, and unmount rules are default-deny when absent or unmatched; abstract Unix-socket names remain opt-in filters where an unmatched name is allowed. `mount-any` and `umount-any` are the open forms for mount operations. Mount rules carry filesystem types in `filesystems`, where `any` opens every type.
 
 Executable-code policy is separate from ordinary file access and fs-verity. `exec-paths` controls exec, set-id exec and executable mappings; `exec-any: true` opens those operations. Proc uses the historical fully-open spelling `any-proc`, not `proc-any`.
 
-All path-based policy uses arrays of rule tables with `path` and `allow` fields. Name-based policy uses the same rule-table shape with `name` and `allow`: abstract Unix names start with `@`, while POSIX message-queue and shared-memory names start with the `/` expected by their syscalls. `paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix pathname, mount, and unmount matchers do not need an explicit root denial; abstract Unix rules do.
+All path- and name-based rule tables use a boolean `allow`. Path-based policy uses `path`; name-based policy uses `name`, with `@` for abstract Unix names and the syscall-facing `/` for POSIX IPC names. Allowed filesystem rules add `access`, executable rules add `permissions`, and mount rules add `filesystems`; denied rules omit those detail fields. `paths` is default-deny when absent and is mutually exclusive with `fs-any`. Unix pathname, mount, and unmount matchers do not need an explicit root denial; abstract Unix rules do.
 
 Every walk over a task's roles requires each role to permit, so one denial denies. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
 

@@ -65,8 +65,12 @@ constexpr int kRanAndFailed = -1;
   if (allowSharedObject) {
     add("shared-object");
   }
-  return "\n[[roles." + role + ".exec-paths]]\npath = \"" + path +
-      "\"\nallow = [" + permissions + "]\n";
+  std::string result =
+      "\n[[roles." + role + ".exec-paths]]\npath = \"" + path + "\"\nallow = ";
+  if (permissions.empty()) {
+    return result + "false\n";
+  }
+  return result + "true\npermissions = [" + permissions + "]\n";
 }
 
 [[nodiscard]] std::string execPolicy(
@@ -276,7 +280,8 @@ TEST(ExecEnforcer, ExecAnyAllowsExecutableAndSharedObjects) {
 TEST(ExecEnforcer, ReadOnlyFilesystemDoesNotDecideExecution) {
   const std::string executable = truePath();
   attachWithFilesystem(
-      "[[roles.svc.paths]]\npath = \"/\"\nallow = \"RDONLY\"\n" +
+      "[[roles.svc.paths]]\npath = \"/\"\nallow = true\n"
+      "access = \"read-only\"\n" +
       rule("svc", "/usr/lib64/*", false, false, true) +
       rule("svc", executable, true, false, false));
 

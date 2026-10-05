@@ -19,19 +19,22 @@ kill-pod = true
 
 [[roles.worker.paths]]
 path = "/"
-allow = "NONE"
+allow = false
 
 [[roles.worker.paths]]
 path = "/usr"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.worker.paths]]
 path = "/etc"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.worker.paths]]
 path = "/srv/$service"
-allow = "RDWR"
+allow = true
+access = "read-write"
 ```
 
 `base-role` is applied to every process that exists when the jailer attaches;
@@ -62,7 +65,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 
 | Family | Options | Behavior |
 |---|---|---|
-| Files | `paths`, `fs-any` | `{ path, allow }` rules with `NONE`, `RDONLY`, or `RDWR`; mutually exclusive with `fs-any`. Leaving both unset denies access. |
+| Files | `paths`, `fs-any` | Boolean `{ path, allow }` rules; allowed rules add `access = "read-only"` or `"read-write"`. Mutually exclusive with `fs-any`; leaving both unset denies access. |
 | Executable code | `exec-paths`, `exec-any` | `exec-paths` is an array of path rules for exec, set-id exec and executable mappings. `exec-any` opens all three. Leaving both unset denies executable code unless `any: true` applies. |
 | Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, bypass that integrity check, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
 | BPF | `bpf-pod`, `bpf-roles`, `bpf-any`, `untracked-bpf` | Gate `bpf(2)` and opening maps/programs by creator ownership. `untracked-bpf` suppresses ownership for objects created by the role and requires a BPF grant. |
@@ -76,7 +79,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | System V shared memory | `shm-sysv-pod`, `shm-sysv-roles`, `shm-sysv-any` | Gate lookup, control and attach by tracked owner. |
 | POSIX shared memory | `shm-posix-pod`, `shm-posix-roles`, `shm-posix-any`, `shm-posix-pattern` | Gate open, receipt, mapping, protection, truncation and unlink by owner or name pattern. |
 | Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | `{ path, allow }` rules with boolean `allow` values for pathname or abstract socket names. Missing or unmatched pathname policy denies; unmatched abstract names are allowed. |
-| Mounts | `mount`, `mount-any`, `umount`, `umount-any` | `{ path, allow }` rules where mount `allow` is a filesystem-type list and umount `allow` is `NONE` or `ANY`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
+| Mounts | `mount`, `mount-any`, `umount`, `umount-any` | Boolean `{ path, allow }` rules; allowed mount rules add `filesystems`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
 | Enrollment | `unpriv-enroll`, `enroll-roles`, `enroll-any` | Open a role to a non-root caller and constrain which further roles a caller may request through `bpfjsrv`. |
 
 Role and certificate references are validated when the policy is parsed.
@@ -90,20 +93,21 @@ File, pathname Unix-socket and mount matching is evaluated against the global
 snapshot of PID 1's mount namespace. Results are cached by mount identity and
 pod variable bindings and are invalidated by relevant filesystem changes.
 
-Every path-based policy is an array of rule tables with `path` and `allow`
-fields. `paths` rules apply recursively and the longest matching path wins.
+Every path-based policy is an array of rule tables with a `path` and boolean
+`allow`. `paths` rules apply recursively and the longest matching path wins.
 They support literal components, a `*` component, and `$NAME` components with
 an optional glob suffix. `*` matches one component; recursive `**` is not
 supported because a directory rule already covers its subtree. The variable
 must be declared by top-level `vars` and present on the pod for the dependent
-pattern to match. `NONE` denies access, `RDONLY` permits reads, and `RDWR`
-permits reads and writes.
+pattern to match. Allowed rules require `access = "read-only"` or
+`access = "read-write"`; denied rules omit `access`.
 
 `exec-paths` uses the same cached path matching, independently of `paths` and
-fs-verity. It is an array of rule tables with a `path` and an `allow` array.
-The permissions are `exec`, `set-id`, and `shared-object`; an empty array
-denies all three at that path. Set-user-ID and set-group-ID binaries need both
-`exec` and `set-id`, while executable mmap or mprotect needs `shared-object`.
+fs-verity. It is an array of rule tables with a `path` and boolean `allow`.
+Allowed rules require a nonempty `permissions` array containing `exec`,
+`set-id`, or `shared-object`; denied rules omit it. Set-user-ID and set-group-ID
+binaries need both `exec` and `set-id`, while executable mmap or mprotect needs
+`shared-object`.
 The longest matching path wins. At equal depth, the rule with more non-wildcard
 components wins; a bound `$NAME` component is specific, while `*` is not. An
 equally specific denial wins a tie. `exec-any = true`
@@ -114,11 +118,13 @@ is present.
 ```toml
 [[roles.worker.exec-paths]]
 path = "/usr/bin/worker"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 
 [[roles.worker.exec-paths]]
 path = "/usr/lib"
-allow = ["shared-object"]
+allow = true
+permissions = ["shared-object"]
 ```
 
 Unix pathname rules use `{ path, allow }`; paths begin with `/` and apply
@@ -131,14 +137,14 @@ abstract-name allowlist needs a catch-all denial plus more specific grants.
 table. Already-connected, inherited or transferred Unix socket descriptors
 remain capabilities and are not dynamically revoked.
 
-For `mount`, `allow` is an array of filesystem type names. Missing and unmatched
-mount policy denies, an empty array explicitly denies a matched destination,
-and `ANY` or `any` permits every filesystem type at that destination.
-`mount-any` permits every destination and type. For `umount`, `allow` is
-`NONE` or `ANY`, with lowercase also accepted. Its rules apply recursively and
-the longest match wins; missing or unmatched policy denies. `umount-any`
-permits every source. `mount` and `mount-any`, and `umount` and `umount-any`,
-are mutually exclusive.
+For `mount`, `allow` is boolean. An allowed rule requires a nonempty
+`filesystems` array; `any` permits every filesystem type at that destination.
+A denied rule omits `filesystems`. Missing and unmatched mount policy denies,
+and `mount-any` permits every destination and type. For `umount`, `allow` is
+the complete boolean decision. Its rules apply recursively and the longest
+match wins; missing or unmatched policy denies. `umount-any` permits every
+source. `mount` and `mount-any`, and `umount` and `umount-any`, are mutually
+exclusive.
 
 `move_mount` requires mount permission at the destination and, for an attached
 source mount, unmount permission at the source. Moving a detached tree checks

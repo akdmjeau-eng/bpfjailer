@@ -10,6 +10,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <string>
 
 #include "bpfj/enforce/FsEnforcer.h"
@@ -68,9 +69,12 @@ void attach(const std::string& paths) {
 
 [[nodiscard]] std::string rule(
     const std::string& path,
-    std::string_view allow) {
-  return "[[roles.svc.paths]]\npath = \"" + path + "\"\nallow = \"" +
-      std::string(allow) + "\"\n";
+    std::optional<std::string_view> access) {
+  std::string result = "[[roles.svc.paths]]\npath = \"" + path + "\"\n";
+  if (!access.has_value()) {
+    return result + "allow = false\n";
+  }
+  return result + "allow = true\naccess = \"" + std::string(*access) + "\"\n";
 }
 
 [[nodiscard]] int openErrno(const std::string& path, int flags) {
@@ -87,7 +91,7 @@ void attach(const std::string& paths) {
 
 TEST(FsEnforcer, LoadPinsEveryHook) {
   Fixture fixture;
-  attach(rule(fixture.file(), "RDONLY"));
+  attach(rule(fixture.file(), "read-only"));
 
   ASSERT(linkPinned("bpfj_fs_file_open"));
   ASSERT(linkPinned("bpfj_fs_inode_rename"));
@@ -138,7 +142,7 @@ fs-any = true
 
 TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
   Fixture fixture;
-  attach(rule(fixture.file(), "NONE"));
+  attach(rule(fixture.file(), std::nullopt));
 
   auto arena = bpfjailer::PodArena::open(testPins());
   ASSERT(arena.hasValue());
@@ -157,7 +161,7 @@ TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
 
 TEST(FsEnforcer, ReadOnlyAllowsReadsAndDeniesWrites) {
   Fixture fixture;
-  attach(rule(fixture.file(), "RDONLY"));
+  attach(rule(fixture.file(), "read-only"));
 
   Child actor([&] {
     const int readError = openErrno(fixture.file(), O_RDONLY);
@@ -167,9 +171,9 @@ TEST(FsEnforcer, ReadOnlyAllowsReadsAndDeniesWrites) {
   ASSERT_EQ(actor.run(), EACCES);
 }
 
-TEST(FsEnforcer, NoneDeniesReads) {
+TEST(FsEnforcer, DeniedRuleDeniesReads) {
   Fixture fixture;
-  attach(rule(fixture.file(), "NONE"));
+  attach(rule(fixture.file(), std::nullopt));
 
   Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
   enroll("svc", actor.pid());
@@ -178,7 +182,7 @@ TEST(FsEnforcer, NoneDeniesReads) {
 
 TEST(FsEnforcer, ReadWriteAllowsWrites) {
   Fixture fixture;
-  attach(rule(fixture.file(), "RDWR"));
+  attach(rule(fixture.file(), "read-write"));
 
   Child actor([&] { return openErrno(fixture.file(), O_WRONLY); });
   enroll("svc", actor.pid());
@@ -187,7 +191,7 @@ TEST(FsEnforcer, ReadWriteAllowsWrites) {
 
 TEST(FsEnforcer, LongestPathWins) {
   Fixture fixture;
-  attach(rule(fixture.dir(), "NONE") + rule(fixture.file(), "RDONLY"));
+  attach(rule(fixture.dir(), std::nullopt) + rule(fixture.file(), "read-only"));
 
   Child actor([&] {
     const int readError = openErrno(fixture.file(), O_RDONLY);
@@ -199,7 +203,7 @@ TEST(FsEnforcer, LongestPathWins) {
 
 TEST(FsEnforcer, RootPolicyAppliesToDescendants) {
   Fixture fixture;
-  attach(rule("/", "NONE"));
+  attach(rule("/", std::nullopt));
 
   Child actor([&] { return openErrno(fixture.file(), O_RDONLY); });
   enroll("svc", actor.pid());
@@ -208,7 +212,7 @@ TEST(FsEnforcer, RootPolicyAppliesToDescendants) {
 
 TEST(FsEnforcer, SpecificPathOverridesRootPolicy) {
   Fixture fixture;
-  attach(rule("/", "NONE") + rule(fixture.file(), "RDONLY"));
+  attach(rule("/", std::nullopt) + rule(fixture.file(), "read-only"));
 
   Child actor([&] {
     const int readError = openErrno(fixture.file(), O_RDONLY);
@@ -222,7 +226,7 @@ TEST(FsEnforcer, HardLinkAliasesDoNotShareCachedPolicy) {
   Fixture fixture;
   const std::string alias = fixture.dir() + "/renamed";
   ASSERT_EQ(::link(fixture.file().c_str(), alias.c_str()), 0);
-  attach(rule(fixture.file(), "RDWR") + rule(alias, "NONE"));
+  attach(rule(fixture.file(), "read-write") + rule(alias, std::nullopt));
 
   Child actor([&] {
     int error = openErrno(fixture.file(), O_RDONLY);
@@ -238,7 +242,7 @@ TEST(FsEnforcer, HardLinkAliasesDoNotShareCachedPolicy) {
 
 TEST(FsEnforcer, ReadOnlyDirectoryDeniesCreate) {
   Fixture fixture;
-  attach(rule(fixture.dir(), "RDONLY"));
+  attach(rule(fixture.dir(), "read-only"));
 
   Child actor(
       [&] { return openErrno(fixture.dir() + "/new", O_CREAT | O_WRONLY); });
@@ -249,7 +253,7 @@ TEST(FsEnforcer, ReadOnlyDirectoryDeniesCreate) {
 TEST(FsEnforcer, RenameInvalidatesTheCachedPath) {
   Fixture fixture;
   const std::string renamed = fixture.dir() + "/renamed";
-  attach(rule(fixture.file(), "RDWR") + rule(renamed, "NONE"));
+  attach(rule(fixture.file(), "read-write") + rule(renamed, std::nullopt));
 
   Child actor([&] {
     int error = openErrno(fixture.file(), O_RDONLY);
@@ -276,8 +280,8 @@ TEST(FsEnforcer, CacheSeparatesPodsWithDifferentVariableBindings) {
   ASSERT_EQ(::close(fd), 0);
 
   const Policy policy = policyOf(
-      "vars = [\"USER\"]\n[roles.svc]\n" + rule(root, "RDONLY") +
-      rule(std::string(root) + "/$USER/data", "NONE"));
+      "vars = [\"USER\"]\n[roles.svc]\n" + rule(root, "read-only") +
+      rule(std::string(root) + "/$USER/data", std::nullopt));
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 

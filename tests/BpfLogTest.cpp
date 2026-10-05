@@ -182,8 +182,8 @@ void attachKill(const std::string& toml) {
 }
 
 void attachFs(const std::string& path) {
-  const Policy policy = policyOf(
-      "[[roles.svc.paths]]\npath = \"" + path + "\"\nallow = \"NONE\"\n");
+  const Policy policy =
+      policyOf("[[roles.svc.paths]]\npath = \"" + path + "\"\nallow = false\n");
   loadJailer(policy);
   ASSERT_OK(FsEnforcer::load(testPins(), policy));
 }

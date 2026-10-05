@@ -179,27 +179,32 @@ allow = true
 
 [[roles.webserver.exec-paths]]
 path = "/usr/bin/webserver"
-allow = ["exec"]
+allow = true
+permissions = ["exec"]
 
 [[roles.webserver.exec-paths]]
 path = "/usr/lib"
-allow = ["shared-object"]
+allow = true
+permissions = ["shared-object"]
 
 [[roles.webserver.paths]]     # cached path policy
 path = "/"
-allow = "NONE"
+allow = false
 
 [[roles.webserver.paths]]
 path = "/usr"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.webserver.paths]]
 path = "/etc"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.webserver.paths]]
 path = "/srv/web"
-allow = "RDWR"
+allow = true
+access = "read-write"
 
 [[roles.webserver.unix-bind]] # pathname bind rule
 path = "/run/webserver"
@@ -215,19 +220,21 @@ allow = true
 
 [[roles.webserver.mount]]     # destination and permitted filesystem types
 path = "/srv/data"
-allow = ["ext4", "xfs"]
+allow = true
+filesystems = ["ext4", "xfs"]
 
 [[roles.webserver.mount]]
 path = "/run/webserver"
-allow = ["ANY"]               # every filesystem type at this destination
+allow = true
+filesystems = ["any"]         # every filesystem type at this destination
 
 [[roles.webserver.umount]]
 path = "/"
-allow = "NONE"
+allow = false
 
 [[roles.webserver.umount]]
 path = "/srv/data"
-allow = "ANY"
+allow = true
 
 [roles.sandbox]
 unpriv-enroll = true          # every unspecified operation remains denied
@@ -253,23 +260,23 @@ useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 operation. `lkm-any`, `fs-any`, `verity-any`, `mount-any`, and `umount-any`
 are operation-specific fully-open forms.
 
-`paths` is an array of `{ path, allow }` rules, where `allow` is `NONE`,
-`RDONLY`, or `RDWR`. Matches are resolved in PID 1's mount namespace, the
-longest path wins, and a `$NAME` component expands a variable carried by the
-pod. Path results are cached by mount identity and pod variable bindings and
-invalidated across filesystem mutation. `fs-any` and `paths` are mutually
-exclusive.
+`paths` is an array of rules with a boolean `allow`. Allowed rules also require
+`access = "read-only"` or `access = "read-write"`; denied rules omit `access`.
+Matches are resolved in PID 1's mount namespace, the longest path wins, and a
+`$NAME` component expands a variable carried by the pod. Path results are
+cached by mount identity and pod variable bindings and invalidated across
+filesystem mutation. `fs-any` and `paths` are mutually exclusive.
 
 `exec-paths` is an independent executable-code gate written as an array of
-rules. Each rule has a `path` and an `allow` list containing `exec`, `set-id`,
-or `shared-object`; an empty list is a denial. `set-id` requires `exec`, and
-`shared-object` covers executable file mappings. The longest matching path
-wins; at equal depth, the rule with more non-wildcard components wins. A bound
-`$NAME` component is specific, while a `*` component is not. An equally
-specific denial wins a tie. `exec-any = true` opens executable code
-without opening unrelated operations and is mutually exclusive with
-`exec-paths`. Ordinary `paths` access and fs-verity policy must also permit the
-operation.
+rules. Each rule has a boolean `allow`; an allowed rule also has a
+`permissions` list containing `exec`, `set-id`, or `shared-object`. A denied
+rule omits `permissions`. `set-id` requires `exec`, and `shared-object` covers
+executable file mappings. The longest matching path wins; at equal depth, the
+rule with more non-wildcard components wins. A bound `$NAME` component is
+specific, while a `*` component is not. An equally specific denial wins a tie.
+`exec-any = true` opens executable code without opening unrelated operations
+and is mutually exclusive with `exec-paths`. Ordinary `paths` access and
+fs-verity policy must also permit the operation.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its
@@ -324,16 +331,15 @@ descriptor that was connected before enrollment, inherited, or passed between
 processes remains a capability: this version does not re-check descriptor
 transfer between pods or revoke an already-connected socket.
 
-`mount` is an array of `{ path, allow }` rules whose `allow` value is a list
-of filesystem type names. Rules apply recursively, the longest matching path
-wins, and unmatched destinations are denied. An empty list explicitly denies
-every filesystem type at a matched path, while `ANY` (or `any`) in the list
-permits every filesystem type there. `mount-any` permits every destination and
-filesystem type instead. `umount` uses the same rule shape with `NONE` or `ANY`
-in `allow` (also accepted in lowercase). Its rules are recursive with the
-longest match winning; a `/` denial can close the tree while a `/run` grant
-opens one subtree. Unmatched sources are denied, while `umount-any` permits
-every source.
+`mount` is an array of rules with a boolean `allow`. Allowed rules require a
+nonempty `filesystems` list, where `any` permits every filesystem type at that
+destination; denied rules omit `filesystems`. Rules apply recursively, the
+longest matching path wins, and unmatched destinations are denied.
+`mount-any` permits every destination and filesystem type instead. `umount`
+uses the same rule shape with a boolean `allow`. Its rules are recursive with
+the longest match winning; a `/` denial can close the tree while a `/run`
+grant opens one subtree. Unmatched sources are denied, while `umount-any`
+permits every source.
 `move_mount` requires mount permission for the destination and, when moving an
 attached mount, umount permission for the source. A detached mount tree has no
 attached source to remove, so only its destination is checked. `pivot_root`

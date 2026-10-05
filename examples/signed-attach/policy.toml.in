@@ -52,39 +52,47 @@ keyring-own = true
 
 [[roles.floor.paths]]
 path = "/"
-allow = "RDWR"
+allow = true
+access = "read-write"
 
 [[roles.floor.paths]]
 path = "/bin"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "/lib"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "/lib64"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "/sbin"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "/usr"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "@BUILD@"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "@EXAMPLE@"
-allow = "RDONLY"
+allow = true
+access = "read-only"
 
 [[roles.floor.paths]]
 path = "/sys/fs/bpf/bpfj-pins"
-allow = "NONE"
+allow = false
 
 [roles.bpfjailer]
 any = true
