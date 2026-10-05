@@ -47,8 +47,9 @@ shm-sysv-pod = true
 shm-posix-pod = true
 shm-posix-pattern = ["/bpfj-example-*"]
 
-[roles.sandbox.exec-paths]
-"/" = { allow-exec = true, allow-setuid = false, allow-shared-object = true }
+[[roles.sandbox.exec-paths]]
+path = "/"
+allow = ["exec", "shared-object"]
 
 [roles.sandbox.unix-bind]
 "/" = false

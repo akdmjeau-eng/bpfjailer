@@ -22,8 +22,8 @@ then decides what each role may do:
   editing the jailer's own maps.
 - **`keyring`** — which roles' fs-verity keyrings a role may add certificates
   to, or whether it may write keyrings at all.
-- **Filesystem paths** — read, write and execute access using cached glob
-  matchers evaluated in PID 1's mount namespace.
+- **Filesystem paths** — read and write access using cached glob matchers
+  evaluated in PID 1's mount namespace.
 - **Executable code** — separate path rules for exec, set-id exec and
   executable file mappings.
 - **Kernel loading** — kernel module and kexec loading.
@@ -172,18 +172,16 @@ shm-posix-pattern = ["service-${vm_uuid}-*"]
 umount = false                # deny unmount and mount-source removal
 keyring-own = true            # only its own role's keyring
 
-[roles.webserver.exec-paths."/usr/bin/webserver"]
-allow-exec = true
-allow-setuid = false
-allow-shared-object = false
+[[roles.webserver.exec-paths]]
+path = "/usr/bin/webserver"
+allow = ["exec"]
 
-[roles.webserver.exec-paths."/usr/lib/**"]
-allow-exec = false
-allow-setuid = false
-allow-shared-object = true
+[[roles.webserver.exec-paths]]
+path = "/usr/lib"
+allow = ["shared-object"]
 
 [roles.webserver.paths]       # cached path glob policy
-"/usr" = "RDEXEC"
+"/usr" = "RDONLY"
 "/etc" = "RDONLY"
 "/srv/web" = "RDWR"
 "/" = "NONE"
@@ -225,20 +223,19 @@ useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 operation. `lkm-any`, `fs-any`, and `verity-any` are the operation-specific
 fully-open forms.
 
-`paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`. Matches
+`paths` maps path patterns to `NONE`, `RDONLY`, or `RDWR`. Matches
 are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
 component expands a variable carried by the pod. Path results are cached by
 mount identity and pod variable bindings and invalidated across filesystem
 mutation. `fs-any` and `paths` are mutually exclusive.
 
-`exec-paths` is an independent executable-code gate. Each matching path has
-`allow-exec`, `allow-setuid`, and `allow-shared-object` booleans; omitted
-permissions are false and the longest matching path wins. `allow-setuid` is
-required in addition to `allow-exec` for a set-user-ID or set-group-ID binary,
-while `allow-shared-object` covers executable file mappings. Ordinary `paths`
-access and fs-verity policy must also permit the operation. There is no
-`exec-any` key: `any = true` opens executable code only when `exec-paths` is
-absent.
+`exec-paths` is an independent executable-code gate written as an array of
+rules. Each rule has a `path` and an `allow` list containing `exec`, `set-id`,
+or `shared-object`; an empty list is a denial. `set-id` requires `exec`, and
+`shared-object` covers executable file mappings. The longest matching path
+wins. `exec-any = true` opens executable code without opening unrelated
+operations and is mutually exclusive with `exec-paths`. Ordinary `paths`
+access and fs-verity policy must also permit the operation.
 
 Every queue created by a jailed process is owned by its newest pod. A
 restricted process can acquire a queue from that exact pod, or from a role its

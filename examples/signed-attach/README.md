@@ -51,13 +51,13 @@ keyring-own = true
 
 [roles.floor.paths]
 "/" = "RDWR"
-"/bin" = "RDEXEC"
-"/lib" = "RDEXEC"
-"/lib64" = "RDEXEC"
-"/sbin" = "RDEXEC"
-"/usr" = "RDEXEC"
-"<build directory>" = "RDEXEC"
-"<example directory>" = "RDEXEC"
+"/bin" = "RDONLY"
+"/lib" = "RDONLY"
+"/lib64" = "RDONLY"
+"/sbin" = "RDONLY"
+"/usr" = "RDONLY"
+"<build directory>" = "RDONLY"
+"<example directory>" = "RDONLY"
 "/sys/fs/bpf/bpfj-pins" = "NONE"
 
 [roles.bpfjailer]

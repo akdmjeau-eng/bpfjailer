@@ -14,8 +14,10 @@
 #include <string>
 
 #include "bpfj/enforce/ExecEnforcer.h"
+#include "bpfj/enforce/FsEnforcer.h"
 
 using bpfjailer::ExecEnforcer;
+using bpfjailer::FsEnforcer;
 using bpfjailer::Policy;
 using bpfjailer::test::Child;
 using bpfjailer::test::enroll;
@@ -44,10 +46,24 @@ constexpr int kRanAndFailed = -1;
     bool allowExec,
     bool allowSetuid,
     bool allowSharedObject) {
-  return "\n[roles." + role + ".exec-paths.\"" + path + "\"]\n" +
-      "allow-exec = " + (allowExec ? "true\n" : "false\n") +
-      "allow-setuid = " + (allowSetuid ? "true\n" : "false\n") +
-      "allow-shared-object = " + (allowSharedObject ? "true\n" : "false\n");
+  std::string permissions;
+  const auto add = [&](std::string_view permission) {
+    if (!permissions.empty()) {
+      permissions += ", ";
+    }
+    permissions += "\"" + std::string(permission) + "\"";
+  };
+  if (allowExec) {
+    add("exec");
+  }
+  if (allowSetuid) {
+    add("set-id");
+  }
+  if (allowSharedObject) {
+    add("shared-object");
+  }
+  return "\n[[roles." + role + ".exec-paths]]\npath = \"" + path +
+      "\"\nallow = [" + permissions + "]\n";
 }
 
 [[nodiscard]] std::string execPolicy(
@@ -63,6 +79,13 @@ constexpr int kRanAndFailed = -1;
 void attach(const std::string& toml) {
   const Policy policy = policyOf(toml);
   loadJailer(policy);
+  ASSERT_OK(ExecEnforcer::load(testPins(), policy));
+}
+
+void attachWithFilesystem(const std::string& toml) {
+  const Policy policy = policyOf(toml);
+  loadJailer(policy);
+  ASSERT_OK(FsEnforcer::load(testPins(), policy));
   ASSERT_OK(ExecEnforcer::load(testPins(), policy));
 }
 
@@ -230,6 +253,29 @@ TEST(ExecEnforcer, UnjailedProcessMayExec) {
 TEST(ExecEnforcer, AnyAllowsExecutableAndSharedObjects) {
   const std::string executable = truePath();
   attach("[roles.svc]\nany = true\n");
+
+  Child actor([&] { return runProgram(executable); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(ExecEnforcer, ExecAnyAllowsExecutableAndSharedObjects) {
+  const std::string executable = truePath();
+  attach("[roles.svc]\nexec-any = true\n");
+
+  Child actor([&] { return runProgram(executable); });
+  enroll("svc", actor.pid());
+
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(ExecEnforcer, ReadOnlyFilesystemDoesNotDecideExecution) {
+  const std::string executable = truePath();
+  attachWithFilesystem(
+      "[roles.svc]\n[roles.svc.paths]\n\"/\" = \"RDONLY\"\n" +
+      rule("svc", "/usr/lib64/*", false, false, true) +
+      rule("svc", executable, true, false, false));
 
   Child actor([&] { return runProgram(executable); });
   enroll("svc", actor.pid());

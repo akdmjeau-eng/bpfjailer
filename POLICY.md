@@ -18,7 +18,7 @@ any = true
 kill-pod = true
 
 [roles.worker.paths]
-"/usr" = "RDEXEC"
+"/usr" = "RDONLY"
 "/etc" = "RDONLY"
 "/srv/$service" = "RDWR"
 "/" = "NONE"
@@ -52,8 +52,8 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 
 | Family | Options | Behavior |
 |---|---|---|
-| Files | `paths`, `fs-any` | `paths` maps path patterns to `NONE`, `RDONLY`, `RDWR`, or `RDEXEC`; it is mutually exclusive with `fs-any`. Leaving both unset denies access. |
-| Executable code | `exec-paths` | Map path patterns to `allow-exec`, `allow-setuid`, and `allow-shared-object`. Leaving it unset denies executable code unless `any: true` applies. |
+| Files | `paths`, `fs-any` | `paths` maps path patterns to `NONE`, `RDONLY`, or `RDWR`; it is mutually exclusive with `fs-any`. Leaving both unset denies access. |
+| Executable code | `exec-paths`, `exec-any` | `exec-paths` is an array of path rules for exec, set-id exec and executable mappings. `exec-any` opens all three. Leaving both unset denies executable code unless `any: true` applies. |
 | Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, bypass that integrity check, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
 | BPF | `bpf-pod`, `bpf-roles`, `bpf-any`, `untracked-bpf` | Gate `bpf(2)` and opening maps/programs by creator ownership. `untracked-bpf` suppresses ownership for objects created by the role and requires a BPF grant. |
 | Kernel loading | `lkm-any` | Permit module and kexec image loading; absence denies both. |
@@ -82,18 +82,30 @@ pod variable bindings and are invalidated by relevant filesystem changes.
 
 `paths` rules apply recursively and the longest matching path wins. They
 support literal components, a `*` component, and `$NAME` components with an
-optional glob suffix. The variable must be declared by top-level `vars` and
-present on the pod for the dependent pattern to match. `NONE` denies access,
-`RDONLY` permits reads, `RDWR` permits reads and writes, and `RDEXEC` permits
-reads and execution.
+optional glob suffix. `*` matches one component; recursive `**` is not
+supported because a directory rule already covers its subtree. The variable
+must be declared by top-level `vars` and present on the pod for the dependent
+pattern to match. `NONE` denies access, `RDONLY` permits reads, and `RDWR`
+permits reads and writes.
 
 `exec-paths` uses the same cached path matching, independently of `paths` and
-fs-verity. Each entry is a permissions table; omitted permissions are false.
-`allow-exec` permits a normal exec, set-user-ID and set-group-ID binaries also
-need `allow-setuid`, and executable mmap or mprotect also needs
-`allow-shared-object`. The longest matching path wins. There is no
-operation-specific open key: `any: true` supplies unrestricted executable
-code only when the role has no `exec-paths` table.
+fs-verity. It is an array of rule tables with a `path` and an `allow` array.
+The permissions are `exec`, `set-id`, and `shared-object`; an empty array
+denies all three at that path. Set-user-ID and set-group-ID binaries need both
+`exec` and `set-id`, while executable mmap or mprotect needs `shared-object`.
+The longest matching path wins. `exec-any = true` opens all three operations
+and is mutually exclusive with `exec-paths`; `any: true` supplies the same
+open behavior only when neither narrower option is present.
+
+```toml
+[[roles.worker.exec-paths]]
+path = "/usr/bin/worker"
+allow = ["exec"]
+
+[[roles.worker.exec-paths]]
+path = "/usr/lib"
+allow = ["shared-object"]
+```
 
 Unix pathname keys begin with `/` and apply recursively. Abstract names begin
 with `@` and use glob matching. The most specific matching rule wins and an

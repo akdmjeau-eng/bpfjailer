@@ -18,17 +18,15 @@ TEST(Policy, ParsesPathModes) {
 [roles.svc]
 
 [roles.svc.paths]
-"/etc/**" = "RDONLY"
-"/var/lib/svc/**" = "RDWR"
-"/usr/bin/tool" = "RDEXEC"
+"/etc" = "RDONLY"
+"/var/lib/svc" = "RDWR"
 "/secret" = "NONE"
 )toml");
   ASSERT_OK(policy);
 
   const auto& paths = policy->roles.at("svc").paths;
-  ASSERT(paths.at("/etc/**") == FileMode::ReadOnly);
-  ASSERT(paths.at("/var/lib/svc/**") == FileMode::ReadWrite);
-  ASSERT(paths.at("/usr/bin/tool") == FileMode::ReadExec);
+  ASSERT(paths.at("/etc") == FileMode::ReadOnly);
+  ASSERT(paths.at("/var/lib/svc") == FileMode::ReadWrite);
   ASSERT(paths.at("/secret") == FileMode::None);
 }
 
@@ -38,11 +36,21 @@ TEST(Policy, RejectsUnknownPathMode) {
 [roles.svc]
 
 [roles.svc.paths]
-"/etc/**" = "READ_MOSTLY"
+"/etc" = "RDEXEC"
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("expected NONE, RDONLY, RDWR or RDEXEC") !=
+      policy.error().message().find("expected NONE, RDONLY or RDWR") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsRecursivePathGlob) {
+  auto policy = Policy::parse(R"toml([roles.svc.paths]
+"/etc/**" = "RDONLY"
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("uses unsupported '**'") !=
       std::string::npos);
 }
 
@@ -50,7 +58,7 @@ TEST(Policy, RejectsPathList) {
   auto policy = Policy::parse(R"toml([roles]
 
 [roles.svc]
-paths = ["/etc/**"]
+paths = ["/etc"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -65,52 +73,54 @@ TEST(Policy, RejectsDuplicatePaths) {
 [roles.svc]
 
 [roles.svc.paths]
-"/etc/**" = "RDWR"
-"/etc/**" = "RDONLY"
+"/etc" = "RDWR"
+"/etc" = "RDONLY"
 )toml");
   ASSERT(!policy);
 }
 
 TEST(Policy, ParsesExecPathPermissions) {
   auto policy = Policy::parse(
-      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
-allow-exec = true
-allow-setuid = false
-allow-shared-object = false
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = ["exec", "set-id"]
 
-[roles.svc.exec-paths."/usr/lib/**"]
-allow-shared-object = true
+[[roles.svc.exec-paths]]
+path = "/usr/lib"
+allow = ["shared-object"]
 )toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("svc");
   ASSERT(role.hasExecPaths);
   ASSERT(role.execPaths.at("/usr/bin/svc").allowExec);
-  ASSERT(!role.execPaths.at("/usr/bin/svc").allowSetuid);
+  ASSERT(role.execPaths.at("/usr/bin/svc").allowSetuid);
   ASSERT(!role.execPaths.at("/usr/bin/svc").allowSharedObject);
-  ASSERT(!role.execPaths.at("/usr/lib/**").allowExec);
-  ASSERT(role.execPaths.at("/usr/lib/**").allowSharedObject);
+  ASSERT(!role.execPaths.at("/usr/lib").allowExec);
+  ASSERT(role.execPaths.at("/usr/lib").allowSharedObject);
 }
 
 TEST(Policy, RejectsUnknownExecPathPermission) {
   auto policy = Policy::parse(
-      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
-allow-jit = true
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = ["jit"]
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("unknown option 'allow-jit'") !=
+      policy.error().message().find("unknown permission 'jit'") !=
       std::string::npos);
 }
 
-TEST(Policy, RejectsNonBooleanExecPathPermission) {
+TEST(Policy, RejectsExecPathRuleWithUnknownOption) {
   auto policy = Policy::parse(
-      R"toml([roles.svc.exec-paths."/usr/bin/svc"]
-allow-exec = "sometimes"
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+permissions = ["exec"]
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be true or false") !=
+      policy.error().message().find("unknown option 'permissions'") !=
       std::string::npos);
 }
 
@@ -121,27 +131,85 @@ exec-paths = {"/usr/bin/svc" = true}
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be a permissions table") !=
+      policy.error().message().find("must be an array of rule tables") !=
       std::string::npos);
 }
 
 TEST(Policy, RejectsBlankExecPaths) {
-  auto policy = Policy::parse(R"toml([roles.svc.exec-paths]
+  auto policy = Policy::parse(R"toml([roles.svc]
+exec-paths = []
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must contain at least one path pattern") !=
+      policy.error().message().find("must contain at least one rule") !=
       std::string::npos);
 }
 
 TEST(Policy, RejectsRelativeExecPath) {
   auto policy = Policy::parse(
-      R"toml([roles.svc.exec-paths."usr/bin/svc"]
-allow-exec = true
+      R"toml([[roles.svc.exec-paths]]
+path = "usr/bin/svc"
+allow = ["exec"]
 )toml");
   ASSERT(!policy);
   ASSERT(
       policy.error().message().find("must start with '/'") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsRecursiveExecPathGlob) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/lib/**"
+allow = ["shared-object"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("uses unsupported '**'") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsSetIdWithoutExec) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = ["set-id"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("set-id requires exec") !=
+      std::string::npos);
+}
+
+TEST(Policy, RejectsDuplicateExecPath) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = ["exec"]
+
+[[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = []
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("contains path '/usr/bin/svc' twice") !=
+      std::string::npos);
+}
+
+TEST(Policy, ExecAnyAndExecPathsAreMutuallyExclusive) {
+  auto policy = Policy::parse(
+      R"toml([roles.svc]
+exec-any = true
+
+[[roles.svc.exec-paths]]
+path = "/usr/bin/svc"
+allow = ["exec"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find(
+          "exec-any and exec-paths are mutually exclusive") !=
       std::string::npos);
 }
 
@@ -397,6 +465,7 @@ bpf-pod = false
 lkm-any = false
 fs-any = false
 verity-any = false
+exec-any = false
 )toml");
   ASSERT_OK(policy);
 
@@ -405,6 +474,7 @@ verity-any = false
   ASSERT(!role.lkmAny);
   ASSERT(!role.fsAny);
   ASSERT(!role.verityAny);
+  ASSERT(!role.execAny);
 }
 
 TEST(Policy, ExecPathsOverrideAny) {
@@ -412,8 +482,9 @@ TEST(Policy, ExecPathsOverrideAny) {
       R"toml([roles.sandbox]
 any = true
 
-[roles.sandbox.exec-paths."/usr/bin/only"]
-allow-exec = true
+[[roles.sandbox.exec-paths]]
+path = "/usr/bin/only"
+allow = ["exec"]
 )toml");
   ASSERT_OK(policy);
 

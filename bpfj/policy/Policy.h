@@ -16,7 +16,6 @@ enum class FileMode : std::uint8_t {
   None,
   ReadOnly,
   ReadWrite,
-  ReadExec,
 };
 
 enum class AccessMode : std::uint8_t {

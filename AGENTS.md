@@ -55,9 +55,9 @@ Filesystem, Unix-socket and mount matchers share the cached file-matching machin
 
 Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix and mount path rules are opt-in filters where an unmatched operation is allowed; an absent `umount` abstains.
 
-Executable-code policy is separate from ordinary file access and fs-verity. `exec-paths` controls exec, set-id exec and executable mappings; with no `exec-paths`, only `any: true` opens those operations. Proc uses the historical fully-open spelling `any-proc`, not `proc-any`.
+Executable-code policy is separate from ordinary file access and fs-verity. `exec-paths` controls exec, set-id exec and executable mappings; `exec-any: true` opens those operations. Proc uses the historical fully-open spelling `any-proc`, not `proc-any`.
 
-`paths` is default-deny when absent, uses `NONE`, `RDONLY`, `RDWR`, and `RDEXEC`, and is mutually exclusive with `fs-any`. Unix and mount maps need an explicit root denial when used as allowlists.
+`paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix and mount maps need an explicit root denial when used as allowlists.
 
 Every walk over a task's roles requires each role to permit, so one denial denies. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
 

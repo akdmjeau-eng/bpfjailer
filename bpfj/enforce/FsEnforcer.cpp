@@ -31,8 +31,6 @@ namespace {
       return BPFJ_FS_MODE_READ;
     case FileMode::ReadWrite:
       return BPFJ_FS_MODE_READ | BPFJ_FS_MODE_WRITE;
-    case FileMode::ReadExec:
-      return BPFJ_FS_MODE_READ | BPFJ_FS_MODE_EXEC;
     case FileMode::None:
       return 0;
   }

@@ -63,9 +63,12 @@ constexpr std::string_view kUntrackedBpf = "untracked-bpf";
 constexpr std::string_view kMinSeq = "min-seq";
 constexpr std::string_view kPaths = "paths";
 constexpr std::string_view kExecPaths = "exec-paths";
-constexpr std::string_view kAllowExec = "allow-exec";
-constexpr std::string_view kAllowSetuid = "allow-setuid";
-constexpr std::string_view kAllowSharedObject = "allow-shared-object";
+constexpr std::string_view kExecAny = "exec-any";
+constexpr std::string_view kPath = "path";
+constexpr std::string_view kAllow = "allow";
+constexpr std::string_view kExec = "exec";
+constexpr std::string_view kSetId = "set-id";
+constexpr std::string_view kSharedObject = "shared-object";
 constexpr std::string_view kUnixBind = "unix-bind";
 constexpr std::string_view kUnixConnect = "unix-connect";
 constexpr std::string_view kUnixDgram = "unix-dgram";
@@ -220,6 +223,24 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   return static_cast<std::uint64_t>(value);
 }
 
+[[nodiscard]] err::Expected<err::Unit> validatePathPattern(
+    const std::string& what,
+    const std::string& path) noexcept {
+  if (path.empty() || path.front() != '/') {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " path '" + path + "' must start with '/'");
+  }
+  if (path.find("**") != std::string::npos) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " path '" + path +
+            "' uses unsupported '**'; use a directory path for its subtree "
+            "or '*' for one component");
+  }
+  return err::unit;
+}
+
 [[nodiscard]] err::Expected<std::map<std::string, FileMode>> parsePaths(
     const std::string& role,
     const toml::node* node) noexcept {
@@ -233,9 +254,8 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   std::map<std::string, FileMode> paths;
   for (const auto& [key, value] : *table) {
     const std::string path{key.str()};
-    if (path.empty()) {
-      return err::Error(
-          std::errc::invalid_argument, what + " contains an empty path");
+    if (auto valid = validatePathPattern(what, path); valid.hasError()) {
+      return valid.error();
     }
     auto mode = parseString(&value, what + " mode for '" + path + "'");
     if (mode.hasError()) {
@@ -248,13 +268,11 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
       parsed = FileMode::ReadOnly;
     } else if (*mode == "RDWR") {
       parsed = FileMode::ReadWrite;
-    } else if (*mode == "RDEXEC") {
-      parsed = FileMode::ReadExec;
     } else {
       return err::Error(
           std::errc::invalid_argument,
           what + " mode for '" + path + "' is '" + *mode +
-              "'; expected NONE, RDONLY, RDWR or RDEXEC");
+              "'; expected NONE, RDONLY or RDWR");
     }
     paths.emplace(path, parsed);
   }
@@ -264,56 +282,89 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
 [[nodiscard]] err::Expected<std::map<std::string, ExecPathPolicy>>
 parseExecPaths(const std::string& role, const toml::node* node) noexcept {
   const std::string what = "role '" + role + "': exec-paths";
-  const auto* table = node != nullptr ? node->as_table() : nullptr;
-  if (table == nullptr) {
+  const auto* rules = node != nullptr ? node->as_array() : nullptr;
+  if (rules == nullptr) {
     return err::Error(
-        std::errc::invalid_argument,
-        what + " must be a table of path pattern to permissions");
+        std::errc::invalid_argument, what + " must be an array of rule tables");
   }
-  if (table->empty()) {
+  if (rules->empty()) {
     return err::Error(
-        std::errc::invalid_argument,
-        what + " must contain at least one path pattern");
+        std::errc::invalid_argument, what + " must contain at least one rule");
   }
 
   std::map<std::string, ExecPathPolicy> paths;
-  for (const auto& [pathKey, value] : *table) {
-    const std::string path{pathKey.str()};
-    if (path.empty() || path.front() != '/') {
+  for (const auto& ruleNode : *rules) {
+    const auto* rule = ruleNode.as_table();
+    if (rule == nullptr) {
       return err::Error(
-          std::errc::invalid_argument,
-          what + " key '" + path + "' must start with '/'");
+          std::errc::invalid_argument, what + " entries must be rule tables");
     }
-    const auto* permissions = value.as_table();
-    if (permissions == nullptr) {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " entry for '" + path + "' must be a permissions table");
-    }
-
-    ExecPathPolicy parsed;
-    const std::set<std::string_view> allowedKeys = {
-        kAllowExec, kAllowSetuid, kAllowSharedObject};
-    for (const auto& [key, child] : *permissions) {
+    const std::set<std::string_view> allowedKeys = {kPath, kAllow};
+    for (const auto& [key, child] : *rule) {
+      (void)child;
       if (!allowedKeys.contains(key.str())) {
         return err::Error(
             std::errc::invalid_argument,
-            what + " entry for '" + path + "' has unknown option '" +
-                std::string(key.str()) + "'");
-      }
-      auto flag = parseRoleFlag(role, key.str(), &child);
-      if (flag.hasError()) {
-        return flag.error();
-      }
-      if (key.str() == kAllowExec) {
-        parsed.allowExec = *flag;
-      } else if (key.str() == kAllowSetuid) {
-        parsed.allowSetuid = *flag;
-      } else {
-        parsed.allowSharedObject = *flag;
+            what + " rule has unknown option '" + std::string(key.str()) + "'");
       }
     }
-    paths.emplace(path, parsed);
+
+    auto pathValue = parseString(findChild(*rule, kPath), what + " rule path");
+    if (pathValue.hasError()) {
+      return pathValue.error();
+    }
+    const std::string path = std::move(*pathValue);
+    if (auto valid = validatePathPattern(what, path); valid.hasError()) {
+      return valid.error();
+    }
+
+    ExecPathPolicy parsed;
+    std::set<std::string> seen;
+    const auto* allowNode = findChild(*rule, kAllow);
+    const auto* permissions =
+        allowNode != nullptr ? allowNode->as_array() : nullptr;
+    if (permissions == nullptr) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + path + "': allow must be an array");
+    }
+    for (const auto& permissionNode : *permissions) {
+      if (!permissionNode.is_string()) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + path + "': allow entries must be strings");
+      }
+      const std::string permission =
+          permissionNode.value<std::string>().value();
+      if (!seen.insert(permission).second) {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + path + "' lists permission '" + permission +
+                "' twice");
+      }
+      if (permission == kExec) {
+        parsed.allowExec = true;
+      } else if (permission == kSetId) {
+        parsed.allowSetuid = true;
+      } else if (permission == kSharedObject) {
+        parsed.allowSharedObject = true;
+      } else {
+        return err::Error(
+            std::errc::invalid_argument,
+            what + " rule for '" + path + "' has unknown permission '" +
+                permission + "'");
+      }
+    }
+    if (parsed.allowSetuid && !parsed.allowExec) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + path + "': set-id requires exec");
+    }
+    if (!paths.emplace(path, parsed).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains path '" + path + "' twice");
+    }
   }
   return paths;
 }
@@ -445,7 +496,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         kKeyringOwn,    kKeyringRoles, kKeyringAny,      kEnrollRoles,
         kEnrollAny,     kUnprivEnroll, kOverrideStacked, kUntrackedBpf,
         kMinSeq,        kUnixBind,     kUnixConnect,     kUnixDgram,
-        kMount,         kUmount,       kExecPaths,
+        kMount,         kUmount,       kExecPaths,       kExecAny,
     };
     for (const auto& [key, child] : *body) {
       (void)child;
@@ -544,6 +595,14 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
       }
       policy.execPaths = std::move(*parsed);
       policy.hasExecPaths = true;
+    }
+    if (auto res = parseFlag(kExecAny, policy.execAny); res.hasError()) {
+      return res.error();
+    }
+    if (policy.execAny && policy.hasExecPaths) {
+      return err::Error(
+          std::errc::invalid_argument,
+          "role '" + id + "': exec-any and exec-paths are mutually exclusive");
     }
     const auto parseUnix =
         [&](std::string_view key,
@@ -767,7 +826,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
           !findChild(*body, kVerityAny)) {
         policy.verityAny = true;
       }
-      if (!findChild(*body, kExecPaths)) {
+      if (!findChild(*body, kExecPaths) && !findChild(*body, kExecAny)) {
         policy.execAny = true;
       }
     }

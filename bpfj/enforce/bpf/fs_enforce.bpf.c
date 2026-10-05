@@ -16,7 +16,6 @@
 
 #define FMODE_READ BPFJ_FS_MODE_READ
 #define FMODE_WRITE BPFJ_FS_MODE_WRITE
-#define FMODE_EXEC BPFJ_FS_MODE_EXEC
 
 // Each role policy points directly at its matcher while all roles share the
 // inode cache and PID 1 mount snapshot.
@@ -25,9 +24,6 @@ struct bpfj_mount_cache __arena bpfj_fs_mount_cache;
 
 static __always_inline bool bpfj_fs_mode_allowed(__u32 granted, __u32 wanted) {
   if ((wanted & FMODE_WRITE) && !(granted & FMODE_WRITE)) {
-    return false;
-  }
-  if ((wanted & FMODE_EXEC) && !(granted & FMODE_EXEC)) {
     return false;
   }
   if ((wanted & FMODE_READ) && !(granted & FMODE_READ)) {
@@ -150,7 +146,7 @@ int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
   }
   return BPFJ_FS_CHECK(
       BPF_CORE_READ(file, f_path.dentry),
-      BPF_CORE_READ(file, f_mode) & (FMODE_READ | FMODE_WRITE | FMODE_EXEC));
+      BPF_CORE_READ(file, f_mode) & (FMODE_READ | FMODE_WRITE));
 }
 
 SEC("lsm/inode_unlink")
