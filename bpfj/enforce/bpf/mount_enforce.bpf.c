@@ -91,6 +91,9 @@ static __noinline bool bpfj_mount_match_allowed(
     }
   }
   if (!best) {
+    return false;
+  }
+  if (best->any_type) {
     return true;
   }
   if (!best->types || !scratch->has_type) {
@@ -100,6 +103,35 @@ static __noinline bool bpfj_mount_match_allowed(
   void __arena* found = NULL;
   return bpfj_str_map_lookup_strlen(
              best->types, scratch->type, sizeof(scratch->type), &found) == 0;
+}
+
+static __noinline bool bpfj_umount_match_allowed(
+    struct bpfj_file_match_cached_state __arena* state,
+    long count) {
+  __s32 best_pos = -1;
+  __u8 best_specificity = 0;
+  struct bpfj_umount_path_entry* best = NULL;
+  __u32 i;
+  bpf_for(i, 0, BPFJ_FILE_MATCH_MAX_ITERS) {
+    if (i >= count) {
+      break;
+    }
+    struct bpfj_umount_path_entry* entry =
+        BPFJ_FILE_MATCH_CACHED_LOOKUP(state, i);
+    if (!entry) {
+      continue;
+    }
+    const __s32 pos = BPFJ_FILE_MATCH_CACHED_GET_POS(state, i);
+    if (pos > best_pos ||
+        (pos == best_pos && entry->specificity > best_specificity) ||
+        (pos == best_pos && entry->specificity == best_specificity &&
+         !entry->allowed)) {
+      best_pos = pos;
+      best_specificity = entry->specificity;
+      best = entry;
+    }
+  }
+  return best && best->allowed;
 }
 
 // The pod loop is deliberately ordinary: file_match_cached uses bpf_for,
@@ -125,7 +157,7 @@ static __always_inline int bpfj_mount_enforce_path(
 
   BPFJ_FILE_MATCH_CACHED_ALLOC(state);
   if (!state) {
-    return 0;
+    return -EACCES;
   }
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
@@ -142,26 +174,41 @@ static __always_inline int bpfj_mount_enforce_path(
     bpfj_pod_read_role_id(&scratch->role, pod);
     bpfj_pod_read_uuid(&scratch->uuid, pod);
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    struct bpfj_file_matcher __arena* matcher =
-        policy ? policy->mount_matcher : NULL;
-    if (matcher) {
-      const long count = BPFJ_FILE_MATCH_CACHED(
-          state,
-          matcher,
-          &bpfj_mount_cache,
-          dentry,
-          &scratch->uuid,
-          bpfj_file_match_cached_bind_var_array,
-          &pod->var_array);
-      if (count > 0 && !bpfj_mount_match_allowed(state, count, scratch)) {
-        return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+    if (!policy) {
+      return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+    }
+    if (policy->flags & BPFJ_POLICY_MOUNT_ANY) {
+      if (bpfj_is_override(pod)) {
+        break;
       }
-      if (count == -E2BIG) {
-        return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+      continue;
+    }
+    struct bpfj_file_matcher __arena* matcher = policy->mount_matcher;
+    if (!matcher) {
+      return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+    }
+    const long count = BPFJ_FILE_MATCH_CACHED(
+        state,
+        matcher,
+        &bpfj_mount_cache,
+        dentry,
+        &scratch->uuid,
+        bpfj_file_match_cached_bind_var_array,
+        &pod->var_array);
+    if (count == -EXDEV) {
+      if (bpfj_is_override(pod)) {
+        break;
       }
-      if (count < 0 && count != -EXDEV) {
+      continue;
+    }
+    if (count < 0) {
+      if (count != -E2BIG) {
         BPFJ_LOG_ERR(-count, "mount destination path match failed");
       }
+      return bpfj_mount_deny(pod, task, &scratch->role, "mount");
+    }
+    if (count == 0 || !bpfj_mount_match_allowed(state, count, scratch)) {
+      return bpfj_mount_deny(pod, task, &scratch->role, "mount");
     }
     if (bpfj_is_override(pod)) {
       break;
@@ -170,7 +217,9 @@ static __always_inline int bpfj_mount_enforce_path(
   return 0;
 }
 
-static __always_inline int bpfj_mount_enforce_umount(void) {
+static __always_inline int bpfj_mount_enforce_any(
+    __u32 flag,
+    const char* operation) {
   struct task_struct* task = bpf_get_current_task_btf();
   struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
   if (!task || !pid_data) {
@@ -191,9 +240,8 @@ static __always_inline int bpfj_mount_enforce_umount(void) {
     struct bpfj_role_id role = {};
     bpfj_pod_read_role_id(&role, pod);
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (policy && (policy->flags & BPFJ_POLICY_HAS_UMOUNT) &&
-        !(policy->flags & BPFJ_POLICY_UMOUNT_ANY)) {
-      return bpfj_mount_deny(pod, task, &role, "umount");
+    if (!policy || !(policy->flags & flag)) {
+      return bpfj_mount_deny(pod, task, &role, operation);
     }
     if (bpfj_is_override(pod)) {
       break;
@@ -202,10 +250,27 @@ static __always_inline int bpfj_mount_enforce_umount(void) {
   return 0;
 }
 
-static __always_inline bool bpfj_mount_has_path_policy(void) {
+static __always_inline int bpfj_mount_enforce_umount_path(
+    uintptr_t dentry,
+    const char* operation) {
+  if (!dentry) {
+    return 0;
+  }
+  struct task_struct* task = bpf_get_current_task_btf();
   struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
-  if (!pid_data) {
-    return false;
+  if (!task || !pid_data) {
+    return 0;
+  }
+
+  __attribute__((cleanup(bpfj_scratch_release))) __u32 scratch_guard =
+      BPFJ_SCRATCH_NONE;
+  struct bpfj_mount_scratch* scratch = bpfj_mount_scratch_claim(&scratch_guard);
+  if (!scratch) {
+    return -EACCES;
+  }
+  BPFJ_FILE_MATCH_CACHED_ALLOC(state);
+  if (!state) {
+    return -EACCES;
   }
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
@@ -219,15 +284,50 @@ static __always_inline bool bpfj_mount_has_path_policy(void) {
     barrier_var(pod_pointer);
     struct bpfj_pod __arena* pod =
         (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
+    bpfj_pod_read_role_id(&scratch->role, pod);
+    bpfj_pod_read_uuid(&scratch->uuid, pod);
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (policy && policy->mount_matcher) {
-      return true;
+    if (!policy) {
+      return bpfj_mount_deny(pod, task, &scratch->role, operation);
+    }
+    if (policy->flags & BPFJ_POLICY_UMOUNT_ANY) {
+      if (bpfj_is_override(pod)) {
+        break;
+      }
+      continue;
+    }
+    struct bpfj_file_matcher __arena* matcher = policy->umount_matcher;
+    if (!matcher) {
+      return bpfj_mount_deny(pod, task, &scratch->role, operation);
+    }
+    const long count = BPFJ_FILE_MATCH_CACHED(
+        state,
+        matcher,
+        &bpfj_mount_cache,
+        dentry,
+        &scratch->uuid,
+        bpfj_file_match_cached_bind_var_array,
+        &pod->var_array);
+    if (count == -EXDEV) {
+      if (bpfj_is_override(pod)) {
+        break;
+      }
+      continue;
+    }
+    if (count < 0) {
+      if (count != -E2BIG) {
+        BPFJ_LOG_ERR(-count, "umount path match failed");
+      }
+      return bpfj_mount_deny(pod, task, &scratch->role, operation);
+    }
+    if (count == 0 || !bpfj_umount_match_allowed(state, count)) {
+      return bpfj_mount_deny(pod, task, &scratch->role, operation);
     }
     if (bpfj_is_override(pod)) {
       break;
     }
   }
-  return false;
+  return 0;
 }
 
 static __always_inline const char* bpfj_mount_path_type(
@@ -241,22 +341,41 @@ static __always_inline const char* bpfj_mount_path_type(
 // A remount path names the mounted root. Match the covered mountpoint instead,
 // which is the destination the policy author wrote and remains visible in the
 // host mount snapshot used by file_match_cached.
+static __always_inline struct dentry* bpfj_mountpoint(
+    struct vfsmount* vfsmount,
+    struct dentry* fallback) {
+  if (!vfsmount) {
+    return NULL;
+  }
+  const long offset = bpf_core_field_offset(struct mount, mnt);
+  struct mount* mount = bpf_core_cast((void*)vfsmount - offset, struct mount);
+  struct mount* parent = bpf_core_cast(mount->mnt_parent, struct mount);
+  if (parent && parent != mount) {
+    return bpf_core_cast(mount->mnt_mountpoint, struct dentry);
+  }
+  return fallback;
+}
+
+static __always_inline bool bpfj_mount_is_attached(struct vfsmount* vfsmount) {
+  if (!vfsmount) {
+    return false;
+  }
+  const long offset = bpf_core_field_offset(struct mount, mnt);
+  struct mount* mount = bpf_core_cast((void*)vfsmount - offset, struct mount);
+  struct mount* parent = bpf_core_cast(mount->mnt_parent, struct mount);
+  return parent && parent != mount;
+}
+
 static __always_inline struct dentry* bpfj_mount_destination(
     const struct path* path) {
   if (!path) {
     return NULL;
   }
-  struct vfsmount* vfsmount = BPF_CORE_READ(path, mnt);
+  struct vfsmount* vfsmount = bpf_core_cast(path->mnt, struct vfsmount);
   if (!vfsmount) {
     return NULL;
   }
-  const long offset = bpf_core_field_offset(struct mount, mnt);
-  struct mount* mount = (struct mount*)((void*)vfsmount - offset);
-  struct mount* parent = BPF_CORE_READ(mount, mnt_parent);
-  if (parent && parent != mount) {
-    return BPF_CORE_READ(mount, mnt_mountpoint);
-  }
-  return BPF_CORE_READ(path, dentry);
+  return bpfj_mountpoint(vfsmount, BPF_CORE_READ(path, dentry));
 }
 
 SEC("lsm/sb_mount")
@@ -299,7 +418,9 @@ int BPF_PROG(
     unsigned long flags,
     void* data,
     int lsm_ret) {
-  return lsm_ret || !(flags & MS_MOVE) ? lsm_ret : bpfj_mount_enforce_umount();
+  return lsm_ret || !(flags & MS_MOVE)
+      ? lsm_ret
+      : bpfj_mount_enforce_any(BPFJ_POLICY_UMOUNT_ANY, "move mount source");
 }
 
 SEC("lsm/sb_mount")
@@ -338,7 +459,7 @@ int BPF_PROG(
     struct super_block* sb,
     void* mnt_opts,
     int lsm_ret) {
-  if (lsm_ret || !sb || !bpfj_mount_has_path_policy()) {
+  if (lsm_ret || !sb) {
     return lsm_ret;
   }
   const __u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -354,39 +475,18 @@ int BPF_PROG(
   if (allowed) {
     return 0;
   }
-  struct task_struct* task = bpf_get_current_task_btf();
-  struct bpfj_pid_data* pid_data = bpfj_get_current_pid_data();
-  if (!task || !pid_data) {
-    return 0;
-  }
-  __u32 num_pods = pid_data->num_pods;
-  if (num_pods > BPFJ_MAX_POD_PER_PID) {
-    num_pods = BPFJ_MAX_POD_PER_PID;
-  }
-  for (int index = BPFJ_MAX_POD_PER_PID - 1; index >= 0; --index) {
-    if (index >= num_pods || !pid_data->pods[index]) {
-      continue;
-    }
-    void* pod_pointer = (void*)pid_data->pods[index];
-    barrier_var(pod_pointer);
-    struct bpfj_pod __arena* pod =
-        (struct bpfj_pod __arena*)(uintptr_t)pod_pointer;
-    struct bpfj_role_id role = {};
-    bpfj_pod_read_role_id(&role, pod);
-    const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
-    if (policy && policy->mount_matcher) {
-      return bpfj_mount_deny(pod, task, &role, "remount");
-    }
-    if (bpfj_is_override(pod)) {
-      break;
-    }
-  }
-  return 0;
+  return bpfj_mount_enforce_any(BPFJ_POLICY_MOUNT_ANY, "remount");
 }
 
 SEC("lsm/sb_umount")
 int BPF_PROG(bpfj_umount, struct vfsmount* mnt, int flags, int lsm_ret) {
-  return lsm_ret ? lsm_ret : bpfj_mount_enforce_umount();
+  if (lsm_ret || !mnt) {
+    return lsm_ret;
+  }
+  return bpfj_mount_enforce_umount_path(
+      (uintptr_t)bpfj_mountpoint(
+          mnt, bpf_core_cast(mnt->mnt_root, struct dentry)),
+      "umount");
 }
 
 SEC("lsm/move_mount")
@@ -409,7 +509,15 @@ int BPF_PROG(
     const struct path* from_path,
     const struct path* to_path,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : bpfj_mount_enforce_umount();
+  if (lsm_ret || !from_path) {
+    return lsm_ret;
+  }
+  struct vfsmount* source = bpf_core_cast(from_path->mnt, struct vfsmount);
+  if (!bpfj_mount_is_attached(source)) {
+    return 0;
+  }
+  return bpfj_mount_enforce_umount_path(
+      (uintptr_t)bpfj_mount_destination(from_path), "move mount source");
 }
 
 SEC("lsm/sb_pivotroot")
@@ -432,7 +540,11 @@ int BPF_PROG(
     const struct path* old_path,
     const struct path* new_path,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : bpfj_mount_enforce_umount();
+  if (lsm_ret || !old_path) {
+    return lsm_ret;
+  }
+  return bpfj_mount_enforce_umount_path(
+      (uintptr_t)bpfj_mount_destination(old_path), "pivot old root");
 }
 
 char LICENSE[] SEC("license") = "Dual MIT/GPL";

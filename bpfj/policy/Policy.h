@@ -57,13 +57,17 @@ struct RolePolicy {
 
   /// @brief Mount destination path to the filesystem types permitted there.
   /// Matching is recursive and the longest path wins. An empty type list
-  /// denies mounting at that path.
+  /// denies mounting at that path. An absent table denies every destination.
   std::map<std::string, std::vector<std::string>> mount;
+  bool hasMount = false;
+  bool mountAny = false;
 
-  /// @brief Whether unmounting is allowed. An absent `umount` abstains; a
-  /// written true or false participates in stacked-role enforcement.
-  bool umount = false;
+  /// @brief Mountpoint patterns mapped to whether this role may remove them.
+  /// This covers direct unmount, attached move_mount sources and pivot_root's
+  /// old root. Matching is recursive and the longest path wins.
+  std::map<std::string, bool> umount;
   bool hasUmount = false;
+  bool umountAny = false;
 
   /// @brief Certificate ids whose signatures this role's binaries may carry.
   std::vector<std::string> enforceBinaryCerts;

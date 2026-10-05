@@ -292,21 +292,32 @@ TEST(Policy, ParsesMountAndUmountRules) {
   auto policy = Policy::parse(
       R"toml([roles]
 
-[roles.svc]
-umount = false
-
 [roles.svc.mount]
 "/srv/data" = ["ext4", "xfs"]
+"/any-upper" = ["ANY"]
+"/any-lower" = ["any"]
 "/blocked" = []
+
+[roles.svc.umount]
+"/" = "NONE"
+"/srv/data" = "ANY"
+"/run" = "none"
+"/run/service" = "any"
 )toml");
   ASSERT_OK(policy);
 
   const auto& role = policy->roles.at("svc");
   const std::vector<std::string> expected{"ext4", "xfs"};
   ASSERT(role.mount.at("/srv/data") == expected);
+  const std::vector<std::string> expectedAny{"ANY"};
+  ASSERT(role.mount.at("/any-upper") == expectedAny);
+  ASSERT(role.mount.at("/any-lower") == expectedAny);
   ASSERT(role.mount.at("/blocked").empty());
   ASSERT(role.hasUmount);
-  ASSERT(!role.umount);
+  ASSERT(!role.umount.at("/"));
+  ASSERT(role.umount.at("/srv/data"));
+  ASSERT(!role.umount.at("/run"));
+  ASSERT(role.umount.at("/run/service"));
 }
 
 TEST(Policy, RejectsRelativeMountDestination) {
@@ -337,16 +348,57 @@ TEST(Policy, RejectsScalarMountFilesystemType) {
       policy.error().message().find("must be an array") != std::string::npos);
 }
 
-TEST(Policy, RejectsNonBooleanUmount) {
+TEST(Policy, RejectsBooleanUmount) {
   auto policy = Policy::parse(R"toml([roles]
 
 [roles.svc]
-umount = "sometimes"
+umount = false
+)toml");
+  ASSERT(!policy);
+  ASSERT(policy.error().message().find("must be a table") != std::string::npos);
+}
+
+TEST(Policy, RejectsRelativeUmountPath) {
+  auto policy = Policy::parse(R"toml([roles.svc.umount]
+relative = "ANY"
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be true or false") !=
+      policy.error().message().find("must be absolute") != std::string::npos);
+}
+
+TEST(Policy, RejectsUnknownUmountPermission) {
+  auto policy = Policy::parse(R"toml([roles.svc.umount]
+"/srv" = "ALLOW"
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("expected NONE or ANY") !=
       std::string::npos);
+}
+
+TEST(Policy, MountAndMountAnyAreMutuallyExclusive) {
+  auto policy = Policy::parse(R"toml([roles.svc]
+mount-any = true
+
+[roles.svc.mount]
+"/srv" = ["tmpfs"]
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("mutually exclusive") != std::string::npos);
+}
+
+TEST(Policy, UmountAndUmountAnyAreMutuallyExclusive) {
+  auto policy = Policy::parse(R"toml([roles.svc]
+umount-any = true
+
+[roles.svc.umount]
+"/srv" = "ANY"
+)toml");
+  ASSERT(!policy);
+  ASSERT(
+      policy.error().message().find("mutually exclusive") != std::string::npos);
 }
 
 TEST(Policy, RejectsCollidingMountRootRules) {
@@ -382,6 +434,8 @@ TEST(Policy, MissingOperationsDefaultToDeny) {
   ASSERT(!role.verityAny);
   ASSERT(!role.execAny);
   ASSERT(!role.lkmAny);
+  ASSERT(!role.mountAny);
+  ASSERT(!role.umountAny);
 }
 
 TEST(Policy, AnyOpensUnspecifiedOperations) {
@@ -402,6 +456,8 @@ any = true
   ASSERT(role.verityAny);
   ASSERT(role.execAny);
   ASSERT(role.lkmAny);
+  ASSERT(role.mountAny);
+  ASSERT(role.umountAny);
 }
 
 TEST(Policy, ScopedOptionOverridesAny) {
@@ -466,6 +522,8 @@ lkm-any = false
 fs-any = false
 verity-any = false
 exec-any = false
+mount-any = false
+umount-any = false
 )toml");
   ASSERT_OK(policy);
 
@@ -475,6 +533,27 @@ exec-any = false
   ASSERT(!role.fsAny);
   ASSERT(!role.verityAny);
   ASSERT(!role.execAny);
+  ASSERT(!role.mountAny);
+  ASSERT(!role.umountAny);
+}
+
+TEST(Policy, MountPathsOverrideAny) {
+  auto policy = Policy::parse(R"toml([roles.sandbox]
+any = true
+
+[roles.sandbox.mount]
+"/srv/only" = ["tmpfs"]
+
+[roles.sandbox.umount]
+"/srv/only" = "ANY"
+)toml");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("sandbox");
+  ASSERT(role.hasMount);
+  ASSERT(!role.mountAny);
+  ASSERT(role.hasUmount);
+  ASSERT(!role.umountAny);
 }
 
 TEST(Policy, ExecPathsOverrideAny) {

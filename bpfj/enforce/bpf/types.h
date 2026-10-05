@@ -138,6 +138,7 @@ enum bpfj_policy_mode {
 #define BPFJ_POLICY_HAS_UMOUNT (1U << 7)
 #define BPFJ_POLICY_UMOUNT_ANY (1U << 8)
 #define BPFJ_POLICY_EXEC_ANY (1U << 9)
+#define BPFJ_POLICY_MOUNT_ANY (1U << 10)
 
 struct bpfj_role_policy;
 struct bpfj_glob_map;
@@ -185,6 +186,7 @@ struct bpfj_role_policy {
   struct bpfj_glob_map __arena* unix_dgram_abstract;
   struct bpfj_file_matcher __arena* exec_matcher;
   const struct bpfj_role_set __arena* gates[BPFJ_POLICY_GATE_COUNT];
+  struct bpfj_file_matcher __arena* umount_matcher;
 };
 
 struct bpfj_role_policy_ref {

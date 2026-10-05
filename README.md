@@ -169,7 +169,7 @@ mq-posix-pattern = ["service-${vm_uuid}-*"]
 shm-sysv-pod = true           # only SysV SHM from its own pod
 shm-posix-pod = true          # only POSIX SHM from its own pod
 shm-posix-pattern = ["service-${vm_uuid}-*"]
-umount = false                # deny unmount and mount-source removal
+umount = {"/" = "NONE", "/srv/data" = "ANY"}
 keyring-own = true            # only its own role's keyring
 
 [[roles.webserver.exec-paths]]
@@ -198,7 +198,7 @@ allow = ["shared-object"]
 
 [roles.webserver.mount]       # destination -> permitted filesystem types
 "/srv/data" = ["ext4", "xfs"]
-"/" = []                     # empty list blocks every other destination
+"/run/webserver" = ["ANY"]   # every filesystem type at this destination
 
 [roles.sandbox]
 unpriv-enroll = true          # every unspecified operation remains denied
@@ -210,9 +210,10 @@ Most operation gates are denied when a role has no corresponding option. The
 owner roles, and `*-any` opens that operation completely. `keyring-own` is the
 role-scoped counterpart because fs-verity keyrings belong to roles rather than
 pods. `enroll-roles` names the only roles bpfjsrv may add; without it enrollment
-through bpfjsrv is denied. Unix-socket and mount path maps differ: an
+through bpfjsrv is denied. Unix-socket maps remain opt-in filters: an
 unconfigured or unmatched operation is allowed, so use an explicit root deny
-when the map is intended as an allowlist. An absent `umount` abstains.
+when the map is intended as an allowlist. Mount and unmount operations are
+denied when their option is absent or no path matches.
 
 The fully open proc option is named `any-proc`; the other ownership families
 use the `*-any` order.
@@ -220,8 +221,8 @@ use the `*-any` order.
 `any = true` opens every operation that has no more specific option. This is
 useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 `kill-roles`, `paths`, or `enforce-binary-certs` overrides `any` for that
-operation. `lkm-any`, `fs-any`, and `verity-any` are the operation-specific
-fully-open forms.
+operation. `lkm-any`, `fs-any`, `verity-any`, `mount-any`, and `umount-any`
+are operation-specific fully-open forms.
 
 `paths` maps path patterns to `NONE`, `RDONLY`, or `RDWR`. Matches
 are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
@@ -293,17 +294,23 @@ socket.
 
 `mount` maps destination paths to lists of filesystem type names. Rules apply
 recursively, the longest matching path wins, and unmatched destinations are
-allowed. An empty list denies every mount at that path, so `"/" = []` is a
-default-deny rule. `umount` is a role-wide boolean; leaving it out abstains,
-`false` denies unmounting, and `true` permits it. `move_mount` requires mount
-permission for the destination and umount permission for the source;
-`pivot_root` applies the same pair to the new and old paths. Legacy remounts
-are checked at their destination and relayed to `sb_remount`. A standalone
-new-mount-API reconfigure has no destination path in its LSM hook and is denied
-for a role carrying mount rules. Legacy bind and move mounts do not expose the
-source filesystem type to the LSM hook, so a matched typed destination denies
-them rather than guessing; use `move_mount` when type-aware movement is
-required.
+denied. An empty list explicitly denies every filesystem type at a matched
+path, while `ANY` (or `any`) in the list permits every filesystem type there.
+`mount-any` permits every destination and filesystem type instead. `umount`
+maps source paths to `NONE` or `ANY` (also accepted in lowercase). Its rules
+are recursive with the longest match winning, so `"/" = "NONE"` can close the
+tree while `"/run" = "ANY"` opens one subtree. Unmatched sources are denied,
+while `umount-any` permits every source.
+`move_mount` requires mount permission for the destination and, when moving an
+attached mount, umount permission for the source. A detached mount tree has no
+attached source to remove, so only its destination is checked. `pivot_root`
+applies the same pair to the new and old paths. Legacy remounts are checked at
+their destination and relayed to `sb_remount`. A standalone new-mount-API
+reconfigure has no destination path in its LSM hook and therefore requires
+`mount-any`. Legacy bind and move mounts do not expose enough source
+information to apply all path and filesystem-type rules safely; typed bind
+destinations are denied, and legacy `MS_MOVE` requires `umount-any` for its
+source side.
 
 A process holding several roles is allowed an operation only if every role
 agrees. Roles are consulted newest first, and an `override-stacked` role

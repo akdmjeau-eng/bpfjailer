@@ -31,10 +31,6 @@ namespace bpfjailer {
 
 namespace {
 
-[[nodiscard]] bool configured(const RolePolicy& role) noexcept {
-  return !role.mount.empty() || role.hasUmount;
-}
-
 [[nodiscard]] std::uint8_t pathSpecificity(std::string_view path) noexcept {
   std::uint8_t specificity = 0;
   std::size_t begin = 0;
@@ -64,10 +60,7 @@ namespace {
 Expected<> MountEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
-  if (std::none_of(
-          policy.roles.begin(), policy.roles.end(), [](const auto& item) {
-            return configured(item.second);
-          })) {
+  if (policy.roles.empty()) {
     return unit;
   }
   if (auto res = pins::makeTree(cfg); !res) {
@@ -119,7 +112,7 @@ Expected<> MountEnforcer::load(
       skel.bss().bpfj_heap_ctrl->role_policies);
 
   for (const auto& [name, role] : policy.roles) {
-    if (role.mount.empty()) {
+    if (role.mount.empty() && role.umount.empty()) {
       continue;
     }
 
@@ -135,39 +128,67 @@ Expected<> MountEnforcer::load(
     }
     auto* rolePolicy = const_cast<struct bpfj_role_policy*>(*foundPolicy);
 
-    std::map<std::string, struct bpfj_mount_path_entry> paths;
-    for (const auto& [path, types] : role.mount) {
-      struct bpfj_str_map* typeSet = nullptr;
-      if (!types.empty()) {
-        std::map<std::string, void*> allowedTypes;
-        for (const auto& type : types) {
-          allowedTypes.emplace(type, rolePolicy);
+    if (!role.mount.empty()) {
+      std::map<std::string, struct bpfj_mount_path_entry> paths;
+      for (const auto& [path, types] : role.mount) {
+        struct bpfj_str_map* typeSet = nullptr;
+        const bool anyType =
+            std::find(types.begin(), types.end(), "ANY") != types.end();
+        if (!types.empty() && !anyType) {
+          std::map<std::string, void*> allowedTypes;
+          for (const auto& type : types) {
+            allowedTypes.emplace(type, rolePolicy);
+          }
+          StrMap<Skel> publishedTypes{obj, typeSet, false};
+          if (auto res = publishedTypes.init(allowedTypes); !res) {
+            return res.error();
+          }
         }
-        StrMap<Skel> publishedTypes{obj, typeSet, false};
-        if (auto res = publishedTypes.init(allowedTypes); !res) {
-          return res.error();
-        }
+        const std::string compiledPath = path == "/" ? "/*" : path;
+        paths.emplace(
+            compiledPath,
+            bpfj_mount_path_entry{
+                .types = typeSet,
+                .specificity = pathSpecificity(path),
+                .any_type = static_cast<__u8>(anyType),
+            });
       }
-      const std::string compiledPath = path == "/" ? "/*" : path;
-      paths.emplace(
-          compiledPath,
-          bpfj_mount_path_entry{
-              .types = typeSet,
-              .specificity = pathSpecificity(path),
-          });
+
+      auto matcher = std::make_unique<Matcher>();
+      if (auto res = matcher->init(
+              obj,
+              resolveVariable,
+              Matcher::SharedMaps{.match = matchLru},
+              rolePolicy->mount_matcher,
+              paths);
+          !res) {
+        return res.error();
+      }
+      matchers.push_back(std::move(matcher));
     }
 
-    auto matcher = std::make_unique<Matcher>();
-    if (auto res = matcher->init(
-            obj,
-            resolveVariable,
-            Matcher::SharedMaps{.match = matchLru},
-            rolePolicy->mount_matcher,
-            paths);
-        !res) {
-      return res.error();
+    if (!role.umount.empty()) {
+      std::map<std::string, struct bpfj_umount_path_entry> paths;
+      for (const auto& [path, allowed] : role.umount) {
+        paths.emplace(
+            path == "/" ? "/*" : path,
+            bpfj_umount_path_entry{
+                .allowed = static_cast<__u8>(allowed),
+                .specificity = pathSpecificity(path),
+            });
+      }
+      auto matcher = std::make_unique<Matcher>();
+      if (auto res = matcher->init(
+              obj,
+              resolveVariable,
+              Matcher::SharedMaps{.match = matchLru},
+              rolePolicy->umount_matcher,
+              paths);
+          !res) {
+        return res.error();
+      }
+      matchers.push_back(std::move(matcher));
     }
-    matchers.push_back(std::move(matcher));
   }
 
   if (auto res = skel.attach(); !res) {

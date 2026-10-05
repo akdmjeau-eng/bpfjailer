@@ -73,7 +73,9 @@ constexpr std::string_view kUnixBind = "unix-bind";
 constexpr std::string_view kUnixConnect = "unix-connect";
 constexpr std::string_view kUnixDgram = "unix-dgram";
 constexpr std::string_view kMount = "mount";
+constexpr std::string_view kMountAny = "mount-any";
 constexpr std::string_view kUmount = "umount";
+constexpr std::string_view kUmountAny = "umount-any";
 
 constexpr std::string_view kPemBegin = "-----BEGIN CERTIFICATE-----";
 constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
@@ -446,11 +448,14 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
             std::errc::invalid_argument,
             what + " filesystem types for '" + path + "' must be strings");
       }
-      const std::string type = typeNode.value<std::string>().value();
+      std::string type = typeNode.value<std::string>().value();
       if (type.empty() || type.size() >= 64) {
         return err::Error(
             std::errc::invalid_argument,
             what + " filesystem type '" + type + "' is empty or too long");
+      }
+      if (type == "any") {
+        type = "ANY";
       }
       if (!seen.insert(type).second) {
         return err::Error(
@@ -460,6 +465,54 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
       types.push_back(type);
     }
     rules.emplace(path, std::move(types));
+  }
+  return rules;
+}
+
+[[nodiscard]] err::Expected<std::map<std::string, bool>> parseUmountRules(
+    const std::string& role,
+    const toml::node* node) noexcept {
+  const std::string what = "role '" + role + "': umount";
+  const auto* table = node != nullptr ? node->as_table() : nullptr;
+  if (table == nullptr) {
+    return err::Error(
+        std::errc::invalid_argument,
+        what + " must be a table of mountpoint pattern to NONE or ANY");
+  }
+  std::map<std::string, bool> rules;
+  bool hasRoot = false;
+  bool hasRootGlob = false;
+  for (const auto& [pathKey, value] : *table) {
+    const std::string path{pathKey.str()};
+    if (path.empty() || path.front() != '/') {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " path '" + path + "' must be absolute");
+    }
+    hasRoot = hasRoot || path == "/";
+    hasRootGlob = hasRootGlob || path == "/*";
+    if (hasRoot && hasRootGlob) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " cannot contain both '/' and '/*'");
+    }
+    auto permission =
+        parseString(&value, what + " permission for '" + path + "'");
+    if (permission.hasError()) {
+      return permission.error();
+    }
+    bool allowed;
+    if (*permission == "ANY" || *permission == "any") {
+      allowed = true;
+    } else if (*permission == "NONE" || *permission == "none") {
+      allowed = false;
+    } else {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " permission for '" + path + "' is '" + *permission +
+              "'; expected NONE or ANY");
+    }
+    rules.emplace(path, allowed);
   }
   return rules;
 }
@@ -496,7 +549,8 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         kKeyringOwn,    kKeyringRoles, kKeyringAny,      kEnrollRoles,
         kEnrollAny,     kUnprivEnroll, kOverrideStacked, kUntrackedBpf,
         kMinSeq,        kUnixBind,     kUnixConnect,     kUnixDgram,
-        kMount,         kUmount,       kExecPaths,       kExecAny,
+        kMount,         kMountAny,     kUmount,          kUmountAny,
+        kExecPaths,     kExecAny,
     };
     for (const auto& [key, child] : *body) {
       (void)child;
@@ -632,14 +686,31 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         return parsed.error();
       }
       policy.mount = std::move(*parsed);
+      policy.hasMount = true;
+    }
+    if (auto res = parseFlag(kMountAny, policy.mountAny); res.hasError()) {
+      return res.error();
+    }
+    if (findChild(*body, kMount) && findChild(*body, kMountAny)) {
+      return err::Error(
+          std::errc::invalid_argument,
+          "role '" + id + "': mount and mount-any are mutually exclusive");
     }
     if (const auto* child = findChild(*body, kUmount)) {
-      auto parsed = parseRoleFlag(id, kUmount, child);
+      auto parsed = parseUmountRules(id, child);
       if (parsed.hasError()) {
         return parsed.error();
       }
-      policy.umount = *parsed;
+      policy.umount = std::move(*parsed);
       policy.hasUmount = true;
+    }
+    if (auto res = parseFlag(kUmountAny, policy.umountAny); res.hasError()) {
+      return res.error();
+    }
+    if (findChild(*body, kUmount) && findChild(*body, kUmountAny)) {
+      return err::Error(
+          std::errc::invalid_argument,
+          "role '" + id + "': umount and umount-any are mutually exclusive");
     }
     if (auto res = parseFlag(kFsAny, policy.fsAny); res.hasError()) {
       return res.error();
@@ -816,6 +887,12 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         policy.enrollMode,
         findChild(*body, kEnrollRoles) || findChild(*body, kEnrollAny));
     if (policy.any) {
+      if (!findChild(*body, kMount) && !findChild(*body, kMountAny)) {
+        policy.mountAny = true;
+      }
+      if (!findChild(*body, kUmount) && !findChild(*body, kUmountAny)) {
+        policy.umountAny = true;
+      }
       if (!findChild(*body, kLkmAny)) {
         policy.lkmAny = true;
       }

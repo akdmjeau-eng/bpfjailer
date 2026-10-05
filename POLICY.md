@@ -66,7 +66,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | System V shared memory | `shm-sysv-pod`, `shm-sysv-roles`, `shm-sysv-any` | Gate lookup, control and attach by tracked owner. |
 | POSIX shared memory | `shm-posix-pod`, `shm-posix-roles`, `shm-posix-any`, `shm-posix-pattern` | Gate open, receipt, mapping, protection, truncation and unlink by owner or name pattern. |
 | Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | Boolean maps for pathname or abstract socket names. Unmatched operations are allowed. |
-| Mounts | `mount`, `umount` | `mount` maps destination patterns to filesystem-type allowlists. Unmatched destinations are allowed; absent `umount` abstains. |
+| Mounts | `mount`, `mount-any`, `umount`, `umount-any` | `mount` maps destination patterns to filesystem-type allowlists and `umount` maps source patterns to `NONE` or `ANY`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
 | Enrollment | `unpriv-enroll`, `enroll-roles`, `enroll-any` | Open a role to a non-root caller and constrain which further roles a caller may request through `bpfjsrv`. |
 
 Role and certificate references are validated when the policy is parsed.
@@ -117,13 +117,22 @@ typical allowlist includes `/: false` for pathnames or an abstract catch-all
 denial plus more specific grants. Already-connected, inherited or transferred
 Unix socket descriptors remain capabilities and are not dynamically revoked.
 
-`mount` values are arrays of filesystem type names. An empty array denies the
-destination. Use `"/" = []` as the default denial for an allowlist.
-`move_mount` requires mount permission at the destination and unmount
-permission at the source; `pivot_root` applies the same pair. A standalone
-new-mount-API reconfigure has no destination in its LSM hook and is denied
-when the role carries mount rules. Legacy bind/move operations at a typed
-destination are denied because their LSM hook exposes no source type.
+`mount` values are arrays of filesystem type names. Missing and unmatched
+mount policy denies, an empty array explicitly denies a matched destination,
+and `ANY` or `any` permits every filesystem type at that destination.
+`mount-any` permits every destination and type. `umount` maps source paths to
+`NONE` or `ANY`, with lowercase also accepted. Its rules apply recursively and
+the longest match wins; missing or unmatched policy denies. `umount-any`
+permits every source. `mount` and `mount-any`, and `umount` and `umount-any`,
+are mutually exclusive.
+
+`move_mount` requires mount permission at the destination and, for an attached
+source mount, unmount permission at the source. Moving a detached tree checks
+only its destination. `pivot_root` applies the same pair. A standalone
+new-mount-API reconfigure has no destination in its LSM hook and requires
+`mount-any`. Legacy bind/move operations at a typed destination are denied
+because their LSM hook exposes no source type, and legacy `MS_MOVE` requires
+`umount-any` because its source path is unavailable to the hook.
 
 POSIX queue and shared-memory patterns match names without their leading `/`.
 They support literals, `?`, `*`, and `${NAME}`. A pattern grants access

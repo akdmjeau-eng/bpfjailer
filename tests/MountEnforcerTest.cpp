@@ -106,6 +106,20 @@ mountFs(const std::string& path, const char* type, unsigned long flags = 0) {
   return error;
 }
 
+[[nodiscard]] int moveAttachedMount(
+    const std::string& source,
+    const std::string& destination) {
+  errno = 0;
+  const int result = static_cast<int>(::syscall(
+      SYS_move_mount,
+      AT_FDCWD,
+      source.c_str(),
+      AT_FDCWD,
+      destination.c_str(),
+      0));
+  return result == 0 ? 0 : errno;
+}
+
 void attach(std::string rules) {
   const Policy policy = policyOf(R"toml([roles]
 
@@ -133,13 +147,31 @@ TEST(MountEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_pivot_root_old"));
 }
 
-TEST(MountEnforcer, UnmatchedDestinationIsAllowed) {
+TEST(MountEnforcer, MissingMountPolicyDeniesMount) {
+  Fixture fixture;
+  attach("");
+
+  Child actor([&] { return mountFs(fixture.destination(), "tmpfs"); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(MountEnforcer, MountAnyAllowsMount) {
+  Fixture fixture;
+  attach("mount-any = true\n");
+
+  Child actor([&] { return mountFs(fixture.destination(), "tmpfs"); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(MountEnforcer, UnmatchedDestinationIsDenied) {
   Fixture fixture;
   attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   Child actor([&] { return mountFs(fixture.other(), "tmpfs"); });
   enroll("svc", actor.pid());
-  ASSERT_EQ(actor.run(), 0);
+  ASSERT_EQ(actor.run(), EACCES);
 }
 
 TEST(MountEnforcer, EmptyFilesystemListBlocksMount) {
@@ -151,9 +183,15 @@ TEST(MountEnforcer, EmptyFilesystemListBlocksMount) {
   ASSERT_EQ(actor.run(), EACCES);
 }
 
-TEST(MountEnforcer, FilesystemTypeListSelectsAllowedType) {
+TEST(MountEnforcer, FilesystemTypeListSelectsAllowedTypeAndAny) {
   Fixture fixture;
-  attach("mount.\"" + fixture.destination() + "\" = [\"tmpfs\"]\n");
+  attach(
+      "mount.\"" + fixture.destination() +
+      "\" = [\"tmpfs\"]\n"
+      "mount.\"" +
+      fixture.other() +
+      "\" = [\"any\"]\n"
+      "umount-any = true\n");
 
   Child actor([&] {
     const int allowed = mountFs(fixture.destination(), "tmpfs");
@@ -161,10 +199,17 @@ TEST(MountEnforcer, FilesystemTypeListSelectsAllowedType) {
       return 100 + allowed;
     }
     const int removed = unmount(fixture.destination());
-    return removed == 0 ? mountFs(fixture.destination(), "proc") : removed;
+    if (removed != 0) {
+      return 200 + removed;
+    }
+    const int denied = mountFs(fixture.destination(), "proc");
+    if (denied != EACCES) {
+      return 300 + denied;
+    }
+    return mountFs(fixture.other(), "proc");
   });
   enroll("svc", actor.pid());
-  ASSERT_EQ(actor.run(), EACCES);
+  ASSERT_EQ(actor.run(), 0);
 }
 
 TEST(MountEnforcer, LongestDestinationOverridesRootDenial) {
@@ -172,8 +217,7 @@ TEST(MountEnforcer, LongestDestinationOverridesRootDenial) {
   attach(
       "mount.\"" + fixture.destination() +
       "\" = [\"tmpfs\"]\n"
-      "mount.\"/\" = []\n"
-      "umount = true\n");
+      "mount.\"/\" = []\n");
 
   Child actor([&] {
     const int allowed = mountFs(fixture.destination(), "tmpfs");
@@ -183,23 +227,51 @@ TEST(MountEnforcer, LongestDestinationOverridesRootDenial) {
   ASSERT_EQ(actor.run(), EACCES);
 }
 
-TEST(MountEnforcer, UmountFalseBlocksUnmount) {
+TEST(MountEnforcer, MissingUmountPolicyDeniesUnmount) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
-  attach("umount = false\n");
+  attach("mount-any = true\n");
 
   Child actor([&] { return unmount(fixture.source()); });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), EACCES);
 }
 
-TEST(MountEnforcer, MoveMountRequiresDestinationPermission) {
+TEST(MountEnforcer, DeeperUmountAnyOverridesRootNone) {
+  Fixture fixture;
+  ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
+  ASSERT_EQ(mountFs(fixture.other(), "tmpfs"), 0);
+  attach(
+      "mount-any = true\n"
+      "[roles.svc.umount]\n"
+      "\"/\" = \"NONE\"\n"
+      "\"" +
+      fixture.source() + "\" = \"ANY\"\n");
+
+  Child actor([&] {
+    const int allowed = unmount(fixture.source());
+    return allowed == 0 ? unmount(fixture.other()) : 100 + allowed;
+  });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(MountEnforcer, UmountAnyAllowsUnmount) {
   Fixture fixture;
   ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
   attach(
-      "mount.\"" + fixture.destination() +
-      "\" = []\n"
-      "umount = true\n");
+      "mount-any = true\n"
+      "umount-any = true\n");
+
+  Child actor([&] { return unmount(fixture.source()); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(MountEnforcer, MoveMountRequiresDestinationPermission) {
+  Fixture fixture;
+  ASSERT_EQ(mountFs(fixture.source(), "tmpfs"), 0);
+  attach("mount.\"" + fixture.destination() + "\" = []\n");
 
   Child actor(
       [&] { return moveMount(fixture.source(), fixture.destination()); });
@@ -213,10 +285,14 @@ TEST(MountEnforcer, MoveMountRequiresSourceUmountPermission) {
   attach(
       "mount.\"" + fixture.destination() +
       "\" = [\"tmpfs\"]\n"
-      "umount = false\n");
+      "[roles.svc.umount]\n"
+      "\"/\" = \"NONE\"\n"
+      "\"" +
+      fixture.other() + "\" = \"ANY\"\n");
 
-  Child actor(
-      [&] { return moveMount(fixture.source(), fixture.destination()); });
+  Child actor([&] {
+    return moveAttachedMount(fixture.source(), fixture.destination());
+  });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), EACCES);
 }
@@ -227,10 +303,14 @@ TEST(MountEnforcer, MoveMountSucceedsWhenBothPermissionsAgree) {
   attach(
       "mount.\"" + fixture.destination() +
       "\" = [\"tmpfs\"]\n"
-      "umount = true\n");
+      "[roles.svc.umount]\n"
+      "\"/\" = \"NONE\"\n"
+      "\"" +
+      fixture.source() + "\" = \"any\"\n");
 
-  Child actor(
-      [&] { return moveMount(fixture.source(), fixture.destination()); });
+  Child actor([&] {
+    return moveAttachedMount(fixture.source(), fixture.destination());
+  });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), 0);
 }
