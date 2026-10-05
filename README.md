@@ -10,29 +10,23 @@ evaluated it will replace the internal closed source version.**
 
 BpfJailer uses eBPF LSM programs to put processes into jails, called pods, each
 bound to a role from a TOML policy. A pod is inherited across `fork` and
-`exec`, so everything a jailed process starts stays in the jail. The policy
-then decides what each role may do:
+`exec`. Optional policy features:
 
-- **Signed binaries** — a role can require that every binary it executes
-  carries an fs-verity signature from one of a named set of certificates.
-- **`kill` and `ptrace`** — which roles' processes a role may signal or attach
-  to.
+- **Signed binaries** — binaries executed must enable fs-verity and a
+  signature from a named set of certificates.
+- **`kill` and `ptrace`** — target roles/pods this may signal or attach to.
 - **`bpf`** — which roles' eBPF maps and programs a role may open, or whether it
-  may call `bpf(2)` at all. This is also what stops a jailed process from
-  editing the jailer's own maps.
+  may call `bpf(2)` at all.
 - **`keyring`** — which roles' fs-verity keyrings a role may add certificates
   to, or whether it may write keyrings at all.
-- **Filesystem paths** — read and write access using cached glob matchers
-  evaluated in PID 1's mount namespace.
-- **Executable code** — separate path rules for exec, set-id exec and
-  executable file mappings.
+- **Filesystem paths** — read and write access to filesystem paths.
+- **Executable code** — what paths can be execed or used as dlls.
 - **Kernel loading** — kernel module and kexec loading.
 - **IPC** — ownership-aware System V and POSIX message queues and shared
-  memory, plus variable-expanded name patterns for POSIX objects.
+  memory, and variable-expanded name patterns for POSIX objects.
 - **Unix sockets** — pathname and abstract-name policy for bind, connect and
   datagram destinations.
-- **Mounts** — destination and filesystem-type rules, unmount policy, and the
-  legacy and new mount APIs.
+- **Mounts** — destination and filesystem-type rules.
 
 Denials and lifecycle events are written to pinned ring buffers. `bpfjlog`
 prints the human-readable BPF diagnostics and structured events and follows
@@ -40,7 +34,7 @@ the ring buffers across a live policy replacement.
 
 A binary can claim a role through the `user.bpfj.policy.exec` xattr and is
 enrolled in it at exec time. Running processes can also be enrolled directly,
-and an unprivileged process can enroll itself through `bpfjsrv`.
+and an unprivileged process can enroll itself through `bpfjsrv`/`bpfjclient`.
 
 ## Components
 
@@ -60,23 +54,14 @@ and an unprivileged process can enroll itself through `bpfjsrv`.
   the `lsm=` boot parameter). BpfJailer is only tested on 6.16+, and older
   kernels are not supported.
 - clang (for BPF codegen), `bpftool`, and a C++20 compiler.
-- libbpf and libkeyutils, with headers.
+- libbpf
 - A checkout of [libarena](https://github.com/libbpf/libarena), which provides
-  the arena spin lock the BPF programs use. It ships as source, not as a
-  package.
+  the arena spin lock the BPF programs use. 
 - For signed builds: `openssl`, `fsverity` and `setfattr`, plus the static
   archives listed in the `Makefile` (`STATIC=1`).
 
 Set `LIBBPF_CFLAGS` / `LIBBPF_LIBS` if pkg-config cannot find libbpf. Point
 `LIBARENA` at the libarena checkout on every build:
-
-```
-git clone https://github.com/libbpf/libarena ~/libarena
-make LIBARENA=~/libarena
-```
-
-The build stops with these instructions if `LIBARENA` is unset or wrong. Run
-`make config` to see the resolved toolchain and flags.
 
 ## Building
 
@@ -147,8 +132,8 @@ are incompatible or the state cannot be copied safely.
 ## Policy
 
 ```toml
-base-role = "floor"           # optional: every process on the host starts here
-vars = ["vm_uuid"]            # the only variable names a pod may carry
+base-role = "floor"           # optional: enroll every process on the host
+vars = ["vm_uuid"]            # known variable names
 
 [certs]
 corp-ca = "MIIDXTCCAkWgAwIBAgIJAK..." # PEM or base64 DER certificate
@@ -260,97 +245,6 @@ useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 operation. `lkm-any`, `fs-any`, `verity-any`, `mount-any`, and `umount-any`
 are operation-specific fully-open forms.
 
-`paths` is an array of rules with a boolean `allow`. Allowed rules also require
-`access = "read-only"` or `access = "read-write"`; denied rules omit `access`.
-Matches are resolved in PID 1's mount namespace, the longest path wins, and a
-`$NAME` component expands a variable carried by the pod. Path results are
-cached by mount identity and pod variable bindings and invalidated across
-filesystem mutation. `fs-any` and `paths` are mutually exclusive.
-
-`exec-paths` is an independent executable-code gate written as an array of
-rules. Each rule has a boolean `allow`; an allowed rule also has a
-`permissions` list containing `exec`, `set-id`, or `shared-object`. A denied
-rule omits `permissions`. `set-id` requires `exec`, and `shared-object` covers
-executable file mappings. The longest matching path wins; at equal depth, the
-rule with more non-wildcard components wins. A bound `$NAME` component is
-specific, while a `*` component is not. An equally specific denial wins a tie.
-`exec-any = true` opens executable code without opening unrelated operations
-and is mutually exclusive with `exec-paths`. Ordinary `paths` access and
-fs-verity policy must also permit the operation.
-
-Every queue created by a jailed process is owned by its newest pod. A
-restricted process can acquire a queue from that exact pod, or from a role its
-list names; a queue with no known jailed owner is denied. System V ids can be
-copied as integers, so lookup, control, send, and receive are all checked.
-POSIX queues are tracked by the mqueuefs superblock device and inode number;
-`mq_open` and descriptor receipt are checked. The device number distinguishes
-the separate mqueuefs instances used by IPC namespaces, so the IPC namespace
-inode is not part of the key.
-
-`mq-posix-pattern` and `shm-posix-pattern` are arrays of `{ name, allow }`
-rules that override the corresponding owner-role list. Names begin with `/`,
-as they do at the POSIX syscall interface, and support literals, `?`, `*`, and
-`${NAME}` references to the acquiring pod's declared variables. Every
-referenced variable must be present on that pod or the pattern does not match.
-The most specific matching rule wins and an equally specific denial wins a
-tie; an unmatched name is denied. Name rules establish a restricted policy
-and cannot be combined with the corresponding `*-any`. They apply to opens,
-descriptor receipt, and the later queue or mapping operations checked by the
-enforcer. They do not apply to System V IPC.
-
-POSIX descriptors already held when a process is enrolled, or inherited by a
-fork inside a pod, are capabilities and are not revoked. Descriptor transfer
-through kernel paths that invoke `security_file_receive` (including Unix
-socket descriptor passing) is checked, but BpfJailer does not provide dynamic
-revocation of a descriptor after it has been acquired.
-
-Shared memory follows the same owner-pod and role-list model. System V lookup,
-control, and attach are checked. POSIX shared-memory objects are tracked by
-the `/dev/shm` tmpfs device and inode, and open, descriptor receipt, mapping,
-protection changes, truncation, and unlink are checked. Existing mappings are
-capabilities and cannot be revoked; direct loads and stores after enrollment
-do not pass through an LSM hook. `memfd_create` is not POSIX shared memory and
-is intentionally outside `shm-posix`. BpfJailer registers `/dev/shm` for each
-enrolled mount namespace; a replacement preserves those registrations.
-
-`unix-bind`, `unix-connect`, and `unix-dgram` are arrays of `{ path, allow }`
-rules whose `allow` value is boolean. Pathname rules start with `/`, apply
-recursively, and use the longest matching path; an equally specific denial
-wins. Missing and unmatched pathname policy denies, so a `true` entry opens its
-subtree. `unix-bind` gates creation of pathname sockets, `unix-connect` gates
-stream and seqpacket connection to the server pathname, and `unix-dgram` gates
-datagram sends to the destination pathname.
-
-Abstract socket names use systemd's spelling with a leading `@`. They support
-the same literals, `?`, `*`, and `${NAME}` variables as POSIX IPC patterns.
-The most specific matching pattern wins (then the longer pattern, then denial
-on a tie); if a referenced variable is not present on the pod, that pattern
-does not match. Unmatched abstract names are allowed. Abstract bind,
-stream/seqpacket connect, and datagram send are covered. A Unix socket
-descriptor that was connected before enrollment, inherited, or passed between
-processes remains a capability: this version does not re-check descriptor
-transfer between pods or revoke an already-connected socket.
-
-`mount` is an array of rules with a boolean `allow`. Allowed rules require a
-nonempty `filesystems` list, where `any` permits every filesystem type at that
-destination; denied rules omit `filesystems`. Rules apply recursively, the
-longest matching path wins, and unmatched destinations are denied.
-`mount-any` permits every destination and filesystem type instead. `umount`
-uses the same rule shape with a boolean `allow`. Its rules are recursive with
-the longest match winning; a `/` denial can close the tree while a `/run`
-grant opens one subtree. Unmatched sources are denied, while `umount-any`
-permits every source.
-`move_mount` requires mount permission for the destination and, when moving an
-attached mount, umount permission for the source. A detached mount tree has no
-attached source to remove, so only its destination is checked. `pivot_root`
-applies the same pair to the new and old paths. Legacy remounts are checked at
-their destination and relayed to `sb_remount`. A standalone new-mount-API
-reconfigure has no destination path in its LSM hook and therefore requires
-`mount-any`. Legacy bind and move mounts do not expose enough source
-information to apply all path and filesystem-type rules safely; typed bind
-destinations are denied, and legacy `MS_MOVE` requires `umount-any` for its
-source side.
-
 A process holding several roles is allowed an operation only if every role
 agrees. Roles are consulted newest first, and an `override-stacked` role
 answers for the roles under it. The target side of `kill` and `ptrace` ignores
@@ -362,12 +256,14 @@ list is refused, and with no `vars` at all no pod carries any. A `replace`
 carries each pod's variables across by name, and fails if the new policy no
 longer lists one a pod is carrying.
 
-A pod carries at most 16 variables and each value is at most 62 bytes.
-`bpfjctl enroll` accepts trailing `NAME=VALUE` arguments; `bpfjclient` uses a
-repeatable `-V NAME=VALUE`. Glob expansion currently examines only the first
-four variables in a pod, and a value longer than 39 bytes cannot match a
-`$NAME` or `${NAME}` reference even though it remains available as pod
-metadata.
+Various policy options take paths and globs. These all follow a common matcher.
+Variables are indicated with ${NAME} and wildcard ? and * are supported. This
+allows for matching options that are scoped to the variables within a specific
+pod, allowing for say, two containers, to have different filesystem permissions
+and isolation rules from eachother. All filesystem operations are currently
+performed in systemd's mount namespace to prevent mount manipulations from
+impacting the matcher. Files that cannot be resolved in that namespace are
+allowed. Choosing the matching namespace will come soon.
 
 See [POLICY.md](POLICY.md) for the complete option matrix, matching semantics
 and replacement behavior.
