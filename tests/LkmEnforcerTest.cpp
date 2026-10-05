@@ -34,6 +34,12 @@ constexpr std::string_view kPolicy =
 lkm-any = true
 
 [roles.denied]
+
+[roles.override]
+override-stacked = true
+lkm-any = true
+
+[roles.top]
 )toml";
 
 void attach(const std::string& toml) {
@@ -104,6 +110,29 @@ TEST(LkmEnforcer, EnforcesPoliciesWithOneAttachment) {
             Child actor(initModuleErrno);
             enroll("denied", actor.pid());
             enroll("unrestricted", actor.pid());
+            return actor.run();
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "an override ignores a denial under it",
+          [] {
+            Child actor(initModuleErrno);
+            enroll("denied", actor.pid());
+            enroll("override", actor.pid());
+            return actor.run();
+          }),
+      ENOEXEC);
+
+  ASSERT_EQ(
+      runIsolated(
+          "a denial above an override still denies",
+          [] {
+            Child actor(initModuleErrno);
+            enroll("denied", actor.pid());
+            enroll("override", actor.pid());
+            enroll("top", actor.pid());
             return actor.run();
           }),
       EPERM);

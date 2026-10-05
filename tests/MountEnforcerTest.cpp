@@ -337,3 +337,30 @@ TEST(MountEnforcer, RemountIsDeniedByFalseRule) {
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), EACCES);
 }
+
+TEST(MountEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  Fixture fixture;
+  const Policy policy = policyOf(
+      "[roles.denied.mount]\n\"" + fixture.destination() +
+      "\" = []\n"
+      "[roles.override]\noverride-stacked = true\n"
+      "[roles.override.mount]\n\"" +
+      fixture.destination() +
+      "\" = [\"tmpfs\"]\n"
+      "[roles.top.mount]\n\"" +
+      fixture.destination() + "\" = []\n");
+  loadJailer(policy);
+  ASSERT_OK(MountEnforcer::load(testPins(), policy));
+
+  Child allowed([&] { return mountFs(fixture.destination(), "tmpfs"); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+  ASSERT_EQ(unmount(fixture.destination()), 0);
+
+  Child denied([&] { return mountFs(fixture.destination(), "tmpfs"); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EACCES);
+}

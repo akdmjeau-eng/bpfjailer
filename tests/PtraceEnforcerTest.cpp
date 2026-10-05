@@ -42,6 +42,15 @@ ptrace-roles = ["worker"]
 [roles.worker]
 
 [roles.other]
+
+[roles.override-allow]
+override-stacked = true
+ptrace-roles = ["worker"]
+
+[roles.shield]
+override-stacked = true
+
+[roles.top]
 )toml";
 
 void attach(const std::string& toml) {
@@ -203,6 +212,43 @@ TEST(PtraceEnforcer, EnforcesPoliciesWithOneAttachment) {
             enroll("denied", ::getpid());
             Child inPod(tracemeErrno);
             return inPod.run();
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "an override bounds the actor policy walk",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("denied", ::getpid());
+            enroll("override-allow", ::getpid());
+            return attachErrno(target.pid());
+          }),
+      0);
+
+  ASSERT_EQ(
+      runIsolated(
+          "a denial above an actor override still denies",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("denied", ::getpid());
+            enroll("override-allow", ::getpid());
+            enroll("top", ::getpid());
+            return attachErrno(target.pid());
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "a target override does not hide target roles",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("shield", target.pid());
+            enroll("restricted", ::getpid());
+            return attachErrno(target.pid());
           }),
       EPERM);
 }

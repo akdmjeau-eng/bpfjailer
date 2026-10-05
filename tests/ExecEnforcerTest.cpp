@@ -375,3 +375,27 @@ TEST(ExecEnforcer, EveryStackedRoleMustAllowExec) {
 
   ASSERT_EQ(actor.run(), EACCES);
 }
+
+TEST(ExecEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  const std::string executable = truePath();
+  attach(
+      "[roles.denied]\n[roles.override]\noverride-stacked = true\n"
+      "[roles.top]\n" +
+      rule("denied", "/usr/lib64/*", false, false, true) +
+      rule("denied", executable, false, false, false) +
+      rule("override", "/usr/lib64/*", false, false, true) +
+      rule("override", executable, true, false, false) +
+      rule("top", "/usr/lib64/*", false, false, true) +
+      rule("top", executable, false, false, false));
+
+  Child allowed([&] { return runProgram(executable); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+
+  Child denied([&] { return runProgram(executable); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EACCES);
+}

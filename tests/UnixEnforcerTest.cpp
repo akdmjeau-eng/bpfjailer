@@ -378,3 +378,29 @@ TEST(UnixEnforcer, OperationsAreIndependent) {
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), 0);
 }
+
+TEST(UnixEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  Fixture fixture;
+  const Policy policy = policyOf(
+      "[roles.denied]\nunix-bind.\"" + fixture.socket() +
+      "\" = false\n"
+      "[roles.override]\noverride-stacked = true\nunix-bind.\"" +
+      fixture.socket() +
+      "\" = true\n"
+      "[roles.top]\nunix-bind.\"" +
+      fixture.socket() + "\" = false\n");
+  loadJailer(policy);
+  ASSERT_OK(UnixEnforcer::load(testPins(), policy));
+
+  Child allowed([&] { return bindPath(fixture.socket()); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+  ASSERT_EQ(::unlink(fixture.socket().c_str()), 0);
+
+  Child denied([&] { return bindPath(fixture.socket()); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EACCES);
+}

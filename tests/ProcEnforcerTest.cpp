@@ -48,6 +48,15 @@ proc-roles = ["worker"]
 [roles.worker]
 
 [roles.other]
+
+[roles.override-reader]
+override-stacked = true
+proc-roles = ["worker"]
+
+[roles.shield]
+override-stacked = true
+
+[roles.top]
 )toml";
 
 void attach(const std::string& toml) {
@@ -264,6 +273,43 @@ TEST(ProcEnforcer, EnforcesPodRoleAndAnyPolicies) {
           [] {
             Child target;
             enroll("other", target.pid());
+            enroll("reader", ::getpid());
+            return openProc(target.pid());
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "an override bounds the actor policy walk",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("default-deny", ::getpid());
+            enroll("override-reader", ::getpid());
+            return openProc(target.pid());
+          }),
+      0);
+
+  ASSERT_EQ(
+      runIsolated(
+          "a denial above an actor override still denies",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("default-deny", ::getpid());
+            enroll("override-reader", ::getpid());
+            enroll("top", ::getpid());
+            return openProc(target.pid());
+          }),
+      EPERM);
+
+  ASSERT_EQ(
+      runIsolated(
+          "a target override does not hide target roles",
+          [] {
+            Child target;
+            enroll("worker", target.pid());
+            enroll("shield", target.pid());
             enroll("reader", ::getpid());
             return openProc(target.pid());
           }),

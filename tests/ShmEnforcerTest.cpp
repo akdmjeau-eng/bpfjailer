@@ -288,6 +288,45 @@ shm-sysv-roles = ["owner"]
   ASSERT_EQ(::shmctl(id, IPC_RMID, nullptr), 0);
 }
 
+TEST(ShmEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  const key_t key = uniqueKey();
+  attach(R"toml([roles]
+
+[roles.owner]
+any = true
+
+[roles.denied]
+
+[roles.override]
+override-stacked = true
+shm-sysv-roles = ["owner"]
+
+[roles.top]
+)toml");
+
+  Child creator([key] { return createSysv(key); });
+  enroll("owner", creator.pid());
+  ASSERT_EQ(creator.run(), 0);
+  const int id = ::shmget(key, 0, 0);
+  ASSERT(id >= 0);
+  Child cleanup([id] {
+    errno = 0;
+    return ::shmctl(id, IPC_RMID, nullptr) == 0 ? 0 : errno;
+  });
+
+  Child allowed([key] { return acquireSysv(key); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+
+  Child denied([key] { return acquireSysv(key); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EPERM);
+  ASSERT_EQ(cleanup.run(), 0);
+}
+
 TEST(ShmEnforcer, RestrictedSysvPolicyRejectsAnUnknownOwner) {
   const key_t key = uniqueKey();
   const int id = ::shmget(key, kSegmentSize, IPC_CREAT | IPC_EXCL | 0600);

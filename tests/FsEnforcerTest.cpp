@@ -140,6 +140,32 @@ fs-any = true
   ASSERT_EQ(actor.run(), 0);
 }
 
+TEST(FsEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  Fixture fixture;
+  const Policy policy = policyOf(
+      "[roles.denied.paths]\n\"" + fixture.file() +
+      "\" = \"NONE\"\n"
+      "[roles.override]\noverride-stacked = true\n"
+      "[roles.override.paths]\n\"" +
+      fixture.file() +
+      "\" = \"RDONLY\"\n"
+      "[roles.top.paths]\n\"" +
+      fixture.file() + "\" = \"NONE\"\n");
+  loadJailer(policy);
+  ASSERT_OK(FsEnforcer::load(testPins(), policy));
+
+  Child allowed([&] { return openErrno(fixture.file(), O_RDONLY); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+
+  Child denied([&] { return openErrno(fixture.file(), O_RDONLY); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EACCES);
+}
+
 TEST(FsEnforcer, UnenrolledFilesystemTrafficDoesNotUseTheHeap) {
   Fixture fixture;
   attach(rule(fixture.file(), std::nullopt));

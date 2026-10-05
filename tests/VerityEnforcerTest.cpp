@@ -455,6 +455,30 @@ verity-any = true
   ASSERT_EQ(actor.run(), 0);
 }
 
+TEST(VerityEnforcer, OverrideStackedBoundsTheActorPolicyWalk) {
+  attach(R"toml([roles]
+
+[roles.denied]
+
+[roles.override]
+override-stacked = true
+verity-any = true
+
+[roles.top]
+)toml");
+
+  Child allowed([] { return runProgram("/bin/true"); });
+  enroll("denied", allowed.pid());
+  enroll("override", allowed.pid());
+  ASSERT_EQ(allowed.run(), 0);
+
+  Child denied([] { return runProgram("/bin/true"); });
+  enroll("denied", denied.pid());
+  enroll("override", denied.pid());
+  enroll("top", denied.pid());
+  ASSERT_EQ(denied.run(), EPERM);
+}
+
 TEST(VerityEnforcer, AnUnjailedProcessMayStillExec) {
   attach(R"toml([roles]
 
