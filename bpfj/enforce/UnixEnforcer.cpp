@@ -2,7 +2,6 @@
 
 #include "bpfj/enforce/UnixEnforcer.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -30,11 +29,6 @@ namespace bpfjailer {
 namespace {
 
 using Rules = std::map<std::string, bool>;
-
-[[nodiscard]] bool configured(const RolePolicy& role) noexcept {
-  return !role.unixBind.empty() || !role.unixConnect.empty() ||
-      !role.unixDgram.empty();
-}
 
 [[nodiscard]] std::uint8_t pathSpecificity(std::string_view path) noexcept {
   std::uint8_t specificity = 0;
@@ -139,10 +133,7 @@ Expected<> compileAbstract(
 Expected<> UnixEnforcer::load(
     const PinConfig& cfg,
     const Policy& policy) noexcept {
-  if (std::none_of(
-          policy.roles.begin(), policy.roles.end(), [](const auto& item) {
-            return configured(item.second);
-          })) {
+  if (policy.roles.empty()) {
     return unit;
   }
   if (auto res = pins::makeTree(cfg); !res) {
@@ -193,9 +184,6 @@ Expected<> UnixEnforcer::load(
       skel.bss().bpfj_heap_ctrl->role_policies);
 
   for (const auto& [name, role] : policy.roles) {
-    if (!configured(role)) {
-      continue;
-    }
     auto foundPolicy = lookupRolePolicy(publishedPolicies, name);
     if (!foundPolicy) {
       return makeUnexpected(foundPolicy.error());

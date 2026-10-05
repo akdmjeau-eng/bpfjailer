@@ -53,11 +53,11 @@ Filesystem, Unix-socket and mount matchers share the cached file-matching machin
 
 ## Policy semantics
 
-Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix path rules are opt-in filters where an unmatched operation is allowed. Mount and unmount are default-deny when absent or unmatched, with `mount-any` and `umount-any` as their open forms. Mount filesystem lists accept `ANY`, and hierarchical umount rules map paths to `NONE` or `ANY`; both values also accept lowercase.
+Most operation gates are denied when absent. The `*-pod` or `keyring-own` options grant the local scope, `*-roles` adds named roles, and `*-any` opens one operation. `any: true` opens operations that have no narrower option. Unix pathname, mount, and unmount rules are default-deny when absent or unmatched; abstract Unix-socket names remain opt-in filters where an unmatched name is allowed. `mount-any` and `umount-any` are the open forms for mount operations. Mount filesystem lists accept `ANY`, and hierarchical umount rules map paths to `NONE` or `ANY`; both values also accept lowercase.
 
 Executable-code policy is separate from ordinary file access and fs-verity. `exec-paths` controls exec, set-id exec and executable mappings; `exec-any: true` opens those operations. Proc uses the historical fully-open spelling `any-proc`, not `proc-any`.
 
-`paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix maps need an explicit root denial when used as allowlists; mount and unmount matchers do not.
+`paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix pathname, mount, and unmount matchers do not need an explicit root denial; abstract Unix maps do.
 
 Every walk over a task's roles requires each role to permit, so one denial denies. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
 

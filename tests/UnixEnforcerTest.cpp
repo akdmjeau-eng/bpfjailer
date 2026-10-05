@@ -232,11 +232,37 @@ TEST(UnixEnforcer, LoadPinsEveryHook) {
   ASSERT(linkPinned("bpfj_unix_dgram_send_abstract"));
 }
 
-TEST(UnixEnforcer, UnmatchedPathIsAllowed) {
+TEST(UnixEnforcer, UnmatchedPathIsDenied) {
   Fixture fixture;
   attach("unix-bind.\"" + fixture.socket() + "\" = false\n");
 
   Child actor([&] { return bindPath(fixture.other()); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(UnixEnforcer, MissingPathPolicyIsDenied) {
+  Fixture fixture;
+  attach("");
+
+  Child actor([&] { return bindPath(fixture.socket()); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), EACCES);
+}
+
+TEST(UnixEnforcer, MissingAbstractPolicyIsAllowed) {
+  attach("");
+
+  Child actor([] { return bindAbstract("bpfj-unconfigured"); });
+  enroll("svc", actor.pid());
+  ASSERT_EQ(actor.run(), 0);
+}
+
+TEST(UnixEnforcer, AnyAllowsUnconfiguredPathOperation) {
+  Fixture fixture;
+  attach("any = true\n");
+
+  Child actor([&] { return bindPath(fixture.socket()); });
   enroll("svc", actor.pid());
   ASSERT_EQ(actor.run(), 0);
 }
@@ -336,7 +362,9 @@ TEST(UnixEnforcer, AbstractDatagramPolicyUsesDestinationName) {
 
 TEST(UnixEnforcer, OperationsAreIndependent) {
   Fixture fixture;
-  attach("unix-connect.\"" + fixture.socket() + "\" = false\n");
+  attach(
+      "unix-bind.\"" + fixture.socket() + "\" = true\nunix-connect.\"" +
+      fixture.socket() + "\" = false\n");
 
   Child actor([&] { return bindPath(fixture.socket()); });
   enroll("svc", actor.pid());

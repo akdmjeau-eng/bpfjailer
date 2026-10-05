@@ -210,10 +210,10 @@ Most operation gates are denied when a role has no corresponding option. The
 owner roles, and `*-any` opens that operation completely. `keyring-own` is the
 role-scoped counterpart because fs-verity keyrings belong to roles rather than
 pods. `enroll-roles` names the only roles bpfjsrv may add; without it enrollment
-through bpfjsrv is denied. Unix-socket maps remain opt-in filters: an
-unconfigured or unmatched operation is allowed, so use an explicit root deny
-when the map is intended as an allowlist. Mount and unmount operations are
-denied when their option is absent or no path matches.
+through bpfjsrv is denied. Unix pathname, mount, and unmount operations are
+denied when their option is absent or no path matches. Abstract Unix-socket
+names remain opt-in filters, so an unconfigured or unmatched abstract name is
+allowed.
 
 The fully open proc option is named `any-proc`; the other ownership families
 use the `*-any` order.
@@ -276,9 +276,9 @@ enrolled mount namespace; a replacement preserves those registrations.
 
 `unix-bind`, `unix-connect`, and `unix-dgram` are maps from Unix-socket names
 to booleans. Pathname rules start with `/`, apply recursively, and use the
-longest matching path; an equally specific denial wins. An unmatched operation
-is allowed, so `/: false` is the usual default-deny rule and a deeper `true`
-entry opens a subtree. `unix-bind` gates creation of pathname sockets,
+longest matching path; an equally specific denial wins. Missing and unmatched
+pathname policy denies, so a `true` entry opens its subtree. `unix-bind` gates
+creation of pathname sockets,
 `unix-connect` gates stream and seqpacket connection to the server pathname,
 and `unix-dgram` gates datagram sends to the destination pathname.
 
@@ -286,8 +286,9 @@ Abstract socket names use systemd's spelling with a leading `@`. They support
 the same literals, `?`, `*`, and `${NAME}` variables as POSIX IPC patterns.
 The most specific matching pattern wins (then the longer pattern, then denial
 on a tie); if a referenced variable is not present on the pod, that pattern
-does not match. Abstract bind, stream/seqpacket connect, and datagram send are
-covered. A Unix socket descriptor that was connected before enrollment,
+does not match. Unmatched abstract names are allowed. Abstract bind,
+stream/seqpacket connect, and datagram send are covered. A Unix socket
+descriptor that was connected before enrollment,
 inherited, or passed between processes remains a capability: this version does
 not re-check descriptor transfer between pods or revoke an already-connected
 socket.

@@ -51,7 +51,7 @@ static __noinline bool bpfj_unix_path_allowed(
       best_allowed = entry->allowed[operation];
     }
   }
-  return best_allowed != 0;
+  return best_allowed > 0;
 }
 
 static __always_inline int bpfj_unix_deny(
@@ -164,7 +164,7 @@ static __always_inline int bpfj_unix_enforce_path(
 
   BPFJ_FILE_MATCH_CACHED_ALLOC(state);
   if (!state) {
-    return 0;
+    return -EACCES;
   }
   __u32 num_pods = pid_data->num_pods;
   if (num_pods > BPFJ_MAX_POD_PER_PID) {
@@ -185,24 +185,22 @@ static __always_inline int bpfj_unix_enforce_path(
     const struct bpfj_role_policy __arena* policy = bpfj_pod_policy(pod);
     struct bpfj_file_matcher __arena* matcher =
         policy ? policy->unix_path_matcher : NULL;
-    if (matcher) {
-      const long count = BPFJ_FILE_MATCH_CACHED(
-          state,
-          matcher,
-          &bpfj_unix_mount_cache,
-          dentry,
-          &uuid,
-          bpfj_file_match_cached_bind_var_array,
-          &pod->var_array);
-      if (count > 0 && !bpfj_unix_path_allowed(state, operation, count)) {
-        return bpfj_unix_deny(pod, task, &role);
-      }
-      if (count == -E2BIG) {
-        return bpfj_unix_deny(pod, task, &role);
-      }
-      if (count < 0 && count != -EXDEV) {
+    if (!matcher) {
+      return bpfj_unix_deny(pod, task, &role);
+    }
+    const long count = BPFJ_FILE_MATCH_CACHED(
+        state,
+        matcher,
+        &bpfj_unix_mount_cache,
+        dentry,
+        &uuid,
+        bpfj_file_match_cached_bind_var_array,
+        &pod->var_array);
+    if (count <= 0 || !bpfj_unix_path_allowed(state, operation, count)) {
+      if (count < 0 && count != -EXDEV && count != -E2BIG) {
         BPFJ_LOG_ERR(-count, "Unix socket path match failed");
       }
+      return bpfj_unix_deny(pod, task, &role);
     }
     if (bpfj_is_override(pod)) {
       break;

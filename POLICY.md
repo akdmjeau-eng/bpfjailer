@@ -65,7 +65,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | POSIX queues | `mq-posix-pod`, `mq-posix-roles`, `mq-posix-any`, `mq-posix-pattern` | Gate open, descriptor receipt and queue operations by owner or name pattern. |
 | System V shared memory | `shm-sysv-pod`, `shm-sysv-roles`, `shm-sysv-any` | Gate lookup, control and attach by tracked owner. |
 | POSIX shared memory | `shm-posix-pod`, `shm-posix-roles`, `shm-posix-any`, `shm-posix-pattern` | Gate open, receipt, mapping, protection, truncation and unlink by owner or name pattern. |
-| Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | Boolean maps for pathname or abstract socket names. Unmatched operations are allowed. |
+| Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | Boolean maps for pathname or abstract socket names. Missing or unmatched pathname policy denies; unmatched abstract names are allowed. |
 | Mounts | `mount`, `mount-any`, `umount`, `umount-any` | `mount` maps destination patterns to filesystem-type allowlists and `umount` maps source patterns to `NONE` or `ANY`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
 | Enrollment | `unpriv-enroll`, `enroll-roles`, `enroll-any` | Open a role to a non-root caller and constrain which further roles a caller may request through `bpfjsrv`. |
 
@@ -112,10 +112,12 @@ allow = ["shared-object"]
 
 Unix pathname keys begin with `/` and apply recursively. Abstract names begin
 with `@` and use glob matching. The most specific matching rule wins and an
-equally specific denial wins a tie. An unmatched Unix rule is allowed, so a
-typical allowlist includes `/: false` for pathnames or an abstract catch-all
-denial plus more specific grants. Already-connected, inherited or transferred
-Unix socket descriptors remain capabilities and are not dynamically revoked.
+equally specific denial wins a tie. Missing or unmatched pathname policy
+denies, so a `true` rule opens its subtree. Unmatched abstract names are
+allowed, so an abstract-name allowlist needs a catch-all denial plus more
+specific grants. `any: true` opens pathname operations that have no explicit
+Unix operation table. Already-connected, inherited or transferred Unix socket
+descriptors remain capabilities and are not dynamically revoked.
 
 `mount` values are arrays of filesystem type names. Missing and unmatched
 mount policy denies, an empty array explicitly denies a matched destination,

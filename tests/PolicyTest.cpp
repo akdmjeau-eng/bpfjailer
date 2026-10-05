@@ -458,6 +458,9 @@ any = true
   ASSERT(role.lkmAny);
   ASSERT(role.mountAny);
   ASSERT(role.umountAny);
+  ASSERT_EQ(role.unixBind.at("/"), true);
+  ASSERT_EQ(role.unixConnect.at("/"), true);
+  ASSERT_EQ(role.unixDgram.at("/"), true);
 }
 
 TEST(Policy, ScopedOptionOverridesAny) {
@@ -554,6 +557,22 @@ any = true
   ASSERT(!role.mountAny);
   ASSERT(role.hasUmount);
   ASSERT(!role.umountAny);
+}
+
+TEST(Policy, UnixPathRulesOverrideAny) {
+  auto policy = Policy::parse(R"toml([roles.sandbox]
+any = true
+
+[roles.sandbox.unix-bind]
+"/run/only" = true
+)toml");
+  ASSERT_OK(policy);
+
+  const auto& role = policy->roles.at("sandbox");
+  ASSERT_EQ(role.unixBind.size(), std::size_t{1});
+  ASSERT_EQ(role.unixBind.at("/run/only"), true);
+  ASSERT_EQ(role.unixConnect.at("/"), true);
+  ASSERT_EQ(role.unixDgram.at("/"), true);
 }
 
 TEST(Policy, ExecPathsOverrideAny) {

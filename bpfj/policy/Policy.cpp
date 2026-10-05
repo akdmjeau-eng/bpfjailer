@@ -887,6 +887,15 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         policy.enrollMode,
         findChild(*body, kEnrollRoles) || findChild(*body, kEnrollAny));
     if (policy.any) {
+      if (!findChild(*body, kUnixBind)) {
+        policy.unixBind.emplace("/", true);
+      }
+      if (!findChild(*body, kUnixConnect)) {
+        policy.unixConnect.emplace("/", true);
+      }
+      if (!findChild(*body, kUnixDgram)) {
+        policy.unixDgram.emplace("/", true);
+      }
       if (!findChild(*body, kMount) && !findChild(*body, kMountAny)) {
         policy.mountAny = true;
       }

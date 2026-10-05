@@ -50,7 +50,8 @@ struct RolePolicy {
 
   /// @brief Unix-socket pathname or abstract-name rules. Pathname matches are
   /// recursive with the longest path winning; abstract names (spelled with a
-  /// leading '@') are globs. An unmatched operation is allowed.
+  /// leading '@') are globs. Missing or unmatched pathname rules deny, while
+  /// unmatched abstract names are allowed.
   std::map<std::string, bool> unixBind;
   std::map<std::string, bool> unixConnect;
   std::map<std::string, bool> unixDgram;
