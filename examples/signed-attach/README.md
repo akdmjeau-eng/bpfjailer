@@ -49,16 +49,41 @@ bpf-pod = true
 untracked-bpf = true
 keyring-own = true
 
-[roles.floor.paths]
-"/" = "RDWR"
-"/bin" = "RDONLY"
-"/lib" = "RDONLY"
-"/lib64" = "RDONLY"
-"/sbin" = "RDONLY"
-"/usr" = "RDONLY"
-"<build directory>" = "RDONLY"
-"<example directory>" = "RDONLY"
-"/sys/fs/bpf/bpfj-pins" = "NONE"
+[[roles.floor.paths]]
+path = "/"
+allow = "RDWR"
+
+[[roles.floor.paths]]
+path = "/bin"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "/lib"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "/lib64"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "/sbin"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "/usr"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "<build directory>"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "<example directory>"
+allow = "RDONLY"
+
+[[roles.floor.paths]]
+path = "/sys/fs/bpf/bpfj-pins"
+allow = "NONE"
 
 [roles.bpfjailer]
 any = true

@@ -169,7 +169,6 @@ mq-posix-pattern = ["service-${vm_uuid}-*"]
 shm-sysv-pod = true           # only SysV SHM from its own pod
 shm-posix-pod = true          # only POSIX SHM from its own pod
 shm-posix-pattern = ["service-${vm_uuid}-*"]
-umount = {"/" = "NONE", "/srv/data" = "ANY"}
 keyring-own = true            # only its own role's keyring
 
 [[roles.webserver.exec-paths]]
@@ -180,25 +179,49 @@ allow = ["exec"]
 path = "/usr/lib"
 allow = ["shared-object"]
 
-[roles.webserver.paths]       # cached path glob policy
-"/usr" = "RDONLY"
-"/etc" = "RDONLY"
-"/srv/web" = "RDWR"
-"/" = "NONE"
+[[roles.webserver.paths]]     # cached path policy
+path = "/"
+allow = "NONE"
 
-[roles.webserver.unix-bind]   # pathname bind rules, longest path wins
-"/run/webserver" = true
-"/" = false
+[[roles.webserver.paths]]
+path = "/usr"
+allow = "RDONLY"
 
-[roles.webserver.unix-connect]
-"@control-${vm_uuid}" = true
+[[roles.webserver.paths]]
+path = "/etc"
+allow = "RDONLY"
 
-[roles.webserver.unix-dgram]
-"/dev/log" = true
+[[roles.webserver.paths]]
+path = "/srv/web"
+allow = "RDWR"
 
-[roles.webserver.mount]       # destination -> permitted filesystem types
-"/srv/data" = ["ext4", "xfs"]
-"/run/webserver" = ["ANY"]   # every filesystem type at this destination
+[[roles.webserver.unix-bind]] # pathname bind rule
+path = "/run/webserver"
+allow = true
+
+[[roles.webserver.unix-connect]]
+path = "@control-${vm_uuid}"
+allow = true
+
+[[roles.webserver.unix-dgram]]
+path = "/dev/log"
+allow = true
+
+[[roles.webserver.mount]]     # destination and permitted filesystem types
+path = "/srv/data"
+allow = ["ext4", "xfs"]
+
+[[roles.webserver.mount]]
+path = "/run/webserver"
+allow = ["ANY"]               # every filesystem type at this destination
+
+[[roles.webserver.umount]]
+path = "/"
+allow = "NONE"
+
+[[roles.webserver.umount]]
+path = "/srv/data"
+allow = "ANY"
 
 [roles.sandbox]
 unpriv-enroll = true          # every unspecified operation remains denied
@@ -224,11 +247,12 @@ useful for a pod used only for attribution. A scoped option such as `bpf-pod`,
 operation. `lkm-any`, `fs-any`, `verity-any`, `mount-any`, and `umount-any`
 are operation-specific fully-open forms.
 
-`paths` maps path patterns to `NONE`, `RDONLY`, or `RDWR`. Matches
-are resolved in PID 1's mount namespace, the longest path wins, and a `$NAME`
-component expands a variable carried by the pod. Path results are cached by
-mount identity and pod variable bindings and invalidated across filesystem
-mutation. `fs-any` and `paths` are mutually exclusive.
+`paths` is an array of `{ path, allow }` rules, where `allow` is `NONE`,
+`RDONLY`, or `RDWR`. Matches are resolved in PID 1's mount namespace, the
+longest path wins, and a `$NAME` component expands a variable carried by the
+pod. Path results are cached by mount identity and pod variable bindings and
+invalidated across filesystem mutation. `fs-any` and `paths` are mutually
+exclusive.
 
 `exec-paths` is an independent executable-code gate written as an array of
 rules. Each rule has a `path` and an `allow` list containing `exec`, `set-id`,
@@ -274,13 +298,13 @@ do not pass through an LSM hook. `memfd_create` is not POSIX shared memory and
 is intentionally outside `shm-posix`. BpfJailer registers `/dev/shm` for each
 enrolled mount namespace; a replacement preserves those registrations.
 
-`unix-bind`, `unix-connect`, and `unix-dgram` are maps from Unix-socket names
-to booleans. Pathname rules start with `/`, apply recursively, and use the
-longest matching path; an equally specific denial wins. Missing and unmatched
-pathname policy denies, so a `true` entry opens its subtree. `unix-bind` gates
-creation of pathname sockets,
-`unix-connect` gates stream and seqpacket connection to the server pathname,
-and `unix-dgram` gates datagram sends to the destination pathname.
+`unix-bind`, `unix-connect`, and `unix-dgram` are arrays of `{ path, allow }`
+rules whose `allow` value is boolean. Pathname rules start with `/`, apply
+recursively, and use the longest matching path; an equally specific denial
+wins. Missing and unmatched pathname policy denies, so a `true` entry opens its
+subtree. `unix-bind` gates creation of pathname sockets, `unix-connect` gates
+stream and seqpacket connection to the server pathname, and `unix-dgram` gates
+datagram sends to the destination pathname.
 
 Abstract socket names use systemd's spelling with a leading `@`. They support
 the same literals, `?`, `*`, and `${NAME}` variables as POSIX IPC patterns.
@@ -288,20 +312,20 @@ The most specific matching pattern wins (then the longer pattern, then denial
 on a tie); if a referenced variable is not present on the pod, that pattern
 does not match. Unmatched abstract names are allowed. Abstract bind,
 stream/seqpacket connect, and datagram send are covered. A Unix socket
-descriptor that was connected before enrollment,
-inherited, or passed between processes remains a capability: this version does
-not re-check descriptor transfer between pods or revoke an already-connected
-socket.
+descriptor that was connected before enrollment, inherited, or passed between
+processes remains a capability: this version does not re-check descriptor
+transfer between pods or revoke an already-connected socket.
 
-`mount` maps destination paths to lists of filesystem type names. Rules apply
-recursively, the longest matching path wins, and unmatched destinations are
-denied. An empty list explicitly denies every filesystem type at a matched
-path, while `ANY` (or `any`) in the list permits every filesystem type there.
-`mount-any` permits every destination and filesystem type instead. `umount`
-maps source paths to `NONE` or `ANY` (also accepted in lowercase). Its rules
-are recursive with the longest match winning, so `"/" = "NONE"` can close the
-tree while `"/run" = "ANY"` opens one subtree. Unmatched sources are denied,
-while `umount-any` permits every source.
+`mount` is an array of `{ path, allow }` rules whose `allow` value is a list
+of filesystem type names. Rules apply recursively, the longest matching path
+wins, and unmatched destinations are denied. An empty list explicitly denies
+every filesystem type at a matched path, while `ANY` (or `any`) in the list
+permits every filesystem type there. `mount-any` permits every destination and
+filesystem type instead. `umount` uses the same rule shape with `NONE` or `ANY`
+in `allow` (also accepted in lowercase). Its rules are recursive with the
+longest match winning; a `/` denial can close the tree while a `/run` grant
+opens one subtree. Unmatched sources are denied, while `umount-any` permits
+every source.
 `move_mount` requires mount permission for the destination and, when moving an
 attached mount, umount permission for the source. A detached mount tree has no
 attached source to remove, so only its destination is checked. `pivot_root`

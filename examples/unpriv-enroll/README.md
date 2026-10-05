@@ -51,10 +51,17 @@ shm-posix-pattern = ["/bpfj-example-*"]
 path = "/"
 allow = ["exec", "shared-object"]
 
-[roles.sandbox.unix-bind]
-"/" = false
-"@*" = false
-"@bpfj-sandbox-demo" = true
+[[roles.sandbox.unix-bind]]
+path = "/"
+allow = false
+
+[[roles.sandbox.unix-bind]]
+path = "@*"
+allow = false
+
+[[roles.sandbox.unix-bind]]
+path = "@bpfj-sandbox-demo"
+allow = true
 ```
 
 `unpriv-enroll: true` is the only reason a non-root caller may take this role.

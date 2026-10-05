@@ -17,11 +17,21 @@ any = true
 [roles.worker]
 kill-pod = true
 
-[roles.worker.paths]
-"/usr" = "RDONLY"
-"/etc" = "RDONLY"
-"/srv/$service" = "RDWR"
-"/" = "NONE"
+[[roles.worker.paths]]
+path = "/"
+allow = "NONE"
+
+[[roles.worker.paths]]
+path = "/usr"
+allow = "RDONLY"
+
+[[roles.worker.paths]]
+path = "/etc"
+allow = "RDONLY"
+
+[[roles.worker.paths]]
+path = "/srv/$service"
+allow = "RDWR"
 ```
 
 `base-role` is applied to every process that exists when the jailer attaches;
@@ -52,7 +62,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 
 | Family | Options | Behavior |
 |---|---|---|
-| Files | `paths`, `fs-any` | `paths` maps path patterns to `NONE`, `RDONLY`, or `RDWR`; it is mutually exclusive with `fs-any`. Leaving both unset denies access. |
+| Files | `paths`, `fs-any` | `{ path, allow }` rules with `NONE`, `RDONLY`, or `RDWR`; mutually exclusive with `fs-any`. Leaving both unset denies access. |
 | Executable code | `exec-paths`, `exec-any` | `exec-paths` is an array of path rules for exec, set-id exec and executable mappings. `exec-any` opens all three. Leaving both unset denies executable code unless `any: true` applies. |
 | Binary integrity | `enforce-binary-certs`, `verity-any`, `min-seq` | Require an fs-verity signature from named certificates, bypass that integrity check, and optionally reject signed binaries below an anti-rollback sequence floor. `min-seq` requires `enforce-binary-certs`. |
 | BPF | `bpf-pod`, `bpf-roles`, `bpf-any`, `untracked-bpf` | Gate `bpf(2)` and opening maps/programs by creator ownership. `untracked-bpf` suppresses ownership for objects created by the role and requires a BPF grant. |
@@ -65,8 +75,8 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | POSIX queues | `mq-posix-pod`, `mq-posix-roles`, `mq-posix-any`, `mq-posix-pattern` | Gate open, descriptor receipt and queue operations by owner or name pattern. |
 | System V shared memory | `shm-sysv-pod`, `shm-sysv-roles`, `shm-sysv-any` | Gate lookup, control and attach by tracked owner. |
 | POSIX shared memory | `shm-posix-pod`, `shm-posix-roles`, `shm-posix-any`, `shm-posix-pattern` | Gate open, receipt, mapping, protection, truncation and unlink by owner or name pattern. |
-| Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | Boolean maps for pathname or abstract socket names. Missing or unmatched pathname policy denies; unmatched abstract names are allowed. |
-| Mounts | `mount`, `mount-any`, `umount`, `umount-any` | `mount` maps destination patterns to filesystem-type allowlists and `umount` maps source patterns to `NONE` or `ANY`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
+| Unix sockets | `unix-bind`, `unix-connect`, `unix-dgram` | `{ path, allow }` rules with boolean `allow` values for pathname or abstract socket names. Missing or unmatched pathname policy denies; unmatched abstract names are allowed. |
+| Mounts | `mount`, `mount-any`, `umount`, `umount-any` | `{ path, allow }` rules where mount `allow` is a filesystem-type list and umount `allow` is `NONE` or `ANY`. Missing or unmatched policy denies; the `*-any` options open the corresponding operation. |
 | Enrollment | `unpriv-enroll`, `enroll-roles`, `enroll-any` | Open a role to a non-root caller and constrain which further roles a caller may request through `bpfjsrv`. |
 
 Role and certificate references are validated when the policy is parsed.
@@ -80,9 +90,10 @@ File, pathname Unix-socket and mount matching is evaluated against the global
 snapshot of PID 1's mount namespace. Results are cached by mount identity and
 pod variable bindings and are invalidated by relevant filesystem changes.
 
-`paths` rules apply recursively and the longest matching path wins. They
-support literal components, a `*` component, and `$NAME` components with an
-optional glob suffix. `*` matches one component; recursive `**` is not
+Every path-based policy is an array of rule tables with `path` and `allow`
+fields. `paths` rules apply recursively and the longest matching path wins.
+They support literal components, a `*` component, and `$NAME` components with
+an optional glob suffix. `*` matches one component; recursive `**` is not
 supported because a directory rule already covers its subtree. The variable
 must be declared by top-level `vars` and present on the pod for the dependent
 pattern to match. `NONE` denies access, `RDONLY` permits reads, and `RDWR`
@@ -110,19 +121,19 @@ path = "/usr/lib"
 allow = ["shared-object"]
 ```
 
-Unix pathname keys begin with `/` and apply recursively. Abstract names begin
-with `@` and use glob matching. The most specific matching rule wins and an
-equally specific denial wins a tie. Missing or unmatched pathname policy
-denies, so a `true` rule opens its subtree. Unmatched abstract names are
+Unix rule paths begin with `/` for pathnames and apply recursively. Abstract
+names begin with `@` and use glob matching. The most specific matching rule
+wins and an equally specific denial wins a tie. Missing or unmatched pathname
+policy denies, so a `true` rule opens its subtree. Unmatched abstract names are
 allowed, so an abstract-name allowlist needs a catch-all denial plus more
 specific grants. `any: true` opens pathname operations that have no explicit
 Unix operation table. Already-connected, inherited or transferred Unix socket
 descriptors remain capabilities and are not dynamically revoked.
 
-`mount` values are arrays of filesystem type names. Missing and unmatched
+For `mount`, `allow` is an array of filesystem type names. Missing and unmatched
 mount policy denies, an empty array explicitly denies a matched destination,
 and `ANY` or `any` permits every filesystem type at that destination.
-`mount-any` permits every destination and type. `umount` maps source paths to
+`mount-any` permits every destination and type. For `umount`, `allow` is
 `NONE` or `ANY`, with lowercase also accepted. Its rules apply recursively and
 the longest match wins; missing or unmatched policy denies. `umount-any`
 permits every source. `mount` and `mount-any`, and `umount` and `umount-any`,

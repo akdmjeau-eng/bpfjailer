@@ -276,7 +276,7 @@ TEST(ExecEnforcer, ExecAnyAllowsExecutableAndSharedObjects) {
 TEST(ExecEnforcer, ReadOnlyFilesystemDoesNotDecideExecution) {
   const std::string executable = truePath();
   attachWithFilesystem(
-      "[roles.svc]\n[roles.svc.paths]\n\"/\" = \"RDONLY\"\n" +
+      "[[roles.svc.paths]]\npath = \"/\"\nallow = \"RDONLY\"\n" +
       rule("svc", "/usr/lib64/*", false, false, true) +
       rule("svc", executable, true, false, false));
 

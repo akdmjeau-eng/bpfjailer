@@ -17,10 +17,17 @@ TEST(Policy, ParsesPathModes) {
 
 [roles.svc]
 
-[roles.svc.paths]
-"/etc" = "RDONLY"
-"/var/lib/svc" = "RDWR"
-"/secret" = "NONE"
+[[roles.svc.paths]]
+path = "/etc"
+allow = "RDONLY"
+
+[[roles.svc.paths]]
+path = "/var/lib/svc"
+allow = "RDWR"
+
+[[roles.svc.paths]]
+path = "/secret"
+allow = "NONE"
 )toml");
   ASSERT_OK(policy);
 
@@ -35,8 +42,9 @@ TEST(Policy, RejectsUnknownPathMode) {
 
 [roles.svc]
 
-[roles.svc.paths]
-"/etc" = "RDEXEC"
+[[roles.svc.paths]]
+path = "/etc"
+allow = "RDEXEC"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -45,8 +53,9 @@ TEST(Policy, RejectsUnknownPathMode) {
 }
 
 TEST(Policy, RejectsRecursivePathGlob) {
-  auto policy = Policy::parse(R"toml([roles.svc.paths]
-"/etc/**" = "RDONLY"
+  auto policy = Policy::parse(R"toml([[roles.svc.paths]]
+path = "/etc/**"
+allow = "RDONLY"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -54,16 +63,16 @@ TEST(Policy, RejectsRecursivePathGlob) {
       std::string::npos);
 }
 
-TEST(Policy, RejectsPathList) {
+TEST(Policy, RejectsScalarPathEntry) {
   auto policy = Policy::parse(R"toml([roles]
 
 [roles.svc]
-paths = ["/etc"]
+paths = {"/etc" = "RDONLY"}
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find(
-          "must be a table of path pattern to mode") != std::string::npos);
+      policy.error().message().find("must be an array of rule tables") !=
+      std::string::npos);
 }
 
 TEST(Policy, RejectsDuplicatePaths) {
@@ -72,11 +81,32 @@ TEST(Policy, RejectsDuplicatePaths) {
 
 [roles.svc]
 
-[roles.svc.paths]
-"/etc" = "RDWR"
-"/etc" = "RDONLY"
+[[roles.svc.paths]]
+path = "/etc"
+allow = "RDWR"
+
+[[roles.svc.paths]]
+path = "/etc"
+allow = "RDONLY"
 )toml");
   ASSERT(!policy);
+}
+
+TEST(Policy, AllowsDistinctRootPathRules) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.paths]]
+path = "/"
+allow = "NONE"
+
+[[roles.svc.paths]]
+path = "/*"
+allow = "RDONLY"
+)toml");
+  ASSERT_OK(policy);
+
+  const auto& paths = policy->roles.at("svc").paths;
+  ASSERT(paths.at("/") == FileMode::None);
+  ASSERT(paths.at("/*") == FileMode::ReadOnly);
 }
 
 TEST(Policy, ParsesExecPathPermissions) {
@@ -197,6 +227,23 @@ allow = []
       std::string::npos);
 }
 
+TEST(Policy, AllowsDistinctRootExecPathRules) {
+  auto policy = Policy::parse(
+      R"toml([[roles.svc.exec-paths]]
+path = "/"
+allow = []
+
+[[roles.svc.exec-paths]]
+path = "/*"
+allow = ["exec"]
+)toml");
+  ASSERT_OK(policy);
+
+  const auto& paths = policy->roles.at("svc").execPaths;
+  ASSERT(!paths.at("/").allowExec);
+  ASSERT(paths.at("/*").allowExec);
+}
+
 TEST(Policy, ExecAnyAndExecPathsAreMutuallyExclusive) {
   auto policy = Policy::parse(
       R"toml([roles.svc]
@@ -219,15 +266,21 @@ TEST(Policy, ParsesUnixSocketRules) {
 
 [roles.svc]
 
-[roles.svc.unix-bind]
-"/run/svc" = false
-"@svc-*" = true
+[[roles.svc.unix-bind]]
+path = "/run/svc"
+allow = false
 
-[roles.svc.unix-connect]
-"/run/peer" = true
+[[roles.svc.unix-bind]]
+path = "@svc-*"
+allow = true
 
-[roles.svc.unix-dgram]
-"@log-${UUID}" = false
+[[roles.svc.unix-connect]]
+path = "/run/peer"
+allow = true
+
+[[roles.svc.unix-dgram]]
+path = "@log-${UUID}"
+allow = false
 )toml");
   ASSERT_OK(policy);
 
@@ -243,8 +296,9 @@ TEST(Policy, RejectsUnixSocketRuleWithoutNameKind) {
 
 [roles.svc]
 
-[roles.svc.unix-bind]
-relative = false
+[[roles.svc.unix-bind]]
+path = "relative"
+allow = false
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -258,8 +312,9 @@ TEST(Policy, RejectsNonBooleanUnixSocketRule) {
 
 [roles.svc]
 
-[roles.svc.unix-connect]
-"/run/svc" = "sometimes"
+[[roles.svc.unix-connect]]
+path = "/run/svc"
+allow = "sometimes"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -268,7 +323,8 @@ TEST(Policy, RejectsNonBooleanUnixSocketRule) {
 }
 
 TEST(Policy, RejectsBlankUnixSocketRule) {
-  auto policy = Policy::parse("[roles.svc.unix-dgram]\n\"/dev/log\" =\n");
+  auto policy =
+      Policy::parse("[[roles.svc.unix-dgram]]\npath = \"/dev/log\"\nallow =\n");
   ASSERT(!policy);
 }
 
@@ -278,9 +334,13 @@ TEST(Policy, RejectsCollidingUnixRootRules) {
 
 [roles.svc]
 
-[roles.svc.unix-bind]
-"/" = false
-"/*" = true
+[[roles.svc.unix-bind]]
+path = "/"
+allow = false
+
+[[roles.svc.unix-bind]]
+path = "/*"
+allow = true
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -292,17 +352,37 @@ TEST(Policy, ParsesMountAndUmountRules) {
   auto policy = Policy::parse(
       R"toml([roles]
 
-[roles.svc.mount]
-"/srv/data" = ["ext4", "xfs"]
-"/any-upper" = ["ANY"]
-"/any-lower" = ["any"]
-"/blocked" = []
+[[roles.svc.mount]]
+path = "/srv/data"
+allow = ["ext4", "xfs"]
 
-[roles.svc.umount]
-"/" = "NONE"
-"/srv/data" = "ANY"
-"/run" = "none"
-"/run/service" = "any"
+[[roles.svc.mount]]
+path = "/any-upper"
+allow = ["ANY"]
+
+[[roles.svc.mount]]
+path = "/any-lower"
+allow = ["any"]
+
+[[roles.svc.mount]]
+path = "/blocked"
+allow = []
+
+[[roles.svc.umount]]
+path = "/"
+allow = "NONE"
+
+[[roles.svc.umount]]
+path = "/srv/data"
+allow = "ANY"
+
+[[roles.svc.umount]]
+path = "/run"
+allow = "none"
+
+[[roles.svc.umount]]
+path = "/run/service"
+allow = "any"
 )toml");
   ASSERT_OK(policy);
 
@@ -326,12 +406,13 @@ TEST(Policy, RejectsRelativeMountDestination) {
 
 [roles.svc]
 
-[roles.svc.mount]
-relative = ["tmpfs"]
+[[roles.svc.mount]]
+path = "relative"
+allow = ["tmpfs"]
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be an absolute path") !=
+      policy.error().message().find("must start with '/'") !=
       std::string::npos);
 }
 
@@ -340,8 +421,9 @@ TEST(Policy, RejectsScalarMountFilesystemType) {
 
 [roles.svc]
 
-[roles.svc.mount]
-"/run" = "tmpfs"
+[[roles.svc.mount]]
+path = "/run"
+allow = "tmpfs"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -355,21 +437,26 @@ TEST(Policy, RejectsBooleanUmount) {
 umount = false
 )toml");
   ASSERT(!policy);
-  ASSERT(policy.error().message().find("must be a table") != std::string::npos);
+  ASSERT(
+      policy.error().message().find("must be an array of rule tables") !=
+      std::string::npos);
 }
 
 TEST(Policy, RejectsRelativeUmountPath) {
-  auto policy = Policy::parse(R"toml([roles.svc.umount]
-relative = "ANY"
+  auto policy = Policy::parse(R"toml([[roles.svc.umount]]
+path = "relative"
+allow = "ANY"
 )toml");
   ASSERT(!policy);
   ASSERT(
-      policy.error().message().find("must be absolute") != std::string::npos);
+      policy.error().message().find("must start with '/'") !=
+      std::string::npos);
 }
 
 TEST(Policy, RejectsUnknownUmountPermission) {
-  auto policy = Policy::parse(R"toml([roles.svc.umount]
-"/srv" = "ALLOW"
+  auto policy = Policy::parse(R"toml([[roles.svc.umount]]
+path = "/srv"
+allow = "ALLOW"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -381,8 +468,9 @@ TEST(Policy, MountAndMountAnyAreMutuallyExclusive) {
   auto policy = Policy::parse(R"toml([roles.svc]
 mount-any = true
 
-[roles.svc.mount]
-"/srv" = ["tmpfs"]
+[[roles.svc.mount]]
+path = "/srv"
+allow = ["tmpfs"]
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -393,8 +481,9 @@ TEST(Policy, UmountAndUmountAnyAreMutuallyExclusive) {
   auto policy = Policy::parse(R"toml([roles.svc]
 umount-any = true
 
-[roles.svc.umount]
-"/srv" = "ANY"
+[[roles.svc.umount]]
+path = "/srv"
+allow = "ANY"
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -407,9 +496,13 @@ TEST(Policy, RejectsCollidingMountRootRules) {
 
 [roles.svc]
 
-[roles.svc.mount]
-"/" = []
-"/*" = []
+[[roles.svc.mount]]
+path = "/"
+allow = []
+
+[[roles.svc.mount]]
+path = "/*"
+allow = []
 )toml");
   ASSERT(!policy);
   ASSERT(
@@ -544,11 +637,13 @@ TEST(Policy, MountPathsOverrideAny) {
   auto policy = Policy::parse(R"toml([roles.sandbox]
 any = true
 
-[roles.sandbox.mount]
-"/srv/only" = ["tmpfs"]
+[[roles.sandbox.mount]]
+path = "/srv/only"
+allow = ["tmpfs"]
 
-[roles.sandbox.umount]
-"/srv/only" = "ANY"
+[[roles.sandbox.umount]]
+path = "/srv/only"
+allow = "ANY"
 )toml");
   ASSERT_OK(policy);
 
@@ -563,8 +658,9 @@ TEST(Policy, UnixPathRulesOverrideAny) {
   auto policy = Policy::parse(R"toml([roles.sandbox]
 any = true
 
-[roles.sandbox.unix-bind]
-"/run/only" = true
+[[roles.sandbox.unix-bind]]
+path = "/run/only"
+allow = true
 )toml");
   ASSERT_OK(policy);
 

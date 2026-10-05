@@ -218,11 +218,17 @@ void attach(std::string rules, std::string vars = {}) {
   ASSERT_OK(UnixEnforcer::load(testPins(), policy));
 }
 
+[[nodiscard]] std::string
+rule(std::string_view operation, const std::string& path, bool allow) {
+  return "[[roles.svc." + std::string(operation) + "]]\npath = \"" + path +
+      "\"\nallow = " + (allow ? "true\n" : "false\n");
+}
+
 } // namespace
 
 TEST(UnixEnforcer, LoadPinsEveryHook) {
   Fixture fixture;
-  attach("unix-bind.\"" + fixture.socket() + "\" = false\n");
+  attach(rule("unix-bind", fixture.socket(), false));
 
   ASSERT(linkPinned("bpfj_unix_path_bind"));
   ASSERT(linkPinned("bpfj_unix_abstract_bind"));
@@ -234,7 +240,7 @@ TEST(UnixEnforcer, LoadPinsEveryHook) {
 
 TEST(UnixEnforcer, UnmatchedPathIsDenied) {
   Fixture fixture;
-  attach("unix-bind.\"" + fixture.socket() + "\" = false\n");
+  attach(rule("unix-bind", fixture.socket(), false));
 
   Child actor([&] { return bindPath(fixture.other()); });
   enroll("svc", actor.pid());
@@ -270,8 +276,8 @@ TEST(UnixEnforcer, AnyAllowsUnconfiguredPathOperation) {
 TEST(UnixEnforcer, LongestPathOverridesRootDefault) {
   Fixture fixture;
   attach(
-      "unix-bind.\"/\" = false\nunix-bind.\"" + fixture.socket() +
-      "\" = true\n");
+      rule("unix-bind", "/", false) +
+      rule("unix-bind", fixture.socket(), true));
 
   Child actor([&] {
     const int allowed = bindPath(fixture.socket());
@@ -284,7 +290,7 @@ TEST(UnixEnforcer, LongestPathOverridesRootDefault) {
 TEST(UnixEnforcer, ConnectPolicyUsesServerPath) {
   Fixture fixture;
   const int listener = listenPath(fixture.socket(), SOCK_STREAM);
-  attach("unix-connect.\"" + fixture.socket() + "\" = false\n");
+  attach(rule("unix-connect", fixture.socket(), false));
 
   Child actor([&] { return connectPath(fixture.socket()); });
   enroll("svc", actor.pid());
@@ -295,7 +301,7 @@ TEST(UnixEnforcer, ConnectPolicyUsesServerPath) {
 TEST(UnixEnforcer, DatagramPolicyUsesDestinationPath) {
   Fixture fixture;
   const int receiver = listenPath(fixture.socket(), SOCK_DGRAM);
-  attach("unix-dgram.\"" + fixture.socket() + "\" = false\n");
+  attach(rule("unix-dgram", fixture.socket(), false));
 
   Child actor([&] { return sendPath(fixture.socket()); });
   enroll("svc", actor.pid());
@@ -305,8 +311,8 @@ TEST(UnixEnforcer, DatagramPolicyUsesDestinationPath) {
 
 TEST(UnixEnforcer, AbstractGlobMostSpecificRuleWins) {
   attach(
-      "unix-bind.\"@bpfj-*\" = false\n"
-      "unix-bind.\"@bpfj-allowed\" = true\n");
+      rule("unix-bind", "@bpfj-*", false) +
+      rule("unix-bind", "@bpfj-allowed", true));
 
   Child actor([] {
     const int allowed = bindAbstract("bpfj-allowed");
@@ -318,8 +324,8 @@ TEST(UnixEnforcer, AbstractGlobMostSpecificRuleWins) {
 
 TEST(UnixEnforcer, AbstractGlobBindsPodVariable) {
   attach(
-      "unix-bind.\"@mine-*\" = false\n"
-      "unix-bind.\"@mine-${UUID}\" = true\n",
+      rule("unix-bind", "@mine-*", false) +
+          rule("unix-bind", "@mine-${UUID}", true),
       "vars = [\"UUID\"]\n");
 
   Child matching([] { return bindAbstract("mine-one"); });
@@ -340,7 +346,7 @@ TEST(UnixEnforcer, AbstractConnectPolicyUsesRequestedName) {
   Fixture fixture;
   const std::string name = fixture.abstractName("stream");
   const int listener = listenAbstract(name, SOCK_STREAM);
-  attach("unix-connect.\"@" + name + "\" = false\n");
+  attach(rule("unix-connect", "@" + name, false));
 
   Child actor([&] { return connectAbstract(name); });
   enroll("svc", actor.pid());
@@ -352,7 +358,7 @@ TEST(UnixEnforcer, AbstractDatagramPolicyUsesDestinationName) {
   Fixture fixture;
   const std::string name = fixture.abstractName("dgram");
   const int receiver = listenAbstract(name, SOCK_DGRAM);
-  attach("unix-dgram.\"@" + name + "\" = false\n");
+  attach(rule("unix-dgram", "@" + name, false));
 
   Child actor([&] { return sendAbstract(name); });
   enroll("svc", actor.pid());
@@ -363,8 +369,8 @@ TEST(UnixEnforcer, AbstractDatagramPolicyUsesDestinationName) {
 TEST(UnixEnforcer, OperationsAreIndependent) {
   Fixture fixture;
   attach(
-      "unix-bind.\"" + fixture.socket() + "\" = true\nunix-connect.\"" +
-      fixture.socket() + "\" = false\n");
+      rule("unix-bind", fixture.socket(), true) +
+      rule("unix-connect", fixture.socket(), false));
 
   Child actor([&] { return bindPath(fixture.socket()); });
   enroll("svc", actor.pid());

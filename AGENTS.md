@@ -57,7 +57,7 @@ Most operation gates are denied when absent. The `*-pod` or `keyring-own` option
 
 Executable-code policy is separate from ordinary file access and fs-verity. `exec-paths` controls exec, set-id exec and executable mappings; `exec-any: true` opens those operations. Proc uses the historical fully-open spelling `any-proc`, not `proc-any`.
 
-`paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix pathname, mount, and unmount matchers do not need an explicit root denial; abstract Unix maps do.
+All path-based policy uses arrays of rule tables with `path` and `allow` fields. `paths` is default-deny when absent, uses `NONE`, `RDONLY`, and `RDWR`, and is mutually exclusive with `fs-any`. Unix pathname, mount, and unmount matchers do not need an explicit root denial; abstract Unix rules do.
 
 Every walk over a task's roles requires each role to permit, so one denial denies. `enroll` is checked by bpfjsrv, for root callers too, against the roles the caller already holds.
 

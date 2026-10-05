@@ -243,59 +243,32 @@ constexpr std::string_view kPemEnd = "-----END CERTIFICATE-----";
   return err::unit;
 }
 
-[[nodiscard]] err::Expected<std::map<std::string, FileMode>> parsePaths(
-    const std::string& role,
-    const toml::node* node) noexcept {
-  const std::string what = "role '" + role + "': paths";
-  const auto* table = node != nullptr ? node->as_table() : nullptr;
-  if (table == nullptr) {
-    return err::Error(
-        std::errc::invalid_argument,
-        what + " must be a table of path pattern to mode");
-  }
-  std::map<std::string, FileMode> paths;
-  for (const auto& [key, value] : *table) {
-    const std::string path{key.str()};
-    if (auto valid = validatePathPattern(what, path); valid.hasError()) {
-      return valid.error();
-    }
-    auto mode = parseString(&value, what + " mode for '" + path + "'");
-    if (mode.hasError()) {
-      return mode.error();
-    }
-    FileMode parsed;
-    if (*mode == "NONE") {
-      parsed = FileMode::None;
-    } else if (*mode == "RDONLY") {
-      parsed = FileMode::ReadOnly;
-    } else if (*mode == "RDWR") {
-      parsed = FileMode::ReadWrite;
-    } else {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " mode for '" + path + "' is '" + *mode +
-              "'; expected NONE, RDONLY or RDWR");
-    }
-    paths.emplace(path, parsed);
-  }
-  return paths;
-}
+struct ParsedRule {
+  std::string path;
+  const toml::node* allow;
+};
 
-[[nodiscard]] err::Expected<std::map<std::string, ExecPathPolicy>>
-parseExecPaths(const std::string& role, const toml::node* node) noexcept {
-  const std::string what = "role '" + role + "': exec-paths";
-  const auto* rules = node != nullptr ? node->as_array() : nullptr;
-  if (rules == nullptr) {
+template <typename ValidatePath>
+[[nodiscard]] err::Expected<std::vector<ParsedRule>> parseRuleTables(
+    const std::string& what,
+    const toml::node* node,
+    ValidatePath validatePath,
+    bool rejectRootGlobCollision) noexcept {
+  const auto* nodes = node != nullptr ? node->as_array() : nullptr;
+  if (nodes == nullptr) {
     return err::Error(
         std::errc::invalid_argument, what + " must be an array of rule tables");
   }
-  if (rules->empty()) {
+  if (nodes->empty()) {
     return err::Error(
         std::errc::invalid_argument, what + " must contain at least one rule");
   }
 
-  std::map<std::string, ExecPathPolicy> paths;
-  for (const auto& ruleNode : *rules) {
+  std::vector<ParsedRule> rules;
+  std::set<std::string> seen;
+  bool hasRoot = false;
+  bool hasRootGlob = false;
+  for (const auto& ruleNode : *nodes) {
     const auto* rule = ruleNode.as_table();
     if (rule == nullptr) {
       return err::Error(
@@ -311,38 +284,105 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
       }
     }
 
-    auto pathValue = parseString(findChild(*rule, kPath), what + " rule path");
-    if (pathValue.hasError()) {
-      return pathValue.error();
+    auto parsedPath = parseString(findChild(*rule, kPath), what + " rule path");
+    if (parsedPath.hasError()) {
+      return parsedPath.error();
     }
-    const std::string path = std::move(*pathValue);
-    if (auto valid = validatePathPattern(what, path); valid.hasError()) {
+    if (auto valid = validatePath(*parsedPath); valid.hasError()) {
       return valid.error();
     }
+    if (!seen.insert(*parsedPath).second) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " contains path '" + *parsedPath + "' twice");
+    }
+    hasRoot = hasRoot || *parsedPath == "/";
+    hasRootGlob = hasRootGlob || *parsedPath == "/*";
+    if (rejectRootGlobCollision && hasRoot && hasRootGlob) {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " cannot contain both '/' and '/*'");
+    }
+    rules.push_back(
+        ParsedRule{std::move(*parsedPath), findChild(*rule, kAllow)});
+  }
+  return rules;
+}
 
+[[nodiscard]] err::Expected<std::map<std::string, FileMode>> parsePaths(
+    const std::string& role,
+    const toml::node* node) noexcept {
+  const std::string what = "role '" + role + "': paths";
+  auto rules = parseRuleTables(
+      what,
+      node,
+      [&](const std::string& path) { return validatePathPattern(what, path); },
+      false);
+  if (rules.hasError()) {
+    return rules.error();
+  }
+  std::map<std::string, FileMode> paths;
+  for (const auto& rule : *rules) {
+    auto mode =
+        parseString(rule.allow, what + " rule for '" + rule.path + "': allow");
+    if (mode.hasError()) {
+      return mode.error();
+    }
+    FileMode parsed;
+    if (*mode == "NONE") {
+      parsed = FileMode::None;
+    } else if (*mode == "RDONLY") {
+      parsed = FileMode::ReadOnly;
+    } else if (*mode == "RDWR") {
+      parsed = FileMode::ReadWrite;
+    } else {
+      return err::Error(
+          std::errc::invalid_argument,
+          what + " rule for '" + rule.path + "': allow is '" + *mode +
+              "'; expected NONE, RDONLY or RDWR");
+    }
+    paths.emplace(rule.path, parsed);
+  }
+  return paths;
+}
+
+[[nodiscard]] err::Expected<std::map<std::string, ExecPathPolicy>>
+parseExecPaths(const std::string& role, const toml::node* node) noexcept {
+  const std::string what = "role '" + role + "': exec-paths";
+  auto rules = parseRuleTables(
+      what,
+      node,
+      [&](const std::string& path) { return validatePathPattern(what, path); },
+      false);
+  if (rules.hasError()) {
+    return rules.error();
+  }
+
+  std::map<std::string, ExecPathPolicy> paths;
+  for (const auto& rule : *rules) {
     ExecPathPolicy parsed;
     std::set<std::string> seen;
-    const auto* allowNode = findChild(*rule, kAllow);
     const auto* permissions =
-        allowNode != nullptr ? allowNode->as_array() : nullptr;
+        rule.allow != nullptr ? rule.allow->as_array() : nullptr;
     if (permissions == nullptr) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + path + "': allow must be an array");
+          what + " rule for '" + rule.path + "': allow must be an array");
     }
     for (const auto& permissionNode : *permissions) {
       if (!permissionNode.is_string()) {
         return err::Error(
             std::errc::invalid_argument,
-            what + " rule for '" + path + "': allow entries must be strings");
+            what + " rule for '" + rule.path +
+                "': allow entries must be strings");
       }
       const std::string permission =
           permissionNode.value<std::string>().value();
       if (!seen.insert(permission).second) {
         return err::Error(
             std::errc::invalid_argument,
-            what + " rule for '" + path + "' lists permission '" + permission +
-                "' twice");
+            what + " rule for '" + rule.path + "' lists permission '" +
+                permission + "' twice");
       }
       if (permission == kExec) {
         parsed.allowExec = true;
@@ -353,20 +393,16 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
       } else {
         return err::Error(
             std::errc::invalid_argument,
-            what + " rule for '" + path + "' has unknown permission '" +
+            what + " rule for '" + rule.path + "' has unknown permission '" +
                 permission + "'");
       }
     }
     if (parsed.allowSetuid && !parsed.allowExec) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " rule for '" + path + "': set-id requires exec");
+          what + " rule for '" + rule.path + "': set-id requires exec");
     }
-    if (!paths.emplace(path, parsed).second) {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " contains path '" + path + "' twice");
-    }
+    paths.emplace(rule.path, parsed);
   }
   return paths;
 }
@@ -376,34 +412,32 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
     std::string_view key,
     const toml::node* node) noexcept {
   const std::string what = "role '" + role + "': " + std::string(key);
-  const auto* table = node != nullptr ? node->as_table() : nullptr;
-  if (table == nullptr) {
-    return err::Error(
-        std::errc::invalid_argument,
-        what + " must be a table of socket name to true or false");
+  auto parsedRules = parseRuleTables(
+      what,
+      node,
+      [&](const std::string& path) {
+        if (!path.empty() && path.front() == '@') {
+          return err::Expected<err::Unit>{err::unit};
+        }
+        if (!path.empty() && path.front() == '/') {
+          return validatePathPattern(what, path);
+        }
+        return err::Expected<err::Unit>{err::Error(
+            std::errc::invalid_argument,
+            what + " rule path '" + path + "' must start with '/' or '@'")};
+      },
+      true);
+  if (parsedRules.hasError()) {
+    return parsedRules.error();
   }
   std::map<std::string, bool> rules;
-  bool hasRoot = false;
-  bool hasRootGlob = false;
-  for (const auto& [nameKey, value] : *table) {
-    const std::string name{nameKey.str()};
-    if (name.empty() || (name.front() != '/' && name.front() != '@')) {
+  for (const auto& rule : *parsedRules) {
+    if (rule.allow == nullptr || !rule.allow->is_boolean()) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " key '" + name + "' must start with '/' or '@'");
+          what + " rule for '" + rule.path + "': allow must be true or false");
     }
-    hasRoot = hasRoot || name == "/";
-    hasRootGlob = hasRootGlob || name == "/*";
-    if (hasRoot && hasRootGlob) {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " cannot contain both '/' and '/*'");
-    }
-    auto allowed = parseRoleFlag(role, key, &value);
-    if (allowed.hasError()) {
-      return allowed.error();
-    }
-    rules.emplace(name, *allowed);
+    rules.emplace(rule.path, rule.allow->value<bool>().value());
   }
   return rules;
 }
@@ -411,34 +445,22 @@ parseExecPaths(const std::string& role, const toml::node* node) noexcept {
 [[nodiscard]] err::Expected<std::map<std::string, std::vector<std::string>>>
 parseMountRules(const std::string& role, const toml::node* node) noexcept {
   const std::string what = "role '" + role + "': mount";
-  const auto* table = node != nullptr ? node->as_table() : nullptr;
-  if (table == nullptr) {
-    return err::Error(
-        std::errc::invalid_argument,
-        what + " must be a table of destination path to filesystem type array");
+  auto parsedRules = parseRuleTables(
+      what,
+      node,
+      [&](const std::string& path) { return validatePathPattern(what, path); },
+      true);
+  if (parsedRules.hasError()) {
+    return parsedRules.error();
   }
   std::map<std::string, std::vector<std::string>> rules;
-  bool hasRoot = false;
-  bool hasRootGlob = false;
-  for (const auto& [pathKey, value] : *table) {
-    const std::string path{pathKey.str()};
-    if (path.empty() || path.front() != '/') {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " key '" + path + "' must be an absolute path");
-    }
-    hasRoot = hasRoot || path == "/";
-    hasRootGlob = hasRootGlob || path == "/*";
-    if (hasRoot && hasRootGlob) {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " cannot contain both '/' and '/*'");
-    }
-    const auto* array = value.as_array();
+  for (const auto& rule : *parsedRules) {
+    const auto* array =
+        rule.allow != nullptr ? rule.allow->as_array() : nullptr;
     if (array == nullptr) {
       return err::Error(
           std::errc::invalid_argument,
-          what + " value for '" + path + "' must be an array");
+          what + " rule for '" + rule.path + "': allow must be an array");
     }
     std::vector<std::string> types;
     std::set<std::string> seen;
@@ -446,7 +468,8 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
       if (!typeNode.is_string()) {
         return err::Error(
             std::errc::invalid_argument,
-            what + " filesystem types for '" + path + "' must be strings");
+            what + " rule for '" + rule.path +
+                "': allow entries must be strings");
       }
       std::string type = typeNode.value<std::string>().value();
       if (type.empty() || type.size() >= 64) {
@@ -464,7 +487,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
       }
       types.push_back(type);
     }
-    rules.emplace(path, std::move(types));
+    rules.emplace(rule.path, std::move(types));
   }
   return rules;
 }
@@ -473,31 +496,18 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
     const std::string& role,
     const toml::node* node) noexcept {
   const std::string what = "role '" + role + "': umount";
-  const auto* table = node != nullptr ? node->as_table() : nullptr;
-  if (table == nullptr) {
-    return err::Error(
-        std::errc::invalid_argument,
-        what + " must be a table of mountpoint pattern to NONE or ANY");
+  auto parsedRules = parseRuleTables(
+      what,
+      node,
+      [&](const std::string& path) { return validatePathPattern(what, path); },
+      true);
+  if (parsedRules.hasError()) {
+    return parsedRules.error();
   }
   std::map<std::string, bool> rules;
-  bool hasRoot = false;
-  bool hasRootGlob = false;
-  for (const auto& [pathKey, value] : *table) {
-    const std::string path{pathKey.str()};
-    if (path.empty() || path.front() != '/') {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " path '" + path + "' must be absolute");
-    }
-    hasRoot = hasRoot || path == "/";
-    hasRootGlob = hasRootGlob || path == "/*";
-    if (hasRoot && hasRootGlob) {
-      return err::Error(
-          std::errc::invalid_argument,
-          what + " cannot contain both '/' and '/*'");
-    }
+  for (const auto& rule : *parsedRules) {
     auto permission =
-        parseString(&value, what + " permission for '" + path + "'");
+        parseString(rule.allow, what + " rule for '" + rule.path + "': allow");
     if (permission.hasError()) {
       return permission.error();
     }
@@ -509,10 +519,10 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
     } else {
       return err::Error(
           std::errc::invalid_argument,
-          what + " permission for '" + path + "' is '" + *permission +
+          what + " rule for '" + rule.path + "': allow is '" + *permission +
               "'; expected NONE or ANY");
     }
-    rules.emplace(path, allowed);
+    rules.emplace(rule.path, allowed);
   }
   return rules;
 }
