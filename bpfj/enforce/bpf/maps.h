@@ -102,14 +102,9 @@ static __always_inline void bpfj_pod_refs_dec(struct bpfj_pod __arena* pod) {
   if (__sync_fetch_and_sub(&pod->refs, 1) <= 1) {
     if (bpfj_heap_enabled) {
       bpfj_heap_use_arena();
-      struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
-      BPFJ_LOCK_GUARD(heap_lock, &ctrl->lock);
-      if (BPFJ_LOCK_IS_ACQUIRED(heap_lock)) {
-        BPFJ_HEAP_FREE(pod);
-      } else {
-        BPFJ_LOG_ERR(
-            EBUSY, "Leaking pod variables after arena lock contention");
-      }
+      // Prelocking makes bpfj_heap_free's nested trylock fail and leaks the
+      // pod.
+      BPFJ_HEAP_FREE(pod);
     }
   }
 }

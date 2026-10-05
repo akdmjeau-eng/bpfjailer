@@ -3,7 +3,9 @@
 #include "tests/Enforce.h"
 #include "tests/Harness.h"
 
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 #include "bpfj/enforce/ArenaMap.h"
@@ -12,6 +14,11 @@
 #include "bpfj/lib/Heap.h"
 
 namespace heap = bpfjailer::heap;
+using bpfjailer::test::Child;
+using bpfjailer::test::enroll;
+using bpfjailer::test::loadJailer;
+using bpfjailer::test::policyOf;
+using bpfjailer::test::testPins;
 
 namespace {
 
@@ -77,6 +84,34 @@ TEST(Heap, UserspaceGrowMakesLaterAllocsSucceed) {
     ASSERT_EQ(heap::free(arena.base, off), 0);
   }
   ASSERT_EQ(arena.ctrl->current_used, 0U);
+}
+
+TEST(Heap, LastPodReferenceReturnsAllocationToArena) {
+  loadJailer(policyOf(R"toml([roles]
+
+[roles.svc]
+)toml"));
+
+  auto arena = bpfjailer::PodArena::open(testPins());
+  ASSERT(arena.hasValue());
+  const auto used = [&] {
+    return __atomic_load_n(&arena->ctrl()->current_used, __ATOMIC_ACQUIRE);
+  };
+  const auto usedBefore = used();
+
+  {
+    Child actor;
+    enroll("svc", actor.pid());
+    ASSERT(used() > usedBefore);
+    ASSERT_EQ(actor.run(), 0);
+  }
+
+  using namespace std::chrono_literals;
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (used() != usedBefore && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  ASSERT_EQ(used(), usedBefore);
 }
 
 TEST(ArenaMap, IndependentPinTreesUseDifferentSlots) {
