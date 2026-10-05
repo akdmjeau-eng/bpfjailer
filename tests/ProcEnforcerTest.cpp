@@ -37,7 +37,7 @@ namespace {
 constexpr std::string_view kPolicy = R"toml([roles.default-deny]
 
 [roles.unrestricted]
-any-proc = true
+proc-any = true
 
 [roles.same-pod]
 proc-pod = true
@@ -227,7 +227,7 @@ TEST(ProcEnforcer, EnforcesPodRoleAndAnyPolicies) {
 
   ASSERT_EQ(
       runIsolated(
-          "any-proc reaches an unowned task",
+          "proc-any reaches an unowned task",
           [] {
             Child target;
             enroll("unrestricted", ::getpid());

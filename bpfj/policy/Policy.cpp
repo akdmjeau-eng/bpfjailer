@@ -52,7 +52,7 @@ constexpr std::string_view kPtraceRoles = "ptrace-roles";
 constexpr std::string_view kPtraceAny = "ptrace-any";
 constexpr std::string_view kProcPod = "proc-pod";
 constexpr std::string_view kProcRoles = "proc-roles";
-constexpr std::string_view kAnyProc = "any-proc";
+constexpr std::string_view kProcAny = "proc-any";
 constexpr std::string_view kKeyringOwn = "keyring-own";
 constexpr std::string_view kKeyringRoles = "keyring-roles";
 constexpr std::string_view kKeyringAny = "keyring-any";
@@ -705,7 +705,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
         kShmSysvPod,    kShmSysvRoles, kShmSysvAny,      kShmPosixPod,
         kShmPosixRoles, kShmPosixAny,  kShmPosixPattern, kKillPod,
         kKillRoles,     kKillAny,      kPtracePod,       kPtraceRoles,
-        kPtraceAny,     kProcPod,      kProcRoles,       kAnyProc,
+        kPtraceAny,     kProcPod,      kProcRoles,       kProcAny,
         kKeyringOwn,    kKeyringRoles, kKeyringAny,      kEnrollRoles,
         kEnrollAny,     kUnprivEnroll, kOverrideStacked, kUntrackedBpf,
         kMinSeq,        kUnixBind,     kUnixConnect,     kUnixDgram,
@@ -928,7 +928,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
          kPtraceAny,
          &policy.ptrace,
          &policy.ptraceMode},
-        {kProcPod, kProcRoles, kAnyProc, &policy.proc, &policy.procMode},
+        {kProcPod, kProcRoles, kProcAny, &policy.proc, &policy.procMode},
         {kKeyringOwn,
          kKeyringRoles,
          kKeyringAny,
@@ -1037,7 +1037,7 @@ parseMountRules(const std::string& role, const toml::node* node) noexcept {
     inheritAny(
         policy.procMode,
         findChild(*body, kProcPod) || findChild(*body, kProcRoles) ||
-            findChild(*body, kAnyProc));
+            findChild(*body, kProcAny));
     inheritAny(
         policy.keyringMode,
         findChild(*body, kKeyringOwn) || findChild(*body, kKeyringRoles) ||

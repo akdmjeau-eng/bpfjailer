@@ -12,7 +12,7 @@
 //   option absent  may not act at all
 //   *-pod          may act only inside its own pod
 //   *-roles [a,b]  that, and on a process whose roles are all in {a, b}
-//   *-any           unrestricted (`any-proc` for proc)
+//   *-any           unrestricted
 //
 // Acting inside the restricting role's *own* pod is always allowed, a pod
 // being one jail instance -- not any pod the two share, since a base role puts

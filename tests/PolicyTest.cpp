@@ -693,7 +693,7 @@ proc-pod = true
   ASSERT(role.procMode == AccessMode::Pod);
 }
 
-TEST(Policy, ParsesProcRolesAndAnyProc) {
+TEST(Policy, ParsesProcRolesAndProcAny) {
   auto policy = Policy::parse(
       R"toml([roles.reader]
 proc-roles = ["target"]
@@ -701,7 +701,7 @@ proc-roles = ["target"]
 [roles.target]
 
 [roles.monitor]
-any-proc = true
+proc-any = true
 )toml");
   ASSERT_OK(policy);
 
@@ -715,12 +715,23 @@ any-proc = true
 TEST(Policy, ProcScopesAreMutuallyExclusive) {
   auto policy = Policy::parse(
       R"toml([roles.muddled]
-any-proc = true
+proc-any = true
 proc-roles = ["muddled"]
 )toml");
   ASSERT(policy.hasError());
   ASSERT(
       policy.error().message().find("mutually exclusive") != std::string::npos);
+}
+
+TEST(Policy, RejectsLegacyAnyProcSpelling) {
+  auto policy = Policy::parse(
+      R"toml([roles.reader]
+any-proc = true
+)toml");
+  ASSERT(policy.hasError());
+  ASSERT(
+      policy.error().message().find("unknown option 'any-proc'") !=
+      std::string::npos);
 }
 
 TEST(Policy, ExplicitFalseOverridesAny) {

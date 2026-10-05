@@ -236,8 +236,8 @@ denied when their option is absent or no path matches. Abstract Unix-socket
 names remain opt-in filters, so an unconfigured or unmatched abstract name is
 allowed.
 
-The fully open proc option is named `any-proc`; the other ownership families
-use the `*-any` order.
+The fully open proc option is `proc-any`, following the same `*-any` order as
+the other ownership families.
 
 `any = true` opens every operation that has no more specific option. This is
 useful for a pod used only for attribution. A scoped option such as `bpf-pod`,

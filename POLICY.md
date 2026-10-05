@@ -54,8 +54,7 @@ Most resource families use one of three mutually exclusive scopes:
 
 Leaving a scoped family unconfigured denies it. `any: true` supplies the open
 form for every family not configured more narrowly. `keyring-own` is the
-role-owned equivalent of `*-pod`. Proc's fully open option is spelled
-`any-proc`; every other scoped family uses the `*-any` spelling.
+role-owned equivalent of `*-pod`.
 
 A task holding several roles must be allowed by each role, newest first.
 `override-stacked: true` stops that actor-side walk at the marked role. It
@@ -72,7 +71,7 @@ never short-circuits the target-role checks for `kill` or `ptrace`.
 | Kernel loading | `lkm-any` | Permit module and kexec image loading; absence denies both. |
 | Signals | `kill-pod`, `kill-roles`, `kill-any` | Gate signals by target pod/role. |
 | Ptrace | `ptrace-pod`, `ptrace-roles`, `ptrace-any` | Gate attach and `PTRACE_TRACEME`; read-only inspection used by tools such as `ps` is not gated. |
-| Process files | `proc-pod`, `proc-roles`, `any-proc` | Gate access to another task through procfs after resolving its pid in that proc mount's pid namespace. |
+| Process files | `proc-pod`, `proc-roles`, `proc-any` | Gate access to another task through procfs after resolving its pid in that proc mount's pid namespace. |
 | Keyrings | `keyring-own`, `keyring-roles`, `keyring-any` | Gate writes to role fs-verity keyrings. |
 | System V queues | `mq-sysv-pod`, `mq-sysv-roles`, `mq-sysv-any` | Gate lookup, control, send and receive by tracked owner. |
 | POSIX queues | `mq-posix-pod`, `mq-posix-roles`, `mq-posix-any`, `mq-posix-pattern` | Gate open, descriptor receipt and queue operations by owner or name pattern. |
