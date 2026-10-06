@@ -681,7 +681,15 @@ __noinline long bpfj_file_match_cached_move_up(
           parent_mount ? (uintptr_t)&parent_mount->mnt : 0;
       if (mountpoint == (uintptr_t)parent) {
         BPFJ_DBG_LOG("file_match_cached: Reached root mount");
-        return mountpoint == root ? 1 : 0;
+        // PID 1 supplies both the namespace and policy root, so its
+        // self-parented mount is authoritative even when stacked root mounts
+        // give it a different dentry alias.
+        if (mountpoint == root || parent_mount == curr_mount) {
+          return 1;
+        }
+        state->mount = parent_mount_vfsmnt;
+        state->walk_next = mountpoint;
+        return 0;
       }
 
       bool parent_is_subvol_root =
@@ -708,6 +716,10 @@ __noinline long bpfj_file_match_cached_move_up(
         }
         if (mountpoint == (uintptr_t)parent) {
           BPFJ_DBG_LOG("file_match_cached: Reached root mount");
+          if (parent_mount == curr_mount) {
+            return 1;
+          }
+          state->walk_next = mountpoint;
           return 0;
         }
 
@@ -733,8 +745,12 @@ __noinline long bpfj_file_match_cached_move_up(
     if (ret == 0) {
       uintptr_t mountpoint = state->mount_fallback.mountpoint;
       state->mount = state->mount_fallback.parent_vfsmount;
-      if (mountpoint == root || mountpoint == (uintptr_t)parent) {
-        return mountpoint == root ? 1 : 0;
+      if (mountpoint == root) {
+        return 1;
+      }
+      if (mountpoint == (uintptr_t)parent) {
+        state->walk_next = mountpoint;
+        return 0;
       }
       state->walk_next = mountpoint;
       return 0;
